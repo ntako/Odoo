@@ -66,6 +66,101 @@ class AmazonSyncLog(models.Model):
             'target': 'current',
         }
 
+    def action_mark_done(self):
+        self.ensure_one()
+        self.write({'state': 'done', 'end_date': fields.Datetime.now()})
+
+    def action_export_csv(self):
+        import base64
+        import csv
+        import io
+        import re
+
+        self.ensure_one()
+
+        # Pattern delle righe del log di riconciliazione
+        patterns = [
+            ('OK',          re.compile(r'^\[OK\]\s+(.+?)\s+SKU=(\S+)\s+stato=(\S+)\s+prezzo=([\d.]+)€$')),
+            ('SOLO_ODOO',   re.compile(r'^\[SOLO ODOO\]\s+(.+?)\s+SKU=(\S+)')),
+            ('SOLO_AMAZON', re.compile(r'^\[SOLO AMAZON\]\s+SKU=(\S+)\s+ASIN=(\S+)\s+"(.*)"$')),
+            ('ERRORE',      re.compile(r'^\[ERRORE\]\s+(?:variante\s+)?SKU=(\S+):\s+(.+)$')),
+        ]
+
+        rows = []
+        for line in (self.log_lines or '').splitlines():
+            line = line.strip()
+            if not line or line.startswith('Store Amazon:') or line.startswith('Download') or line.startswith('Riepilogo'):
+                continue
+
+            if line.startswith('[OK]'):
+                m = patterns[0][1].match(line)
+                if m:
+                    rows.append({
+                        'tipo': 'OK',
+                        'nome': m.group(1),
+                        'sku': m.group(2),
+                        'asin': '',
+                        'stato_amazon': m.group(3),
+                        'prezzo_amazon': m.group(4),
+                        'note': '',
+                    })
+            elif line.startswith('[SOLO ODOO]'):
+                m = patterns[1][1].match(line)
+                if m:
+                    rows.append({
+                        'tipo': 'SOLO_ODOO',
+                        'nome': m.group(1),
+                        'sku': m.group(2),
+                        'asin': '',
+                        'stato_amazon': '',
+                        'prezzo_amazon': '',
+                        'note': 'Presente in Odoo ma non trovato su Amazon',
+                    })
+            elif line.startswith('[SOLO AMAZON]'):
+                m = patterns[2][1].match(line)
+                if m:
+                    rows.append({
+                        'tipo': 'SOLO_AMAZON',
+                        'nome': m.group(3),
+                        'sku': m.group(1),
+                        'asin': m.group(2),
+                        'stato_amazon': '',
+                        'prezzo_amazon': '',
+                        'note': 'Presente su Amazon ma non importato in Odoo',
+                    })
+            elif line.startswith('[ERRORE]'):
+                m = patterns[3][1].match(line)
+                if m:
+                    rows.append({
+                        'tipo': 'ERRORE',
+                        'nome': '',
+                        'sku': m.group(1),
+                        'asin': '',
+                        'stato_amazon': '',
+                        'prezzo_amazon': '',
+                        'note': m.group(2),
+                    })
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=['tipo', 'nome', 'sku', 'asin', 'stato_amazon', 'prezzo_amazon', 'note'],
+                                delimiter=';')
+        writer.writeheader()
+        writer.writerows(rows)
+
+        filename = f'riconciliazione_amazon_{self.id}.csv'
+        attachment = self.env['ir.attachment'].create({
+            'name': filename,
+            'type': 'binary',
+            'datas': base64.b64encode(('﻿' + buf.getvalue()).encode('utf-8')).decode(),
+            'res_model': self._name,
+            'res_id': self.id,
+        })
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content/{attachment.id}/{filename}?download=true',
+            'target': 'self',
+        }
+
     def action_stop_import(self):
         self.ensure_one()
         params = self.env['ir.config_parameter'].sudo()

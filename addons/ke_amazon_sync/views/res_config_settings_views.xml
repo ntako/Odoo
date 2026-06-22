@@ -89,8 +89,8 @@
                                 </div>
                             </div>
                         </setting>
-                        <setting string="Riconciliazione store"
-                                 help="Confronta i prodotti Odoo con i listing attivi sul tuo store Amazon: aggiorna stato e prezzo, segnala prodotti non importati.">
+                        <setting string="Riconciliazione store (sola lettura da Amazon)"
+                                 help="Legge i listing del tuo store Amazon senza modificarli. Aggiorna in Odoo lo stato e il prezzo dei prodotti collegati, e segnala nel log i prodotti presenti su Amazon ma non ancora importati.">
                             <field name="amazon_cron_reconcile_active"/>
                             <div class="row mt8 align-items-center">
                                 <label for="amazon_sync_reconcile_interval" class="col-auto o_light_label"/>

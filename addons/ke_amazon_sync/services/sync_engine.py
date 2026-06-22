@@ -1338,6 +1338,9 @@ class SyncEngine:
         - SKU in Odoo NON trovato su Amazon → marca x_amazon_status='inactive'
         - SKU su Amazon senza corrispondente in Odoo → segnalato nel log
         """
+        log_rec.write({'log_lines': 'Download listing da Amazon in corso...'})
+        self.env.cr.commit()
+
         amazon_by_sku = {}
         for item in self.client.iter_seller_skus():
             parsed = _parse_listing(item)
@@ -1348,6 +1351,8 @@ class SyncEngine:
         total_amazon = len(amazon_by_sku)
         lines = [f'Store Amazon: {total_amazon} listing trovati.']
         _log.info('Riconciliazione: %d listing su Amazon', total_amazon)
+        log_rec.write({'log_lines': lines[0]})
+        self.env.cr.commit()
 
         simple_products = self.env['product.template'].search([('x_amazon_sku', '!=', False)])
         variant_products = self.env['product.product'].search([('x_amazon_sku', '!=', False)])

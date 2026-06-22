@@ -224,25 +224,30 @@ class ResConfigSettings(models.TransientModel):
 
     @api.model
     def _thread_reconcile_store(self, db, uid, ctx, log_id):
-        from odoo import api as odoo_api, registry as odoo_registry
-        from ..services.sp_api_client import SpApiClient
-        from ..services.sync_engine import SyncEngine
+        try:
+            from odoo import api as odoo_api
+            from odoo.modules.registry import Registry as odoo_registry
+            from ..services.sp_api_client import SpApiClient
+            from ..services.sync_engine import SyncEngine
 
-        with odoo_registry(db).cursor() as cr:
-            env = odoo_api.Environment(cr, uid, ctx)
-            log_rec = env['ke.amazon.sync.log'].browse(log_id)
-            try:
-                engine = SyncEngine(env, SpApiClient(env))
-                engine.reconcile_store(log_rec)
-            except Exception as exc:
-                _log.error('Thread reconcile_store fallito: %s', exc, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(exc),
-                               'end_date': datetime.now()})
-                cr.commit()
+            with odoo_registry(db).cursor() as cr:
+                env = odoo_api.Environment(cr, uid, ctx)
+                log_rec = env['ke.amazon.sync.log'].browse(log_id)
+                try:
+                    engine = SyncEngine(env, SpApiClient(env))
+                    engine.reconcile_store(log_rec)
+                except Exception as exc:
+                    _log.error('Thread reconcile_store fallito: %s', exc, exc_info=True)
+                    log_rec.write({'state': 'error', 'error_summary': str(exc),
+                                   'end_date': datetime.now()})
+                    cr.commit()
+        except Exception as exc:
+            _log.error('Thread reconcile_store: errore critico: %s', exc, exc_info=True)
 
     @api.model
     def _thread_download_images(self, db, uid, ctx, log_id):
-        from odoo import api as odoo_api, registry as odoo_registry
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
         from ..services.sp_api_client import SpApiClient
         from ..services.sync_engine import SyncEngine
 
@@ -261,7 +266,8 @@ class ResConfigSettings(models.TransientModel):
 
     @api.model
     def _thread_check_new(self, db, uid, ctx, log_id):
-        from odoo import api as odoo_api, registry as odoo_registry
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
         from ..services.sp_api_client import SpApiClient
         from ..services.sync_engine import SyncEngine
 
@@ -281,7 +287,8 @@ class ResConfigSettings(models.TransientModel):
 
     @api.model
     def _thread_sync_price_qty(self, db, uid, ctx, log_id):
-        from odoo import api as odoo_api, registry as odoo_registry
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
         from ..services.sp_api_client import SpApiClient
         from ..services.sync_engine import SyncEngine
 

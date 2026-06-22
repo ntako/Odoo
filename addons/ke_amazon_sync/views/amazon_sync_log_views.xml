@@ -39,6 +39,17 @@
                             class="btn-danger"
                             invisible="state != 'running' or sync_type != 'full_import'"
                             confirm="Vuoi fermare l'import? I prodotti già importati verranno mantenuti."/>
+                    <button name="action_mark_done"
+                            string="Segna come terminato"
+                            type="object"
+                            class="btn-danger"
+                            invisible="state != 'running' or sync_type == 'full_import'"
+                            confirm="Segna questo log come terminato (usa se il processo si è bloccato)."/>
+                    <button name="action_export_csv"
+                            string="Esporta CSV"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="sync_type != 'reconcile' or state == 'running'"/>
                     <field name="state" widget="statusbar"
                            statusbar_visible="running,done,error"/>
                 </header>
