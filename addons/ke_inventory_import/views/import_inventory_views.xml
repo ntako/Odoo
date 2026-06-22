@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ================================================================
+         Field mapping line inline view (editable tree inside the job form)
+    ================================================================ -->
+    <record id="view_inventory_field_mapping_line_tree" model="ir.ui.view">
+        <field name="name">inventory.field.mapping.line.tree</field>
+        <field name="model">inventory.field.mapping.line</field>
+        <field name="arch" type="xml">
+            <list editable="bottom" string="Mapping colonne">
+                <field name="target" string="Campo destinazione" readonly="1"/>
+                <field name="csv_column" string="Colonna CSV nel file"/>
+                <field name="default_value" string="Valore di default"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ================================================================
+         Preset form view
+    ================================================================ -->
+    <record id="view_inventory_mapping_preset_form" model="ir.ui.view">
+        <field name="name">inventory.mapping.preset.form</field>
+        <field name="model">inventory.mapping.preset</field>
+        <field name="arch" type="xml">
+            <form string="Mapping Preset">
+                <sheet>
+                    <group>
+                        <field name="name" string="Nome preset"/>
+                    </group>
+                    <group string="Rileva colonne dal file">
+                        <group>
+                            <field name="csv_file_id"
+                                   string="File CSV (libreria)"
+                                   options="{'no_create': True}"
+                                   placeholder="Seleziona dalla libreria..."/>
+                            <field name="delimiter" string="Delimitatore"/>
+                        </group>
+                        <group>
+                            <field name="csv_columns" string="Colonne rilevate" readonly="1"/>
+                            <field name="weight_unit" string="Unità peso"/>
+                            <field name="volume_unit" string="Unità dimensioni (volume)"/>
+                        </group>
+                        <div colspan="2">
+                            <button name="action_parse_sample"
+                                    string="Rileva colonne e genera mapping"
+                                    type="object"
+                                    icon="fa-magic"
+                                    class="btn btn-secondary"
+                                    invisible="not csv_file_id"/>
+                        </div>
+                    </group>
+                    <field name="line_ids" nolabel="1">
+                        <list editable="bottom" string="Mapping colonne">
+                            <field name="sequence" widget="handle"/>
+                            <field name="target" string="Campo destinazione"/>
+                            <field name="csv_column" string="Colonna CSV"/>
+                            <field name="default_value" string="Valore di default"/>
+                        </list>
+                    </field>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_inventory_mapping_preset_list" model="ir.ui.view">
+        <field name="name">inventory.mapping.preset.list</field>
+        <field name="model">inventory.mapping.preset</field>
+        <field name="arch" type="xml">
+            <list string="Mapping Preset">
+                <field name="name" string="Nome"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ================================================================
+         Save Preset wizard form
+    ================================================================ -->
+    <record id="view_inventory_mapping_preset_save_wizard_form" model="ir.ui.view">
+        <field name="name">inventory.mapping.preset.save.wizard.form</field>
+        <field name="model">inventory.mapping.preset.save.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Salva come Preset">
+                <group>
+                    <field name="job_id" invisible="1"/>
+                    <field name="preset_id" string="Sovrascrivi preset esistente (opzionale)"/>
+                    <field name="name" string="Nome preset"/>
+                </group>
+                <footer>
+                    <button name="action_save"
+                            string="Salva"
+                            type="object"
+                            class="btn-primary"/>
+                    <button string="Annulla" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <!-- ================================================================
+         Job form: setup (queued) + monitor (running/done/error)
+    ================================================================ -->
+    <record id="view_inventory_import_job_form" model="ir.ui.view">
+        <field name="name">inventory.import.job.form</field>
+        <field name="model">inventory.import.job</field>
+        <field name="arch" type="xml">
+            <form string="Import CSV">
+                <header>
+                    <button name="action_run"
+                            string="Avvia Import"
+                            type="object"
+                            class="btn-primary"
+                            invisible="state != 'queued'"/>
+                    <button name="action_refresh"
+                            string="Aggiorna"
+                            type="object"
+                            invisible="state != 'running'"/>
+                    <button name="action_cancel"
+                            string="Termina Import"
+                            type="object"
+                            icon="fa-stop"
+                            class="btn-danger"
+                            confirm="Vuoi davvero interrompere l'import in corso? I dati già elaborati verranno conservati."
+                            invisible="state != 'running'"/>
+                    <button name="action_download_report"
+                            string="Scarica Report"
+                            type="object"
+                            icon="fa-download"
+                            invisible="not report_attachment_id"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="queued,running,done,cancelled"/>
+                </header>
+                <sheet>
+                    <!-- Info box when queued -->
+                    <div class="alert alert-info" role="alert"
+                         invisible="state != 'queued'">
+                        <strong>CSV Format:</strong>
+                        <ul>
+                            <li>Colonne richieste: <b>SAP</b>, <b>SAP Description</b></li>
+                            <li>Prezzi: <b>List Price</b> / <b>Sales Price</b>, <b>Cost</b></li>
+                            <li>Quantità: <b>Qty</b> / <b>Quantity</b> / <b>Stock</b></li>
+                            <li>Lotto: <b>Lot</b> / <b>Lot Number</b> / <b>Serial</b></li>
+                            <li>Con <b>Mapping personalizzato</b> puoi usare qualsiasi nome di colonna</li>
+                        </ul>
+                    </div>
+                    <!-- Auto-refresh polling (invisible, active only when running) -->
+                    <widget name="ke_auto_refresh"/>
+
+                    <!-- Running banner -->
+                    <div class="alert alert-warning" role="alert"
+                         invisible="state != 'running'">
+                        <strong>Import in esecuzione in background.</strong>
+                        La pagina si aggiorna automaticamente ogni 5 secondi.
+                    </div>
+                    <!-- Error banner -->
+                    <div class="alert alert-danger" role="alert"
+                         invisible="state != 'error'">
+                        <strong>Import terminato con errore.</strong>
+                        Consulta il log qui sotto.
+                    </div>
+                    <!-- Done banner -->
+                    <div class="alert alert-success" role="alert"
+                         invisible="state != 'done'">
+                        <strong>Import completato.</strong>
+                    </div>
+                    <!-- Cancelled banner -->
+                    <div class="alert alert-warning" role="alert"
+                         invisible="state != 'cancelled'">
+                        <strong>Import annullato dall'utente.</strong>
+                        I prodotti già elaborati prima dell'annullamento sono stati salvati.
+                    </div>
+
+                    <!-- ── Setup section (queued only) ─────────────────────────── -->
+                    <group invisible="state != 'queued'">
+                        <group string="File">
+                            <field name="csv_file_id"
+                                   string="File CSV"
+                                   options="{'no_create': True}"
+                                   placeholder="Seleziona dalla libreria..."
+                                   required="1"/>
+                            <field name="file_name" invisible="1"/>
+                            <field name="delimiter"/>
+                        </group>
+                        <group string="Opzioni">
+                            <field name="update_existing"      invisible="images_only"/>
+                            <field name="import_attributes"    invisible="images_only"/>
+                            <field name="import_descriptions"  invisible="images_only"/>
+                            <field name="import_tracking"      invisible="images_only"/>
+                            <field name="import_qty"           invisible="images_only"/>
+                            <field name="location_id"
+                                   invisible="images_only or not import_qty"
+                                   required="import_qty and not images_only"/>
+                            <field name="images_only"/>
+                            <field name="image_delay"/>
+                            <field name="max_workers"
+                                   string="Worker scrittura DB"/>
+                            <field name="image_workers"
+                                   string="Worker download immagini"/>
+                        </group>
+                    </group>
+
+                    <!-- ── Mapping section (queued only) ──────────────────────── -->
+                    <group string="Mapping colonne CSV" invisible="state != 'queued'">
+                        <group>
+                            <field name="preset_id"
+                                   string="Preset mapping"
+                                   options="{'no_create': True}"
+                                   placeholder="Seleziona un preset..."/>
+                            <field name="weight_unit"
+                                   string="Unità peso"
+                                   invisible="not use_custom_mapping"/>
+                            <field name="volume_unit"
+                                   string="Unità dimensioni (volume)"
+                                   invisible="not use_custom_mapping"/>
+                        </group>
+                        <group>
+                            <field name="use_custom_mapping" string="Mapping personalizzato"/>
+                        </group>
+                        <div colspan="2" invisible="not csv_file_id">
+                            <button name="action_parse_headers"
+                                    string="Rileva colonne dal CSV e genera mapping"
+                                    type="object"
+                                    icon="fa-magic"
+                                    class="btn btn-secondary"/>
+                        </div>
+                    </group>
+
+                    <field name="mapping_line_ids"
+                           widget="one2many"
+                           invisible="state != 'queued' or not use_custom_mapping"
+                           nolabel="1"
+                           context="{'default_job_id': id}">
+                        <list editable="bottom" string="Mapping colonne">
+                            <field name="sequence" widget="handle"/>
+                            <field name="target" string="Campo destinazione"/>
+                            <field name="csv_column" string="Colonna CSV"/>
+                            <field name="default_value" string="Valore di default"/>
+                        </list>
+                    </field>
+
+                    <!-- Save as preset button -->
+                    <div invisible="state != 'queued' or not use_custom_mapping or not mapping_line_ids">
+                        <button name="action_save_as_preset"
+                                string="Salva mapping come preset"
+                                type="object"
+                                icon="fa-save"
+                                class="btn btn-secondary"/>
+                    </div>
+
+                    <!-- ── Progress section (running/done/error) ──────────────── -->
+                    <group invisible="state == 'queued'">
+                        <group string="Dettagli">
+                            <field name="file_name"    readonly="1"/>
+                            <field name="started_at"   readonly="1"/>
+                            <field name="completed_at" readonly="1"/>
+                        </group>
+                        <group string="Progresso">
+                            <field name="total_count"     readonly="1"/>
+                            <field name="processed_count" readonly="1"/>
+                            <field name="import_count"    readonly="1"/>
+                            <field name="updated_count"   readonly="1"/>
+                            <field name="skipped_count"   readonly="1"/>
+                        </group>
+                    </group>
+
+                    <group string="Log Errori" invisible="not error_log">
+                        <field name="error_log" widget="text" nolabel="1" readonly="1"/>
+                    </group>
+                    <field name="report_attachment_id" invisible="1"/>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ================================================================
+         Job list view
+    ================================================================ -->
+    <record id="view_inventory_import_job_list" model="ir.ui.view">
+        <field name="name">inventory.import.job.list</field>
+        <field name="model">inventory.import.job</field>
+        <field name="arch" type="xml">
+            <list string="Import Jobs"
+                  js_class="ke_jobs_list"
+                  decoration-success="state == 'done'"
+                  decoration-warning="state == 'running' or state == 'cancelled'"
+                  decoration-danger="state == 'error'">
+                <field name="create_date"     string="Data"/>
+                <field name="file_name"       string="File"/>
+                <field name="use_custom_mapping" string="Mapping custom"/>
+                <field name="preset_id"       string="Preset"/>
+                <field name="state"/>
+                <field name="total_count"     string="Totale"/>
+                <field name="processed_count" string="Elaborate"/>
+                <field name="import_count"    string="Create"/>
+                <field name="updated_count"   string="Aggiornate"/>
+                <field name="skipped_count"   string="Saltate"/>
+                <field name="started_at"      string="Avviato"/>
+                <field name="completed_at"    string="Completato"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ================================================================
+         CSV File Library: list + form
+    ================================================================ -->
+    <record id="view_inventory_csv_file_list" model="ir.ui.view">
+        <field name="name">inventory.csv.file.list</field>
+        <field name="model">inventory.csv.file</field>
+        <field name="arch" type="xml">
+            <list string="Libreria CSV"
+                  decoration-muted="not file_data">
+                <field name="name" string="Nome"/>
+                <field name="file_name" string="File originale"/>
+                <field name="delimiter" string="Delimitatore"/>
+                <field name="upload_date" string="Data upload"/>
+                <field name="notes" string="Note"/>
+                <button name="action_create_job"
+                        string="Usa per Import"
+                        type="object"
+                        icon="fa-upload"
+                        class="btn btn-sm btn-secondary"/>
+                <button name="action_create_preset"
+                        string="Crea Preset"
+                        type="object"
+                        icon="fa-magic"
+                        class="btn btn-sm btn-secondary"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_inventory_csv_file_form" model="ir.ui.view">
+        <field name="name">inventory.csv.file.form</field>
+        <field name="model">inventory.csv.file</field>
+        <field name="arch" type="xml">
+            <form string="File CSV">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name" string="Nome"/>
+                            <field name="file_data" filename="file_name" string="File CSV"
+                                   widget="csv_upload"/>
+                            <field name="file_name" invisible="1"/>
+                            <field name="delimiter" string="Delimitatore"/>
+                        </group>
+                        <group>
+                            <field name="upload_date" string="Data upload" readonly="1"/>
+                            <field name="notes" string="Note"/>
+                        </group>
+                    </group>
+                    <div>
+                        <button name="action_create_job"
+                                string="Usa per Import"
+                                type="object"
+                                icon="fa-upload"
+                                class="btn btn-primary"
+                                invisible="not file_data"/>
+                        <button name="action_create_preset"
+                                string="Crea Preset da intestazioni"
+                                type="object"
+                                icon="fa-magic"
+                                class="btn btn-secondary ms-2"
+                                invisible="not file_data"/>
+                    </div>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Actions -->
+    <record id="action_import_csv_new_job" model="ir.actions.act_window">
+        <field name="name">Nuovo Import CSV</field>
+        <field name="res_model">inventory.import.job</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+    </record>
+
+    <record id="action_inventory_import_jobs" model="ir.actions.act_window">
+        <field name="name">Import Jobs</field>
+        <field name="res_model">inventory.import.job</field>
+        <field name="view_mode">list,form</field>
+        <field name="target">current</field>
+    </record>
+
+    <record id="action_inventory_mapping_presets" model="ir.actions.act_window">
+        <field name="name">Mapping Preset</field>
+        <field name="res_model">inventory.mapping.preset</field>
+        <field name="view_mode">list,form</field>
+        <field name="target">current</field>
+    </record>
+
+    <record id="action_inventory_csv_files" model="ir.actions.act_window">
+        <field name="name">Libreria CSV</field>
+        <field name="res_model">inventory.csv.file</field>
+        <field name="view_mode">list,form</field>
+        <field name="target">current</field>
+    </record>
+
+    <!-- Menu items -->
+    <menuitem id="menu_ke_import_root"
+              name="Import"
+              parent="stock.menu_stock_warehouse_mgmt"
+              sequence="99"/>
+
+    <menuitem id="menu_import_inventory"
+              name="Nuovo Import CSV"
+              parent="menu_ke_import_root"
+              action="action_import_csv_new_job"
+              sequence="10"/>
+
+    <menuitem id="menu_inventory_import_jobs"
+              name="Import Jobs"
+              parent="menu_ke_import_root"
+              action="action_inventory_import_jobs"
+              sequence="20"/>
+
+    <menuitem id="menu_inventory_mapping_presets"
+              name="Mapping Preset"
+              parent="menu_ke_import_root"
+              action="action_inventory_mapping_presets"
+              sequence="30"/>
+
+    <menuitem id="menu_inventory_csv_files"
+              name="Libreria CSV"
+              parent="menu_ke_import_root"
+              action="action_inventory_csv_files"
+              sequence="5"/>
+
+</odoo>

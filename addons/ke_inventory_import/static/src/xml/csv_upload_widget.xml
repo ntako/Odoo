@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="ke_inventory_import.CsvUploadField">
+        <div class="o_field_widget o_field_binary d-flex flex-column gap-1">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <input type="file" class="d-none" t-ref="csvFileInput" t-on-change="onFileChange"/>
+                <button type="button"
+                        class="o_select_file_button btn btn-sm btn-secondary"
+                        t-on-click="onClickUpload"
+                        t-att-disabled="uploadProgress.active">
+                    <i class="fa fa-upload me-1"/>
+                    <t t-if="!value">Carica CSV</t>
+                    <t t-else="">Sostituisci</t>
+                </button>
+                <t t-if="value and !uploadProgress.active">
+                    <span class="small text-muted text-truncate" style="max-width:220px;">
+                        <t t-esc="displayName"/>
+                    </span>
+                    <button type="button"
+                            class="btn btn-sm btn-link text-danger p-0 ms-1"
+                            t-on-click="onFileDelete">
+                        <i class="fa fa-times"/>
+                    </button>
+                </t>
+            </div>
+            <t t-if="uploadProgress.active">
+                <div class="progress mt-1" style="height:8px; border-radius:4px; background:#e9ecef;">
+                    <div class="progress-bar bg-primary progress-bar-striped progress-bar-animated"
+                         role="progressbar"
+                         t-att-style="'width:' + (uploadProgress.value || 2) + '%'"
+                         t-att-aria-valuenow="uploadProgress.value"
+                         aria-valuemin="0" aria-valuemax="100"/>
+                </div>
+                <small class="text-muted">
+                    Invio al server: <t t-esc="uploadProgress.value"/>%
+                </small>
+            </t>
+        </div>
+    </t>
+
+    <!-- Auto-refresh: invisible, just drives the polling side-effect -->
+    <t t-name="ke_inventory_import.AutoRefresh"/>
+
+</templates>

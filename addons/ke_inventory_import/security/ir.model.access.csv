@@ -1,0 +1,13 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_inventory_import_job_user,inventory.import.job user,model_inventory_import_job,stock.group_stock_user,1,1,1,0
+access_inventory_import_job_manager,inventory.import.job manager,model_inventory_import_job,stock.group_stock_manager,1,1,1,1
+access_inventory_field_mapping_line_user,inventory.field.mapping.line user,model_inventory_field_mapping_line,stock.group_stock_user,1,1,1,1
+access_inventory_field_mapping_line_manager,inventory.field.mapping.line manager,model_inventory_field_mapping_line,stock.group_stock_manager,1,1,1,1
+access_inventory_mapping_preset_user,inventory.mapping.preset user,model_inventory_mapping_preset,stock.group_stock_user,1,0,0,0
+access_inventory_mapping_preset_manager,inventory.mapping.preset manager,model_inventory_mapping_preset,stock.group_stock_manager,1,1,1,1
+access_inventory_mapping_preset_line_user,inventory.mapping.preset.line user,model_inventory_mapping_preset_line,stock.group_stock_user,1,0,0,0
+access_inventory_mapping_preset_line_manager,inventory.mapping.preset.line manager,model_inventory_mapping_preset_line,stock.group_stock_manager,1,1,1,1
+access_inventory_mapping_preset_save_wizard_user,inventory.mapping.preset.save.wizard user,model_inventory_mapping_preset_save_wizard,stock.group_stock_user,1,1,1,1
+access_inventory_mapping_preset_save_wizard_manager,inventory.mapping.preset.save.wizard manager,model_inventory_mapping_preset_save_wizard,stock.group_stock_manager,1,1,1,1
+access_inventory_csv_file_user,inventory.csv.file user,model_inventory_csv_file,stock.group_stock_user,1,0,0,0
+access_inventory_csv_file_manager,inventory.csv.file manager,model_inventory_csv_file,stock.group_stock_manager,1,1,1,1
