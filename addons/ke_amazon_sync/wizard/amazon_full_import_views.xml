@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_full_import_form" model="ir.ui.view">
+        <field name="name">ke.amazon.full.import.form</field>
+        <field name="model">ke.amazon.full.import</field>
+        <field name="arch" type="xml">
+            <form string="Import Completo da Amazon">
+                <sheet>
+                    <group string="Parametri">
+                        <field name="update_existing"/>
+                    </group>
+                    <footer>
+                        <button name="action_start"
+                                string="Avvia import"
+                                type="object"
+                                class="btn-primary"/>
+                    </footer>
+                </sheet>
+            </form>
+        </field>
+    </record>
+</odoo>

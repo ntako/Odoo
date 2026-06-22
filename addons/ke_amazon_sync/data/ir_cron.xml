@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Funzione 1: Import completo a chunk (attivato dal wizard) -->
+    <record id="cron_full_import_chunk" model="ir.cron">
+        <field name="name">Amazon Sync: Import Completo (chunk)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_full_import_chunk()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 2: Controllo nuovi prodotti ogni N ore -->
+    <record id="cron_check_new_products" model="ir.cron">
+        <field name="name">Amazon Sync: Controllo nuovi prodotti</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_check_new_products()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 3: Sync prezzi e quantità ogni N minuti -->
+    <record id="cron_sync_prices_quantities" model="ir.cron">
+        <field name="name">Amazon Sync: Prezzi e Quantità</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_sync_prices_quantities()</field>
+        <field name="interval_number">60</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 4: Riconciliazione store ogni N ore -->
+    <record id="cron_reconcile_store" model="ir.cron">
+        <field name="name">Amazon Sync: Riconciliazione Store</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_reconcile_store()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+</odoo>

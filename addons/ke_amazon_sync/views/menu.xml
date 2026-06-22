@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Server action import completo -->
+    <record id="action_amazon_full_import_server" model="ir.actions.server">
+        <field name="name">Import Completo da Amazon</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_full_import()</field>
+    </record>
+
+    <!-- Menu sotto Inventario > Operazioni -->
+    <menuitem id="menu_amazon_sync_root"
+              name="Amazon Sync"
+              parent="stock.menu_stock_root"
+              sequence="99"/>
+
+    <menuitem id="menu_amazon_full_import"
+              name="Import Completo (Manuale)"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_full_import_server"
+              sequence="10"/>
+
+    <menuitem id="menu_amazon_sync_log"
+              name="Log Sincronizzazioni"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_sync_log"
+              sequence="20"/>
+
+    <!-- Shortcut impostazioni -->
+    <menuitem id="menu_amazon_sync_settings"
+              name="Configurazione Amazon"
+              parent="menu_amazon_sync_root"
+              action="base_setup.action_general_configuration"
+              sequence="30"/>
+</odoo>

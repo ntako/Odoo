@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Tab Amazon nel form prodotto -->
+    <record id="view_product_template_amazon_tab" model="ir.ui.view">
+        <field name="name">product.template.amazon.tab</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Amazon" name="amazon_tab">
+                    <div class="mb-3" invisible="not x_amazon_asin and not x_amazon_sku">
+                        <button name="action_amazon_refresh_from_catalog"
+                                string="Aggiorna da Amazon"
+                                type="object"
+                                class="btn btn-primary me-2"
+                                confirm="Aggiorna nome, descrizione, EAN e immagine dal catalogo Amazon. Continuare?"/>
+                        <button name="action_amazon_sync_price_qty"
+                                string="Sync prezzo/quantità"
+                                type="object"
+                                class="btn btn-secondary me-2"
+                                invisible="not x_amazon_sync_price and not x_amazon_sync_qty"
+                                confirm="Invia prezzo e/o quantità aggiornati ad Amazon. Continuare?"/>
+                        <button name="action_amazon_download_image"
+                                string="Scarica immagine"
+                                type="object"
+                                class="btn btn-secondary"
+                                invisible="not x_amazon_asin"/>
+                    </div>
+                    <group>
+                        <group string="Identificatori">
+                            <field name="x_amazon_asin"/>
+                            <field name="x_amazon_sku"/>
+                            <field name="x_amazon_product_type"/>
+                        </group>
+                        <group string="Stato">
+                            <field name="x_amazon_status"/>
+                            <field name="x_amazon_fulfillment"/>
+                            <field name="x_amazon_found_by_manufacturer" widget="boolean_toggle"/>
+                            <field name="x_amazon_last_sync"/>
+                        </group>
+                    </group>
+                    <group string="Dati Amazon (sola lettura)">
+                        <group>
+                            <field name="x_amazon_price" string="Prezzo attuale su Amazon"/>
+                            <field name="x_amazon_qty" string="Quantità FBA disponibile"/>
+                        </group>
+                    </group>
+                    <group string="Sincronizzazione automatica">
+                        <group>
+                            <field name="x_amazon_sync_price" widget="boolean_toggle"/>
+                            <field name="x_amazon_sync_qty" widget="boolean_toggle"/>
+                        </group>
+                        <group>
+                            <field name="x_amazon_sync_error" invisible="not x_amazon_sync_error"/>
+                        </group>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+
+</odoo>

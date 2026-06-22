@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_amazon" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.inherit.ke_amazon_sync</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base_setup.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//app[@name='general_settings']" position="after">
+                <app string="Amazon Seller Central" name="ke_amazon_sync">
+
+                    <block title="Credenziali SP-API" name="amazon_credentials">
+                        <setting string="Seller ID (Merchant Token)">
+                            <field name="amazon_seller_id"/>
+                        </setting>
+                        <setting string="Marketplace ID">
+                            <field name="amazon_marketplace_id"/>
+                        </setting>
+                        <setting string="LWA App ID">
+                            <field name="amazon_lwa_app_id"/>
+                        </setting>
+                        <setting string="LWA Client Secret">
+                            <field name="amazon_lwa_client_secret" password="True"/>
+                        </setting>
+                        <setting string="Refresh Token">
+                            <field name="amazon_refresh_token" password="True"/>
+                        </setting>
+                    </block>
+
+                    <block title="Impostazioni import" name="amazon_import">
+                        <setting string="Lingua catalogo"
+                                 help="Codice lingua per descrizioni/bullet points: it_IT, en_GB, de_DE, …">
+                            <field name="amazon_locale"/>
+                        </setting>
+                        <setting string="Tipo prodotto Odoo">
+                            <field name="amazon_product_type"/>
+                        </setting>
+                        <setting string="Limite prodotti per import"
+                                 help="0 = nessun limite. Usa un numero piccolo (es. 20) per testare l'import.">
+                            <field name="amazon_max_products"/>
+                        </setting>
+                        <setting string="Aggiorna prodotti esistenti durante import"
+                                 help="Se disattivo, i prodotti già presenti in Odoo non vengono toccati.">
+                            <field name="amazon_import_update_existing"/>
+                        </setting>
+                        <setting string="Immagini mancanti"
+                                 help="Scarica da Amazon le immagini dei prodotti già importati che non hanno ancora una foto.">
+                            <button name="action_run_download_images"
+                                    string="Scarica immagini mancanti"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Avvio il download delle immagini mancanti in background. Continuare?"/>
+                        </setting>
+                    </block>
+
+                    <block title="Automazioni" name="amazon_crons">
+                        <setting string="Controllo automatico nuovi prodotti"
+                                 help="Controlla ogni N ore se i nuovi prodotti Odoo (con EAN) sono già listati su Amazon.">
+                            <field name="amazon_cron_check_active"/>
+                            <div class="row mt8 align-items-center">
+                                <label for="amazon_sync_check_interval" class="col-auto o_light_label"/>
+                                <field name="amazon_sync_check_interval"
+                                       class="col-auto"
+                                       readonly="not amazon_cron_check_active"/>
+                                <span class="col-auto text-muted">ore</span>
+                                <div class="col-auto ms-3">
+                                    <button name="action_run_check_new_products"
+                                            string="Esegui ora"
+                                            type="object"
+                                            class="btn btn-secondary btn-sm"
+                                            confirm="Avvio il controllo nuovi prodotti in background. Il risultato sarà visibile nel log. Continuare?"/>
+                                </div>
+                            </div>
+                        </setting>
+                        <setting string="Sync automatica prezzi e quantità"
+                                 help="Aggiorna automaticamente su Amazon prezzi e quantità (FBM) dei prodotti con sync attiva.">
+                            <field name="amazon_cron_price_qty_active"/>
+                            <div class="row mt8 align-items-center">
+                                <label for="amazon_sync_price_qty_interval" class="col-auto o_light_label"/>
+                                <field name="amazon_sync_price_qty_interval"
+                                       class="col-auto"
+                                       readonly="not amazon_cron_price_qty_active"/>
+                                <span class="col-auto text-muted">minuti</span>
+                                <div class="col-auto ms-3">
+                                    <button name="action_run_sync_prices_quantities"
+                                            string="Esegui ora"
+                                            type="object"
+                                            class="btn btn-secondary btn-sm"
+                                            confirm="Avvio la sincronizzazione prezzi/quantità in background. Il risultato sarà visibile nel log. Continuare?"/>
+                                </div>
+                            </div>
+                        </setting>
+                        <setting string="Riconciliazione store"
+                                 help="Confronta i prodotti Odoo con i listing attivi sul tuo store Amazon: aggiorna stato e prezzo, segnala prodotti non importati.">
+                            <field name="amazon_cron_reconcile_active"/>
+                            <div class="row mt8 align-items-center">
+                                <label for="amazon_sync_reconcile_interval" class="col-auto o_light_label"/>
+                                <field name="amazon_sync_reconcile_interval"
+                                       class="col-auto"
+                                       readonly="not amazon_cron_reconcile_active"/>
+                                <span class="col-auto text-muted">ore</span>
+                                <div class="col-auto ms-3">
+                                    <button name="action_run_reconcile_store"
+                                            string="Esegui ora"
+                                            type="object"
+                                            class="btn btn-secondary btn-sm"
+                                            confirm="Avvio la riconciliazione store in background. Il risultato sarà visibile nel log. Continuare?"/>
+                                </div>
+                            </div>
+                        </setting>
+                    </block>
+
+                </app>
+            </xpath>
+        </field>
+    </record>
+</odoo>
