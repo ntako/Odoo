@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- Cron 1: Sync stock Odoo → PrestaShop (ogni 30 min, disabilitato per default) -->
+    <record id="cron_sync_stock" model="ir.cron">
+        <field name="name">PS Sync: Stock Odoo → PrestaShop</field>
+        <field name="model_id" ref="ke_prestashop_sync.model_ke_prestashop_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.prestashop.sync.log']._cron_sync_stock()</field>
+        <field name="interval_number">30</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Cron 2: Sync prezzi Odoo → PrestaShop (ogni 60 min, disabilitato per default) -->
+    <record id="cron_sync_prices" model="ir.cron">
+        <field name="name">PS Sync: Prezzi Odoo → PrestaShop</field>
+        <field name="model_id" ref="ke_prestashop_sync.model_ke_prestashop_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.prestashop.sync.log']._cron_sync_prices()</field>
+        <field name="interval_number">60</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Cron 3: Import ordini PrestaShop → Odoo (ogni 15 min, disabilitato per default) -->
+    <record id="cron_import_orders" model="ir.cron">
+        <field name="name">PS Sync: Import Ordini da PrestaShop</field>
+        <field name="model_id" ref="ke_prestashop_sync.model_ke_prestashop_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.prestashop.sync.log']._cron_import_orders()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+</odoo>

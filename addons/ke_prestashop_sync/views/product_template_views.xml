@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_product_template_ps_form" model="ir.ui.view">
+        <field name="name">product.template.ps.form</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_only_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="PrestaShop" name="prestashop_tab">
+                    <group>
+                        <group string="Collegamento">
+                            <field name="ps_product_id"/>
+                            <field name="ps_sync_enabled"/>
+                            <field name="ps_image_synced"/>
+                            <field name="ps_last_sync_date"/>
+                        </group>
+                        <group string="Varianti PS" colspan="2"
+                               invisible="product_variant_count &lt;= 1">
+                            <field name="product_variant_ids" nolabel="1">
+                                <list string="Varianti">
+                                    <field name="display_name" string="Variante"/>
+                                    <field name="default_code" string="Riferimento"/>
+                                    <field name="ps_combination_id" string="ID Combo PS"/>
+                                </list>
+                            </field>
+                        </group>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+
+</odoo>

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- Wizard: Import prodotti da PrestaShop -->
+    <record id="view_ps_product_import_form" model="ir.ui.view">
+        <field name="name">ke.ps.product.import.form</field>
+        <field name="model">ke.ps.product.import</field>
+        <field name="arch" type="xml">
+            <form string="Import Prodotti da PrestaShop">
+                <group>
+                    <field name="limit"
+                           help="0 = nessun limite, importa tutto il catalogo"/>
+                    <field name="update_existing"/>
+                </group>
+                <footer>
+                    <button name="action_run_import" type="object"
+                            string="Avvia import" class="btn-primary"/>
+                    <button string="Annulla" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ps_product_import" model="ir.actions.act_window">
+        <field name="name">Import Prodotti da PrestaShop</field>
+        <field name="res_model">ke.ps.product.import</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <!-- Wizard: Export prodotti verso PrestaShop -->
+    <record id="view_ps_product_export_form" model="ir.ui.view">
+        <field name="name">ke.ps.product.export.form</field>
+        <field name="model">ke.ps.product.export</field>
+        <field name="arch" type="xml">
+            <form string="Export Prodotti verso PrestaShop">
+                <group>
+                    <field name="export_mode" widget="radio"/>
+                    <field name="product_ids" widget="many2many_tags"
+                           invisible="export_mode == 'new_only'"/>
+                </group>
+                <footer>
+                    <button name="action_run_export" type="object"
+                            string="Avvia export" class="btn-primary"/>
+                    <button string="Annulla" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ps_product_export" model="ir.actions.act_window">
+        <field name="name">Export Prodotti verso PrestaShop</field>
+        <field name="res_model">ke.ps.product.export</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+</odoo>
