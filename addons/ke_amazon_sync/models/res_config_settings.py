@@ -7,41 +7,31 @@ from odoo.exceptions import UserError
 
 _log = logging.getLogger(__name__)
 
-_DEF_REFRESH_TOKEN = (
-    '***REMOVED***'
-    '***REMOVED***'
-    '***REMOVED***'
-    '***REMOVED***'
-)
-_DEF_LWA_APP_ID = '***REMOVED***'
-_DEF_LWA_SECRET = '***REMOVED***'
-_DEF_SELLER_ID = '***REMOVED***'
-_DEF_MARKETPLACE_ID = 'APJ6JRA9NG5V4'
+_DEF_MARKETPLACE_ID = 'APJ6JRA9NG5V4'  # ID pubblico del marketplace IT, non un segreto
 
 
 class ResConfigSettings(models.TransientModel):
     _inherit = 'res.config.settings'
 
     # --- Credenziali SP-API ---
+    # Nessun default hardcoded: i parametri vengono creati vuoti all'installazione
+    # (data/default_credentials.xml) e vanno compilati dall'utente in questa
+    # schermata. Non inserire mai qui valori reali di refresh token/secret.
     amazon_refresh_token = fields.Char(
         string='Refresh Token',
         config_parameter='ke_amazon_sync.refresh_token',
-        default=_DEF_REFRESH_TOKEN,
     )
     amazon_lwa_app_id = fields.Char(
         string='LWA App ID',
         config_parameter='ke_amazon_sync.lwa_app_id',
-        default=_DEF_LWA_APP_ID,
     )
     amazon_lwa_client_secret = fields.Char(
         string='LWA Client Secret',
         config_parameter='ke_amazon_sync.lwa_client_secret',
-        default=_DEF_LWA_SECRET,
     )
     amazon_seller_id = fields.Char(
         string='Seller ID (Merchant Token)',
         config_parameter='ke_amazon_sync.seller_id',
-        default=_DEF_SELLER_ID,
     )
     amazon_marketplace_id = fields.Char(
         string='Marketplace ID',

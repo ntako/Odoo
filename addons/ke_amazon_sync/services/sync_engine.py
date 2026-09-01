@@ -335,6 +335,20 @@ def _get_or_create_category(env, name):
 # Classe principale
 # ---------------------------------------------------------------------------
 
+def _storable_vals(env):
+    """
+    Da Odoo 17 in poi, 'type' da solo non basta più a rendere un prodotto
+    tracciabile a magazzino: serve anche il campo booleano is_storable=True
+    ('Traccia inventario'), altrimenti Odoo rifiuta di creare quant per quel
+    prodotto ('Impossibile creare quantitativi per consumabili o servizi').
+    Ritorna {'is_storable': True} solo se il campo esiste su questa
+    installazione, altrimenti {} (versioni dove 'type'='product' bastava già).
+    """
+    if 'is_storable' in env['product.template']._fields:
+        return {'is_storable': True}
+    return {}
+
+
 def _resolve_product_type(env, requested):
     """Returns a valid product.template.type value for this Odoo installation."""
     field = env['product.template']._fields.get('type')
@@ -848,6 +862,7 @@ class SyncEngine:
             'barcode': ean,
             'list_price': self._net_price(data['price']),
             'type': product_type_odoo,
+            **_storable_vals(self.env),
             'categ_id': categ.id,
             'weight': data.get('weight_kg') or 0.0,
             'description_sale': description,
@@ -1052,6 +1067,7 @@ class SyncEngine:
             'name': base_name,
             'list_price': self._net_price(first_child['price']),
             'type': product_type_odoo,
+            **_storable_vals(self.env),
             'categ_id': categ.id,
             'weight': first_child.get('weight_kg') or 0.0,
             'description_sale': description,
