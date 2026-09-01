@@ -36,7 +36,7 @@
         <field name="user_id" ref="base.user_root"/>
     </record>
 
-    <!-- Funzione 4: Riconciliazione store ogni N ore -->
+    <!-- Funzione 4: Riconciliazione store ogni N ore (avvia il processo) -->
     <record id="cron_reconcile_store" model="ir.cron">
         <field name="name">Amazon Sync: Riconciliazione Store</field>
         <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
@@ -44,6 +44,78 @@
         <field name="code">env['ke.amazon.sync.log']._cron_reconcile_store()</field>
         <field name="interval_number">24</field>
         <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 5: Applica mapping categorie sito (attivato manualmente) -->
+    <record id="cron_apply_category_mapping" model="ir.cron">
+        <field name="name">Amazon Sync: Mapping Categorie Sito</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_apply_category_mapping()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 6: Import ordini Amazon (attivato manualmente o dal cron automatico) -->
+    <record id="cron_import_orders_chunk" model="ir.cron">
+        <field name="name">Amazon Sync: Import Ordini (chunk)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_import_orders_chunk()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 6b: Avvio automatico periodico import ordini -->
+    <record id="cron_import_orders_store" model="ir.cron">
+        <field name="name">Amazon Sync: Import Ordini (automatico)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_import_orders_store()</field>
+        <field name="interval_number">60</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 7: Sync giacenze FBA (attivato manualmente o schedulato) -->
+    <record id="cron_sync_fba_quantities" model="ir.cron">
+        <field name="name">Amazon Sync: Giacenze FBA</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_sync_fba_quantities()</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 4b: Riconciliazione store elaborazione chunk (attivata da _cron_reconcile_store) -->
+    <record id="cron_reconcile_chunk" model="ir.cron">
+        <field name="name">Amazon Sync: Riconciliazione Store (elaborazione)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_reconcile_chunk()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 8: Import resi Amazon, elaborazione chunk (attivata da action_start_returns_report) -->
+    <record id="cron_returns_chunk" model="ir.cron">
+        <field name="name">Amazon Sync: Import Resi (elaborazione)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_returns_chunk()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
         <field name="active">False</field>
         <field name="user_id" ref="base.user_root"/>
     </record>

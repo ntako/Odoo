@@ -6,13 +6,34 @@
         <field name="model">product.template</field>
         <field name="inherit_id" ref="product.product_template_form_view"/>
         <field name="arch" type="xml">
+            <!-- Dimensioni nella tab Magazzino, sezione separata -->
+            <xpath expr="//page[@name='inventory']" position="inside">
+                <group string="Dimensioni Amazon (cm)" name="group_amazon_dimensions">
+                    <field name="x_amazon_length" string="Lunghezza"/>
+                    <field name="x_amazon_width" string="Larghezza"/>
+                    <field name="x_amazon_height" string="Altezza"/>
+                </group>
+            </xpath>
+
             <xpath expr="//notebook" position="inside">
                 <page string="Amazon" name="amazon_tab">
-                    <div class="mb-3" invisible="not x_amazon_asin and not x_amazon_sku">
+                    <div class="mb-3">
+                        <button name="action_amazon_publish"
+                                string="Pubblica su Amazon"
+                                type="object"
+                                class="btn btn-primary me-2"
+                                confirm="Pubblica o aggiorna questo prodotto su Amazon. Continuare?"/>
+                        <button name="action_amazon_get_asin"
+                                string="Verifica ASIN"
+                                type="object"
+                                class="btn btn-secondary me-2"
+                                invisible="x_amazon_publish_state != 'pending'"
+                                confirm="Recupera l'ASIN assegnato da Amazon dopo la pubblicazione. Continuare?"/>
                         <button name="action_amazon_refresh_from_catalog"
                                 string="Aggiorna da Amazon"
                                 type="object"
-                                class="btn btn-primary me-2"
+                                class="btn btn-secondary me-2"
+                                invisible="not x_amazon_asin"
                                 confirm="Aggiorna nome, descrizione, EAN e immagine dal catalogo Amazon. Continuare?"/>
                         <button name="action_amazon_sync_price_qty"
                                 string="Sync prezzo/quantità"
@@ -30,19 +51,46 @@
                         <group string="Identificatori">
                             <field name="x_amazon_asin"/>
                             <field name="x_amazon_sku"/>
-                            <field name="x_amazon_product_type"/>
+                            <field name="x_amazon_product_type" widget="char"/>
+                            <div class="o_field_widget" invisible="x_amazon_product_type">
+                                <button name="action_amazon_search_product_type"
+                                        string="Cerca tipo prodotto..."
+                                        type="object"
+                                        class="btn btn-link p-0"/>
+                            </div>
+                            <field name="x_amazon_brand" string="Brand"/>
                         </group>
                         <group string="Stato">
                             <field name="x_amazon_status"/>
                             <field name="x_amazon_fulfillment"/>
+                            <field name="x_amazon_warehouse_id" readonly="1"/>
+                            <field name="x_amazon_condition" string="Condizione"/>
+                            <field name="x_amazon_publish_state"
+                                   string="Stato pubblicazione"
+                                   widget="badge"
+                                   decoration-success="x_amazon_publish_state == 'published'"
+                                   decoration-warning="x_amazon_publish_state == 'pending'"
+                                   decoration-danger="x_amazon_publish_state == 'error'"
+                                   decoration-muted="x_amazon_publish_state == 'not_published'"/>
                             <field name="x_amazon_found_by_manufacturer" widget="boolean_toggle"/>
                             <field name="x_amazon_last_sync"/>
+                            <field name="x_amazon_publish_error"
+                                   invisible="not x_amazon_publish_error"
+                                   string="Errore pubblicazione"/>
                         </group>
                     </group>
                     <group string="Dati Amazon (sola lettura)">
                         <group>
                             <field name="x_amazon_price" string="Prezzo attuale su Amazon"/>
                             <field name="x_amazon_qty" string="Quantità FBA disponibile"/>
+                            <field name="x_amazon_category" string="Categoria Amazon"/>
+                            <field name="x_amazon_browse_node_id" string="Browse Node ID"/>
+                            <div class="o_field_widget" invisible="x_amazon_browse_node_id">
+                                <button name="action_amazon_search_browse_node"
+                                        string="Cerca categoria..."
+                                        type="object"
+                                        class="btn btn-link p-0"/>
+                            </div>
                         </group>
                     </group>
                     <group string="Sincronizzazione automatica">
@@ -59,5 +107,36 @@
         </field>
     </record>
 
+    <!-- Colonna e filtro magazzino Amazon nella lista prodotti -->
+    <record id="view_product_template_tree_amazon" model="ir.ui.view">
+        <field name="name">product.template.amazon.tree</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_tree_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="x_amazon_warehouse_id" string="Magazzino Amazon" optional="hide"/>
+                <field name="x_amazon_sync_qty" string="Sync quantità" optional="hide" widget="boolean_toggle"/>
+                <field name="x_amazon_sync_price" string="Sync prezzo" optional="hide" widget="boolean_toggle"/>
+                <field name="x_amazon_qty" string="Quantità Amazon (dichiarata)" optional="hide"/>
+                <field name="x_amazon_odoo_fbm_qty" string="Giacenza Odoo (FBM)" optional="hide"/>
+                <field name="x_amazon_qty_diff" string="Differenza Amazon/Odoo" optional="hide"
+                       decoration-danger="x_amazon_qty_diff != 0"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_template_search_amazon" model="ir.ui.view">
+        <field name="name">product.template.amazon.search</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <filter string="Magazzino Amazon" name="groupby_amazon_warehouse"
+                        context="{'group_by': 'x_amazon_warehouse_id'}"/>
+                <filter string="Discrepanza giacenza FBM/Amazon" name="filter_amazon_qty_diff"
+                        domain="[('x_amazon_qty_diff', '!=', 0)]"/>
+            </xpath>
+        </field>
+    </record>
 
 </odoo>

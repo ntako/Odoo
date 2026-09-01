@@ -39,3 +39,9 @@ Thumbs.db
 *.log
 filestore/
 sessions/
+import_amazon_*
+
+# Credenziali reali (mai in git)
+ke_amazon_sync/_D_REFRESH_TOKEN.py
+
+resoconto.*

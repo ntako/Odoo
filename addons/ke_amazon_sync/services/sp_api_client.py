@@ -13,18 +13,10 @@ _log = logging.getLogger(__name__)
 DELAY_CATALOG_S = 0.6
 DELAY_LISTINGS_S = 0.3
 DELAY_SEARCH_S = 0.5
+DELAY_ORDERS_S = 2.0   # Orders API: max 0.5 req/s → 2s tra ogni chiamata
 RETRY_MAX = 5
 RETRY_BACKOFF_S = 60
 
-_D_REFRESH_TOKEN = (
-    '***REMOVED***'
-    '***REMOVED***'
-    '***REMOVED***'
-    '***REMOVED***'
-)
-_D_LWA_APP_ID = '***REMOVED***'
-_D_LWA_SECRET = '***REMOVED***'
-_D_SELLER_ID = '***REMOVED***'
 _D_MARKETPLACE_ID = 'APJ6JRA9NG5V4'
 
 
@@ -101,16 +93,16 @@ class SpApiClient:
         if self._credentials_override:
             return self._credentials_override
         return {
-            'refresh_token': self._get_param('ke_amazon_sync.refresh_token') or _D_REFRESH_TOKEN,
-            'lwa_app_id': self._get_param('ke_amazon_sync.lwa_app_id') or _D_LWA_APP_ID,
-            'lwa_client_secret': self._get_param('ke_amazon_sync.lwa_client_secret') or _D_LWA_SECRET,
+            'refresh_token': self._get_param('ke_amazon_sync.refresh_token'),
+            'lwa_app_id': self._get_param('ke_amazon_sync.lwa_app_id'),
+            'lwa_client_secret': self._get_param('ke_amazon_sync.lwa_client_secret'),
         }
 
     @property
     def seller_id(self):
         if self._seller_id_override:
             return self._seller_id_override
-        return self._get_param('ke_amazon_sync.seller_id') or _D_SELLER_ID
+        return self._get_param('ke_amazon_sync.seller_id')
 
     @property
     def marketplace_id(self):
@@ -328,6 +320,17 @@ class SpApiClient:
         )
         return resp.payload['reportId']
 
+    def request_returns_report(self, data_start_time):
+        """Crea il report dei resi cliente FBA da data_start_time (ISO-8601) a oggi. Ritorna il reportId."""
+        from sp_api.api import Reports
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        resp = api.create_report(
+            reportType='GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA',
+            marketplaceIds=[self.marketplace_id],
+            dataStartTime=data_start_time,
+        )
+        return resp.payload['reportId']
+
     def check_report_ready(self, report_id):
         """
         Controlla lo stato del report.
@@ -362,6 +365,51 @@ class SpApiClient:
         content = content.lstrip('﻿')  # strip UTF-8 BOM se presente
         reader = csv.DictReader(io.StringIO(content), delimiter='\t')
         return list(reader)
+
+    # ------------------------------------------------------------------
+    # Orders API
+    # ------------------------------------------------------------------
+
+    @_with_retry(DELAY_ORDERS_S)
+    def _get_orders_call(self, **params):
+        from sp_api.api import Orders
+        api = Orders(marketplace=self._marketplace(), credentials=self.credentials)
+        resp = api.get_orders(**params)
+        return resp.payload
+
+    def get_orders(self, created_after, next_token=None, order_statuses=None):
+        """
+        Recupera una pagina di ordini Amazon.
+        Ritorna (orders_list, next_token_or_None).
+        """
+        params = {
+            'MarketplaceIds': [self.marketplace_id],
+            'MaxResultsPerPage': 100,
+        }
+        if next_token:
+            params['NextToken'] = next_token
+        else:
+            params['CreatedAfter'] = created_after
+            if order_statuses:
+                params['OrderStatuses'] = order_statuses
+        payload = self._get_orders_call(**params)
+        return payload.get('Orders', []), payload.get('NextToken')
+
+    @_with_retry(DELAY_ORDERS_S)
+    def _get_order_items_call(self, order_id):
+        from sp_api.api import Orders
+        api = Orders(marketplace=self._marketplace(), credentials=self.credentials)
+        resp = api.get_order_items(order_id)
+        return resp.payload.get('OrderItems', [])
+
+    def get_order_items(self, order_id):
+        """Recupera gli item di un singolo ordine Amazon (con retry e rate limiting)."""
+        from sp_api.base import SellingApiException
+        try:
+            return self._get_order_items_call(order_id)
+        except SellingApiException as exc:
+            _log.warning('Errore get_order_items %s: %s', order_id, exc)
+            raise
 
     # ------------------------------------------------------------------
     # Listing singolo (per productType)
@@ -404,6 +452,87 @@ class SpApiClient:
             marketplaceIds=[self.marketplace_id],
             body=body,
         )
+
+    # ------------------------------------------------------------------
+    # Product Type Definitions
+    # ------------------------------------------------------------------
+
+    def search_product_types(self, keywords=None, item_name=None):
+        """
+        Cerca i tipi di prodotto Amazon disponibili nel marketplace.
+        Ritorna lista di {'name': 'SHOE', 'display_name': 'Shoes'}.
+        """
+        from sp_api.api import ProductTypeDefinitions
+        api = ProductTypeDefinitions(marketplace=self._marketplace(), credentials=self.credentials)
+        kwargs = {'marketplaceIds': [self.marketplace_id], 'locale': self.locale}
+        if keywords:
+            kw_list = keywords if isinstance(keywords, list) else keywords.split()
+            kwargs['keywords'] = kw_list
+        if item_name:
+            kwargs['itemName'] = item_name
+        time.sleep(DELAY_LISTINGS_S)
+        resp = api.search_definitions_product_types(**kwargs)
+        return [
+            {
+                'name': pt.get('name', ''),
+                'display_name': pt.get('displayName') or pt.get('name', ''),
+            }
+            for pt in resp.payload.get('productTypes', [])
+            if pt.get('name')
+        ]
+
+    def search_browse_nodes(self, keyword):
+        """
+        Cerca browse node (categorie) Amazon rilevanti per una parola chiave.
+        Usa searchCatalogItems e aggrega le browse classification uniche dai risultati.
+        Ritorna lista di {'classification_id': '...', 'display_name': '...'}.
+        """
+        from sp_api.api.catalog_items.catalog_items_2022_04_01 import CatalogItemsV20220401
+        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials)
+        time.sleep(DELAY_SEARCH_S)
+        resp = api.search_catalog_items(
+            keywords=[keyword],
+            marketplaceIds=[self.marketplace_id],
+            includedData=['classifications'],
+            pageSize=20,
+        )
+        seen = set()
+        results = []
+        for item in resp.payload.get('items', []):
+            for cls_block in item.get('classifications', []):
+                for cls in cls_block.get('classifications', []):
+                    cid = cls.get('classificationId', '')
+                    display = cls.get('displayName', '')
+                    if cid and cid not in seen:
+                        seen.add(cid)
+                        results.append({'classification_id': cid, 'display_name': display})
+        return results
+
+    # ------------------------------------------------------------------
+    # PUT listing (crea o sostituisce offerta/listing completo)
+    # ------------------------------------------------------------------
+
+    @_with_retry(DELAY_LISTINGS_S)
+    def put_listing(self, sku, product_type, attributes, requirements='LISTING_OFFER_ONLY'):
+        """
+        Crea o sostituisce un listing su Amazon via PUT.
+        requirements='LISTING_OFFER_ONLY': offerta su ASIN esistente (Scenario A).
+        requirements='LISTING': listing completo, può creare nuovo ASIN (Scenario B).
+        Ritorna il payload della risposta {'status', 'issues', 'submissionId'}.
+        """
+        from sp_api.api import ListingsItems
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        body = {
+            'productType': product_type,
+            'requirements': requirements,
+            'attributes': attributes,
+        }
+        resp = api.put_listings_item(
+            self.seller_id, sku,
+            marketplaceIds=[self.marketplace_id],
+            body=body,
+        )
+        return resp.payload
 
     # ------------------------------------------------------------------
     # PATCH quantità (FBM only)

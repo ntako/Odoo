@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_move_to_general_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.move.to.general.wizard.form</field>
+        <field name="model">ke.amazon.move.to.general.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Sposta giacenza esistente verso il Magazzino Generale">
+                <p>
+                    Sposta in blocco tutta la giacenza a quantità positiva trovata
+                    nell'ubicazione scelta verso il Magazzino Generale configurato
+                    (Impostazioni → Amazon → Magazzini). Un solo trasferimento interno
+                    con una riga per ogni prodotto trovato — gira in background, segui
+                    l'avanzamento dal log che si apre dopo la conferma.
+                </p>
+                <group>
+                    <field name="source_location_id"/>
+                </group>
+                <footer>
+                    <button name="action_confirm"
+                            string="Conferma spostamento"
+                            type="object"
+                            class="btn btn-primary"
+                            confirm="Questa operazione sposta la giacenza di tutti i prodotti trovati nell'ubicazione scelta. Continuare?"/>
+                    <button string="Annulla" class="btn btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_move_to_general_wizard" model="ir.actions.act_window">
+        <field name="name">Sposta giacenza esistente verso il Magazzino Generale</field>
+        <field name="res_model">ke.amazon.move.to.general.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

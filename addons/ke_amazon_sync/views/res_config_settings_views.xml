@@ -103,9 +103,40 @@
                                             string="Esegui ora"
                                             type="object"
                                             class="btn btn-secondary btn-sm"
-                                            confirm="Avvio la riconciliazione store in background. Il risultato sarà visibile nel log. Continuare?"/>
+                                            confirm="Avvio la riconciliazione store in background tramite report Amazon (nessun limite di prodotti, richiede qualche minuto). Il risultato sarà visibile nel log. Continuare?"/>
                                 </div>
                             </div>
+                        </setting>
+                    </block>
+
+                    <block title="Import Ordini" name="amazon_orders">
+                        <setting string="Giorni da importare"
+                                 help="Numero di giorni nel passato da cui recuperare gli ordini Amazon ad ogni import manuale.">
+                            <field name="amazon_orders_days_back"/>
+                            <span class="ms-2 text-muted">giorni</span>
+                        </setting>
+                        <setting string="Aliquota IVA predefinita (%)"
+                                 help="Aliquota IVA usata per convertire i prezzi lordi Amazon in prezzi netti Odoo (IT: 22, DE: 19, FR: 20, ES: 21). Per le righe ordine viene usata l'imposta esatta fornita da Amazon.">
+                            <field name="amazon_default_vat_rate"/>
+                            <span class="ms-2 text-muted">%</span>
+                        </setting>
+                    </block>
+
+                    <block title="Magazzini" name="amazon_warehouses">
+                        <setting string="Magazzino FBA / FBM"
+                                 help="I magazzini FBA e FBM si configurano nel form dell'azienda (Impostazioni → Aziende → [azienda] → tab Amazon).">
+                            <button name="action_open_company_amazon"
+                                    string="Configura magazzini →"
+                                    type="object"
+                                    class="btn btn-secondary"/>
+                        </setting>
+                        <setting string="Recupero giacenza FBM da Amazon"
+                                 help="Operazione una tantum: imposta la giacenza dei prodotti FBM nel magazzino FBM configurato usando la quantità dichiarata su Amazon (x_amazon_qty). Usala solo se la sync automatica quantità non è mai stata attiva su questi prodotti, altrimenti il dato non è più affidabile.">
+                            <button name="action_run_seed_fbm_stock"
+                                    string="Recupera giacenza FBM ora"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Imposta la giacenza di tutti i prodotti FBM nel magazzino FBM configurato usando la quantità dichiarata su Amazon. Operazione da fare una sola volta, solo se la sync automatica quantità non è mai stata attiva su questi prodotti. Continuare?"/>
                         </setting>
                     </block>
 

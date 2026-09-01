@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_company_view_form_amazon" model="ir.ui.view">
+        <field name="name">res.company.form.inherit.ke_amazon_sync</field>
+        <field name="model">res.company</field>
+        <field name="inherit_id" ref="base.view_company_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//page[last()]" position="after">
+                <page string="Amazon" name="amazon_warehouses">
+                    <group string="Magazzini Amazon">
+                        <field name="amazon_default_warehouse_id"
+                               domain="[('company_id', '=', id)]"
+                               help="Il magazzino dove tieni davvero la merce, condiviso tra tutti i canali di vendita. Fonte di verità fisica, distinta dalle allocazioni per canale qui sotto."/>
+                        <field name="amazon_fba_warehouse_id"
+                               domain="[('company_id', '=', id)]"
+                               help="Magazzino Odoo che rappresenta lo stock Amazon FBA. Le giacenze vengono aggiornate dalla 'Sync Giacenze FBA'. Gli ordini AFN vengono assegnati a questo magazzino."/>
+                        <field name="amazon_fbm_warehouse_id"
+                               domain="[('company_id', '=', id)]"
+                               help="Magazzino che rappresenta la quota di giacenza allocata/esposta ad Amazon FBM (non necessariamente tutto lo stock fisico). Le quantità qui presenti vengono spinte su Amazon. Gli ordini MFN vengono assegnati a questo magazzino."/>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

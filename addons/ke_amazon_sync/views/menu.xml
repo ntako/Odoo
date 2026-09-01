@@ -8,6 +8,14 @@
         <field name="code">action = env['ke.amazon.sync.log'].action_start_full_import()</field>
     </record>
 
+    <!-- Server action aggiornamento da Catalog API -->
+    <record id="action_apply_cat_mapping_server" model="ir.actions.server">
+        <field name="name">Aggiorna da Catalog API</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_apply_category_mapping()</field>
+    </record>
+
     <!-- Menu sotto Inventario > Operazioni -->
     <menuitem id="menu_amazon_sync_root"
               name="Amazon Sync"
@@ -26,10 +34,103 @@
               action="action_amazon_sync_log"
               sequence="20"/>
 
-    <!-- Shortcut impostazioni -->
+    <menuitem id="menu_amazon_apply_cat_mapping"
+              name="Aggiorna da Catalog API"
+              parent="menu_amazon_sync_root"
+              action="action_apply_cat_mapping_server"
+              sequence="25"/>
+
+    <!-- Server action import ordini -->
+    <record id="action_amazon_import_orders_server" model="ir.actions.server">
+        <field name="name">Import Ordini Amazon</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_import_orders()</field>
+    </record>
+
+    <record id="action_amazon_sale_orders" model="ir.actions.act_window">
+        <field name="name">Ordini Amazon</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('x_amazon_order_id', '!=', False)]</field>
+    </record>
+
+    <menuitem id="menu_amazon_import_orders"
+              name="Import Ordini Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_import_orders_server"
+              sequence="15"/>
+
+    <menuitem id="menu_amazon_sale_orders"
+              name="Ordini Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_sale_orders"
+              sequence="16"/>
+
+    <!-- Server action sync giacenze FBA -->
+    <record id="action_amazon_sync_fba_server" model="ir.actions.server">
+        <field name="name">Sync Giacenze FBA</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_sync_fba_quantities()</field>
+    </record>
+
+    <menuitem id="menu_amazon_sync_fba"
+              name="Sync Giacenze FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_sync_fba_server"
+              sequence="17"/>
+
+    <menuitem id="menu_amazon_ship_to_fba"
+              name="Spedisci rifornimento ad Amazon FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_ship_to_fba_wizard"
+              sequence="18"/>
+
+    <!-- Server action import resi -->
+    <record id="action_amazon_returns_server" model="ir.actions.server">
+        <field name="name">Import Resi Amazon</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_returns_report()</field>
+    </record>
+
+    <menuitem id="menu_amazon_returns"
+              name="Import Resi Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_returns_server"
+              sequence="19"/>
+
+    <menuitem id="menu_amazon_receive_from_fba"
+              name="Registra rientro scorte da Amazon FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_receive_from_fba_wizard"
+              sequence="20"/>
+
+    <menuitem id="menu_amazon_allocate_fbm"
+              name="Alloca giacenza per Amazon FBM"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_allocate_fbm_wizard"
+              sequence="21"/>
+
+    <menuitem id="menu_amazon_move_to_general"
+              name="Sposta giacenza esistente verso Magazzino Generale"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_move_to_general_wizard"
+              sequence="22"/>
+
+    <!-- Shortcut impostazioni: apre le Impostazioni direttamente sulla tab Amazon -->
+    <record id="action_amazon_config_settings" model="ir.actions.act_window">
+        <field name="name">Configurazione Amazon</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+        <field name="context">{'module': 'ke_amazon_sync'}</field>
+    </record>
+
     <menuitem id="menu_amazon_sync_settings"
               name="Configurazione Amazon"
               parent="menu_amazon_sync_root"
-              action="base_setup.action_general_configuration"
+              action="action_amazon_config_settings"
               sequence="30"/>
 </odoo>

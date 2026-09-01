@@ -13,8 +13,9 @@
                 <field name="sync_type"/>
                 <field name="state"/>
                 <field name="products_total"/>
-                <field name="products_created"/>
-                <field name="products_updated"/>
+                <field name="products_created" string="Creati / Solo Amazon"/>
+                <field name="products_updated" string="Aggiornati"/>
+                <field name="products_skipped" string="Saltati / Solo Odoo"/>
                 <field name="products_error"/>
                 <field name="duration" string="Durata (s)"/>
             </list>
@@ -40,16 +41,16 @@
                             invisible="state != 'running' or sync_type != 'full_import'"
                             confirm="Vuoi fermare l'import? I prodotti già importati verranno mantenuti."/>
                     <button name="action_mark_done"
-                            string="Segna come terminato"
+                            string="Ferma e segna terminato"
                             type="object"
                             class="btn-danger"
                             invisible="state != 'running' or sync_type == 'full_import'"
-                            confirm="Segna questo log come terminato (usa se il processo si è bloccato)."/>
+                            confirm="Ferma il processo e segna questo log come terminato."/>
                     <button name="action_export_csv"
                             string="Esporta CSV"
                             type="object"
                             class="btn-secondary"
-                            invisible="sync_type != 'reconcile' or state == 'running'"/>
+                            invisible="sync_type not in ('reconcile', 'full_import') or state == 'running'"/>
                     <field name="state" widget="statusbar"
                            statusbar_visible="running,done,error"/>
                 </header>
@@ -64,12 +65,21 @@
                             <field name="end_date"/>
                             <field name="duration" string="Durata (s)"/>
                         </group>
-                        <group>
+                        <!-- Contatori per import / check / price_qty / download_images -->
+                        <group invisible="sync_type == 'reconcile'">
                             <field name="products_total" string="Prodotti processati"/>
-                            <field name="products_created"/>
-                            <field name="products_updated"/>
-                            <field name="products_skipped"/>
-                            <field name="products_error"/>
+                            <field name="products_created" string="Creati"/>
+                            <field name="products_updated" string="Aggiornati"/>
+                            <field name="products_skipped" string="Saltati"/>
+                            <field name="products_error" string="Errori"/>
+                        </group>
+                        <!-- Contatori specifici per la riconciliazione -->
+                        <group invisible="sync_type != 'reconcile'">
+                            <field name="products_total" string="SKU Odoo processati"/>
+                            <field name="products_created" string="Solo su Amazon (non importati)"/>
+                            <field name="products_updated" string="Aggiornati (prezzi + SKU riforniti)"/>
+                            <field name="products_skipped" string="Solo in Odoo (non su Amazon)"/>
+                            <field name="products_error" string="Errori"/>
                         </group>
                     </group>
                     <notebook>

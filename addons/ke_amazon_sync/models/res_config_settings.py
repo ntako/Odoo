@@ -36,7 +36,6 @@ class ResConfigSettings(models.TransientModel):
     amazon_lwa_client_secret = fields.Char(
         string='LWA Client Secret',
         config_parameter='ke_amazon_sync.lwa_client_secret',
-        password=True,
         default=_DEF_LWA_SECRET,
     )
     amazon_seller_id = fields.Char(
@@ -119,6 +118,23 @@ class ResConfigSettings(models.TransientModel):
         default=24,
     )
 
+    # --- Ordini ---
+    amazon_orders_days_back = fields.Integer(
+        string='Giorni da importare',
+        config_parameter='ke_amazon_sync.orders_days_back',
+        default=30,
+        help='Numero di giorni nel passato da cui recuperare gli ordini Amazon ad ogni import.',
+    )
+    amazon_default_vat_rate = fields.Float(
+        string='Aliquota IVA predefinita (%)',
+        config_parameter='ke_amazon_sync.default_vat_rate',
+        default=22.0,
+        help='Aliquota IVA usata per calcolare il prezzo netto dai prezzi lordi Amazon '
+             '(IT: 22, DE: 19, FR: 20, ES: 21). '
+             'Usata solo per il prezzo listino dei prodotti importati: '
+             'per le righe ordine viene usata l\'imposta esatta restituita da Amazon.',
+    )
+
     # ------------------------------------------------------------------
     # Computed: legge/scrive active dei cron direttamente
     # ------------------------------------------------------------------
@@ -152,6 +168,20 @@ class ResConfigSettings(models.TransientModel):
             cron.sudo().active = self.amazon_cron_reconcile_active
 
     # ------------------------------------------------------------------
+    # Magazzini
+    # ------------------------------------------------------------------
+
+    def action_open_company_amazon(self):
+        """Apre il form dell'azienda corrente sul tab Amazon per configurare i magazzini."""
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'res.company',
+            'res_id': self.env.company.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    # ------------------------------------------------------------------
     # Trigger manuali
     # ------------------------------------------------------------------
 
@@ -182,16 +212,44 @@ class ResConfigSettings(models.TransientModel):
         return self._open_log_action()
 
     def action_run_reconcile_store(self):
-        """Avvia manualmente la riconciliazione store in background e apre il log."""
+        """
+        Avvia manualmente la riconciliazione store via Reports API (nessun limite di
+        prodotti) e apre il log. Usa lo stesso meccanismo del cron automatico
+        (report completo) invece della Listings API, limitata a ~1000 prodotti.
+        """
         self._validate_credentials()
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.reconcile_state') == 'running':
+            raise UserError('Una riconciliazione è già in corso. Controlla il log sincronizzazioni.')
+        log_rec = self.env['ke.amazon.sync.log']._cron_reconcile_store(
+            name_prefix='Riconciliazione store (manuale)'
+        )
+        if not log_rec:
+            raise UserError('Impossibile avviare la riconciliazione: verifica le credenziali SP-API.')
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Log Riconciliazione Amazon',
+            'res_model': 'ke.amazon.sync.log',
+            'res_id': log_rec.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    def action_run_seed_fbm_stock(self):
+        """
+        Operazione una tantum: imposta la giacenza dei prodotti FBM nel magazzino
+        FBM configurato usando x_amazon_qty (quantità dichiarata su Amazon, già
+        salvata a ogni sync). Non richiede credenziali SP-API: è un'operazione
+        interna, nessuna chiamata ad Amazon.
+        """
         log_rec = self.env['ke.amazon.sync.log'].create({
-            'name': f'Riconciliazione store (manuale) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'reconcile',
+            'name': f'Recupero Giacenza FBM da Amazon — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'seed_fbm_stock',
             'state': 'running',
             'start_date': datetime.now(),
         })
         self.env.cr.commit()
-        self._start_thread('_thread_reconcile_store', log_rec.id)
+        self._start_thread('_thread_seed_fbm_stock', log_rec.id)
         return self._open_log_action()
 
     def action_run_download_images(self):
@@ -221,28 +279,6 @@ class ResConfigSettings(models.TransientModel):
             daemon=True,
         )
         t.start()
-
-    @api.model
-    def _thread_reconcile_store(self, db, uid, ctx, log_id):
-        try:
-            from odoo import api as odoo_api
-            from odoo.modules.registry import Registry as odoo_registry
-            from ..services.sp_api_client import SpApiClient
-            from ..services.sync_engine import SyncEngine
-
-            with odoo_registry(db).cursor() as cr:
-                env = odoo_api.Environment(cr, uid, ctx)
-                log_rec = env['ke.amazon.sync.log'].browse(log_id)
-                try:
-                    engine = SyncEngine(env, SpApiClient(env))
-                    engine.reconcile_store(log_rec)
-                except Exception as exc:
-                    _log.error('Thread reconcile_store fallito: %s', exc, exc_info=True)
-                    log_rec.write({'state': 'error', 'error_summary': str(exc),
-                                   'end_date': datetime.now()})
-                    cr.commit()
-        except Exception as exc:
-            _log.error('Thread reconcile_store: errore critico: %s', exc, exc_info=True)
 
     @api.model
     def _thread_download_images(self, db, uid, ctx, log_id):
@@ -300,6 +336,26 @@ class ResConfigSettings(models.TransientModel):
                 engine.sync_prices_and_quantities(log_rec)
             except Exception as exc:
                 _log.error('Thread sync_price_qty fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc),
+                               'end_date': datetime.now()})
+                cr.commit()
+
+    @api.model
+    def _thread_seed_fbm_stock(self, db, uid, ctx, log_id):
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from ..services.sync_engine import SyncEngine
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            try:
+                engine = SyncEngine(env, None)
+                updated, skipped, errors = engine.seed_fbm_stock_from_amazon_qty(log_rec)
+                _log.info('Recupero giacenza FBM: %d aggiornati, %d saltati, %d errori',
+                          updated, skipped, errors)
+            except Exception as exc:
+                _log.error('Thread seed_fbm_stock fallito: %s', exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc),
                                'end_date': datetime.now()})
                 cr.commit()

@@ -1,7 +1,60 @@
 from datetime import datetime
 
-from odoo import fields, models
+from odoo import api, fields, models
 from odoo.exceptions import UserError
+
+
+def _apply_amazon_pricelist_markup(env, base_price):
+    """
+    Applica al prezzo base la regola del listino 'Amazon' (Vendite/Inventario →
+    Configurazione → Listini prezzi), gestita dall'utente nella UI standard di
+    Odoo. Se il listino/la regola non esistono, ritorna il prezzo base invariato
+    (nessun markup).
+    """
+    pricelist = env.ref('ke_amazon_sync.pricelist_amazon', raise_if_not_found=False)
+    if not pricelist or not pricelist.item_ids:
+        return base_price
+    item = pricelist.item_ids[0]
+    # Convenzione Odoo per le regole 'formula': uno sconto negativo è una maggiorazione.
+    markup_pct = -(item.price_discount or 0.0)
+    price = base_price * (1 + markup_pct / 100.0)
+    if item.price_round:
+        price = round(price / item.price_round) * item.price_round
+    return price
+
+
+def _get_amazon_vat_info(product):
+    """
+    Ritorna (aliquota, price_include) dalla prima tassa di vendita configurata
+    sul prodotto (product.taxes_id) — così il calcolo si adatta da solo sia
+    all'aliquota reale (22%/10%/4%...) sia al fatto che quel prodotto tratti
+    list_price come netto o come lordo (price_include della tassa), senza dover
+    verificare a mano le impostazioni fiscali generali di Odoo.
+    Se il prodotto non ha tasse di vendita assegnate, usa l'aliquota di default
+    configurata in Impostazioni → Amazon e assume list_price netto.
+    """
+    tax = product.taxes_id.filtered(
+        lambda t: t.type_tax_use == 'sale' and t.amount_type == 'percent'
+    )[:1]
+    if tax:
+        return tax.amount, tax.price_include
+    rate = float(product.env['ir.config_parameter'].sudo().get_param(
+        'ke_amazon_sync.default_vat_rate', '22'
+    ))
+    return rate, False
+
+
+def compute_amazon_sale_price(product, base_price):
+    """
+    Prezzo finale IVA inclusa da comunicare ad Amazon, a partire da base_price
+    (list_price o lst_price del prodotto, nella convenzione — netta o lorda —
+    che risulta dalla sua configurazione fiscale): scorpora l'IVA se necessario
+    → applica il markup del listino 'Amazon' sul netto → reintegra l'IVA.
+    """
+    rate, price_include = _get_amazon_vat_info(product)
+    net_price = base_price / (1 + rate / 100.0) if price_include else base_price
+    marked_up = _apply_amazon_pricelist_markup(product.env, net_price)
+    return round(marked_up * (1 + rate / 100.0), 2)
 
 
 class ProductTemplate(models.Model):
@@ -43,6 +96,58 @@ class ProductTemplate(models.Model):
     ], string='Fulfillment', copy=False,
        help='FBA: Amazon gestisce le spedizioni. FBM: spedisci tu.')
 
+    x_amazon_warehouse_id = fields.Many2one(
+        'stock.warehouse', string='Magazzino Amazon',
+        compute='_compute_x_amazon_warehouse_id', store=True,
+        help='Magazzino Odoo configurato (Impostazioni → Amazon) corrispondente al '
+             'fulfillment di questo prodotto — solo indicativo, non riflette per forza '
+             "dove si trova fisicamente la giacenza. Utile per filtrare/raggruppare "
+             'il catalogo per magazzino Amazon.',
+    )
+
+    @api.depends('x_amazon_fulfillment')
+    def _compute_x_amazon_warehouse_id(self):
+        params = self.env['ir.config_parameter'].sudo()
+        fba_id = int(params.get_param('ke_amazon_sync.fba_warehouse_id', 0) or 0)
+        fbm_id = int(params.get_param('ke_amazon_sync.fbm_warehouse_id', 0) or 0)
+        for product in self:
+            if product.x_amazon_fulfillment == 'fba':
+                product.x_amazon_warehouse_id = fba_id
+            elif product.x_amazon_fulfillment == 'fbm':
+                product.x_amazon_warehouse_id = fbm_id
+            else:
+                product.x_amazon_warehouse_id = False
+
+    x_amazon_odoo_fbm_qty = fields.Float(
+        'Giacenza Odoo (magazzino FBM)',
+        compute='_compute_x_amazon_odoo_fbm_qty', store=True,
+        help='Giacenza attuale in Odoo nel magazzino FBM configurato, calcolata alla '
+             "stessa maniera di quanto verrebbe inviato ad Amazon. Si ricalcola a "
+             "ogni sync prodotti — confrontala con 'Quantità Amazon (dichiarata)' "
+             'per individuare disallineamenti tra i due sistemi.',
+    )
+    x_amazon_qty_diff = fields.Float(
+        'Differenza giacenza (Amazon - Odoo)',
+        compute='_compute_x_amazon_odoo_fbm_qty', store=True,
+        help='x_amazon_qty meno la giacenza reale Odoo nel magazzino FBM. Zero = allineati. '
+             'Utile per ordinare/filtrare il catalogo e trovare le divergenze più grandi.',
+    )
+
+    @api.depends('x_amazon_qty', 'x_amazon_fulfillment')
+    def _compute_x_amazon_odoo_fbm_qty(self):
+        params = self.env['ir.config_parameter'].sudo()
+        fbm_id = int(params.get_param('ke_amazon_sync.fbm_warehouse_id', 0) or 0)
+        fbm_warehouse = self.env['stock.warehouse'].browse(fbm_id) if fbm_id else None
+        ctx = {'warehouse': fbm_warehouse.id} if fbm_warehouse else {}
+        for product in self:
+            if product.x_amazon_fulfillment != 'fbm' or not fbm_warehouse:
+                product.x_amazon_odoo_fbm_qty = 0.0
+                product.x_amazon_qty_diff = 0.0
+                continue
+            odoo_qty = product.with_context(**ctx).qty_available
+            product.x_amazon_odoo_fbm_qty = odoo_qty
+            product.x_amazon_qty_diff = (product.x_amazon_qty or 0) - odoo_qty
+
     x_amazon_found_by_manufacturer = fields.Boolean(
         'Presente su Amazon (produttore)',
         copy=False,
@@ -71,6 +176,52 @@ class ProductTemplate(models.Model):
         help='Quantità disponibile FBA letta da Amazon.',
     )
 
+    # --- Categoria Amazon ---
+    x_amazon_category = fields.Char(
+        'Categoria Amazon', copy=False,
+        help='Nome categoria browse Amazon (browseClassification).',
+    )
+    x_amazon_browse_node_id = fields.Char(
+        'Amazon Browse Node ID', copy=False,
+        help='ID numerico del browse node Amazon. Usato per la pubblicazione del listing.',
+    )
+
+    # --- Pubblicazione su Amazon ---
+    x_amazon_brand = fields.Char(
+        'Brand Amazon', copy=False,
+        help='Brand/marchio come registrato su Amazon. Obbligatorio per creare un nuovo listing.',
+    )
+    x_amazon_condition = fields.Selection([
+        ('new_new', 'Nuovo'),
+        ('used_like_new', 'Usato — Come nuovo'),
+        ('used_very_good', 'Usato — Molto buono'),
+        ('used_good', 'Usato — Buono'),
+        ('used_acceptable', 'Usato — Accettabile'),
+    ], string='Condizione Amazon', default='new_new', copy=False)
+    x_amazon_publish_state = fields.Selection([
+        ('not_published', 'Non pubblicato'),
+        ('pending', 'In elaborazione'),
+        ('published', 'Pubblicato'),
+        ('error', 'Errore'),
+    ], string='Stato pubblicazione', default='not_published', readonly=True, copy=False)
+    x_amazon_publish_error = fields.Text(
+        'Errore pubblicazione', readonly=True, copy=False,
+    )
+
+    # --- Dimensioni prodotto ---
+    x_amazon_length = fields.Float(
+        'Lunghezza (cm)', copy=False,
+        help='Lunghezza del prodotto in cm. Popolata automaticamente dal Catalog Amazon.',
+    )
+    x_amazon_width = fields.Float(
+        'Larghezza (cm)', copy=False,
+        help='Larghezza del prodotto in cm. Popolata automaticamente dal Catalog Amazon.',
+    )
+    x_amazon_height = fields.Float(
+        'Altezza (cm)', copy=False,
+        help='Altezza del prodotto in cm. Popolata automaticamente dal Catalog Amazon.',
+    )
+
     # ------------------------------------------------------------------
     # Azioni manuali sul singolo prodotto
     # ------------------------------------------------------------------
@@ -83,6 +234,16 @@ class ProductTemplate(models.Model):
         except ValueError as exc:
             raise UserError(str(exc)) from exc
         return client
+
+    def get_amazon_sale_price(self):
+        """
+        Prezzo IVA inclusa da comunicare ad Amazon: list_price con il markup del
+        listino 'Amazon' applicato (Vendite/Inventario → Configurazione →
+        Listini prezzi) e l'IVA reintegrata — aliquota e convenzione
+        netto/lordo lette dalle tasse di vendita configurate sul prodotto.
+        """
+        self.ensure_one()
+        return compute_amazon_sale_price(self, self.list_price)
 
     def action_amazon_sync_price_qty(self):
         """Sincronizza prezzo e/o quantità di questo prodotto su Amazon."""
@@ -99,7 +260,7 @@ class ProductTemplate(models.Model):
 
         if self.x_amazon_sync_price:
             try:
-                client.patch_price(sku, product_type, self.list_price)
+                client.patch_price(sku, product_type, self.get_amazon_sale_price())
             except Exception as exc:
                 errors.append(f'prezzo: {exc}')
 
@@ -135,6 +296,173 @@ class ProductTemplate(models.Model):
         if not img:
             raise UserError('Nessuna immagine disponibile su Amazon per questo prodotto.')
         self.write({'image_1920': img})
+
+    def action_amazon_search_browse_node(self):
+        """Apre il wizard di ricerca categoria (browse node) Amazon."""
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'ke.amazon.browse.node.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {
+                'default_product_id': self.id,
+                'default_keyword': self.name or '',
+            },
+        }
+
+    def action_amazon_search_product_type(self):
+        """Apre il wizard di ricerca tipo prodotto Amazon."""
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'ke.amazon.product.type.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {
+                'default_product_id': self.id,
+                'default_keyword': self.name or '',
+            },
+        }
+
+    def action_amazon_publish(self):
+        """
+        Pubblica questo prodotto su Amazon.
+        - Se ha già un ASIN: crea/aggiorna l'offerta (prezzo, quantità, condizione).
+        - Se non ha ASIN: invia un listing completo, Amazon assegnerà l'ASIN.
+        """
+        self.ensure_one()
+
+        sku = self.x_amazon_sku or self.default_code
+        if not sku:
+            raise UserError(
+                'Configura un Codice Prodotto (SKU) prima di pubblicare su Amazon.'
+            )
+
+        client = self._get_sp_client()
+        marketplace_id = client.marketplace_id
+        product_type = self.x_amazon_product_type or 'PRODUCT'
+        condition = self.x_amazon_condition or 'new_new'
+        price = self.get_amazon_sale_price()
+        is_fba = self.x_amazon_fulfillment == 'fba'
+
+        if self.x_amazon_asin:
+            # --- Scenario A: ASIN noto → offerta su listing esistente ---
+            qty = 0 if is_fba else int(self.with_context(warehouse=False).qty_available)
+            fulfillment_code = 'AMAZON_NA' if is_fba else 'DEFAULT'
+            attributes = {
+                'condition_type': [{'value': condition, 'marketplace_id': marketplace_id}],
+                'list_price': [{'value': price, 'currency': 'EUR', 'marketplace_id': marketplace_id}],
+                'fulfillment_availability': [{
+                    'fulfillment_channel_code': fulfillment_code,
+                    'quantity': qty,
+                    'marketplace_id': marketplace_id,
+                }],
+            }
+            requirements = 'LISTING_OFFER_ONLY'
+        else:
+            # --- Scenario B: nessun ASIN → listing completo ---
+            if not self.x_amazon_brand:
+                raise UserError(
+                    'Inserisci il Brand Amazon (campo "Brand Amazon") prima di pubblicare un nuovo listing.'
+                )
+            qty = int(self.with_context(warehouse=False).qty_available)
+            base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url', '')
+            image_url = f'{base_url}/web/image/product.template/{self.id}/image_1920' if base_url else ''
+
+            attributes = {
+                'item_name': [{'value': self.name, 'language_tag': client.locale, 'marketplace_id': marketplace_id}],
+                'brand': [{'value': self.x_amazon_brand, 'marketplace_id': marketplace_id}],
+                'condition_type': [{'value': condition, 'marketplace_id': marketplace_id}],
+                'list_price': [{'value': price, 'currency': 'EUR', 'marketplace_id': marketplace_id}],
+                'fulfillment_availability': [{
+                    'fulfillment_channel_code': 'DEFAULT',
+                    'quantity': qty,
+                    'marketplace_id': marketplace_id,
+                }],
+            }
+            if image_url:
+                attributes['main_product_image_locator'] = [{'media_location': image_url, 'marketplace_id': marketplace_id}]
+            description = self.description_sale or self.description or ''
+            if description:
+                attributes['product_description'] = [{'value': str(description), 'language_tag': client.locale, 'marketplace_id': marketplace_id}]
+            if self.barcode:
+                attributes['externally_assigned_product_identifier'] = [{'type': 'ean', 'value': self.barcode, 'marketplace_id': marketplace_id}]
+            requirements = 'LISTING'
+
+        try:
+            result = client.put_listing(sku, product_type, attributes, requirements)
+        except Exception as exc:
+            self.write({'x_amazon_publish_state': 'error', 'x_amazon_publish_error': str(exc)})
+            raise UserError(f'Errore pubblicazione Amazon: {exc}') from exc
+
+        status = result.get('status', '')
+        issues = result.get('issues', [])
+        errors = [i for i in issues if i.get('severity') == 'ERROR']
+        warnings = [i for i in issues if i.get('severity') == 'WARNING']
+
+        if errors or status == 'INVALID':
+            msgs = '\n'.join(f"[{i.get('code', '?')}] {i.get('message', '')}" for i in errors) or 'Risposta non valida da Amazon.'
+            self.write({'x_amazon_publish_state': 'error', 'x_amazon_publish_error': msgs})
+            raise UserError(f'Amazon ha rifiutato il listing:\n{msgs}')
+
+        vals = {
+            'x_amazon_publish_error': False,
+            'x_amazon_last_sync': datetime.now(),
+        }
+        if not self.x_amazon_sku:
+            vals['x_amazon_sku'] = sku
+
+        if self.x_amazon_asin:
+            vals['x_amazon_publish_state'] = 'published'
+            vals['x_amazon_status'] = 'active'
+        else:
+            vals['x_amazon_publish_state'] = 'pending'
+        self.write(vals)
+
+        warning_text = '\n'.join(f"[{i.get('code', '?')}] {i.get('message', '')}" for i in warnings)
+        if not self.x_amazon_asin:
+            msg = 'Listing inviato ad Amazon. Amazon assegnerà l\'ASIN entro qualche minuto — usa "Verifica ASIN" per recuperarlo.'
+            if warning_text:
+                msg += f'\n\nAvvisi:\n{warning_text}'
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {'title': 'In elaborazione', 'message': msg, 'type': 'warning', 'sticky': True},
+            }
+        if warning_text:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {'title': 'Pubblicato con avvisi', 'message': warning_text, 'type': 'warning', 'sticky': False},
+            }
+
+    def action_amazon_get_asin(self):
+        """Recupera l'ASIN assegnato da Amazon dopo l'invio del listing (Scenario B)."""
+        self.ensure_one()
+        sku = self.x_amazon_sku or self.default_code
+        if not sku:
+            raise UserError('Nessun SKU disponibile per questa ricerca.')
+
+        client = self._get_sp_client()
+        try:
+            payload = client.get_listing_item(sku)
+        except Exception as exc:
+            raise UserError(f'Impossibile recuperare il listing da Amazon: {exc}') from exc
+
+        summaries = payload.get('summaries', [{}])
+        s0 = summaries[0] if summaries else {}
+        asin = s0.get('asin', '')
+        if not asin:
+            raise UserError('Amazon non ha ancora assegnato un ASIN. Attendi qualche minuto e riprova.')
+
+        self.write({
+            'x_amazon_asin': asin,
+            'x_amazon_status': 'active',
+            'x_amazon_publish_state': 'published',
+            'x_amazon_publish_error': False,
+            'x_amazon_last_sync': datetime.now(),
+        })
 
     def action_amazon_refresh_from_catalog(self):
         """Aggiorna nome, descrizione, EAN e immagine dal Catalog Amazon."""

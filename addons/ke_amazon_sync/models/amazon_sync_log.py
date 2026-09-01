@@ -20,6 +20,12 @@ class AmazonSyncLog(models.Model):
         ('price_qty', 'Sincronizzazione Prezzi/Quantità'),
         ('download_images', 'Download Immagini'),
         ('reconcile', 'Riconciliazione Store'),
+        ('apply_cat_mapping', 'Aggiornamento da Catalog API'),
+        ('import_orders', 'Import Ordini Amazon'),
+        ('sync_fba', 'Sync Giacenze FBA'),
+        ('returns', 'Import Resi Amazon'),
+        ('seed_fbm_stock', 'Recupero Giacenza FBM da Amazon'),
+        ('move_to_general', 'Spostamento Giacenza verso Magazzino Generale'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),
@@ -67,10 +73,32 @@ class AmazonSyncLog(models.Model):
         }
 
     def action_mark_done(self):
+        """Segna il log come terminato e ferma il processo associato se in corso."""
         self.ensure_one()
+        params = self.env['ir.config_parameter'].sudo()
+        if self.sync_type == 'import_orders':
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            attach_id = int(params.get_param('ke_amazon_sync.orders_import_page_attach_id', '0') or 0)
+            if attach_id:
+                self.env['ir.attachment'].browse(attach_id).unlink()
+            params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
+            params.set_param('ke_amazon_sync.orders_import_offset', '0')
+            self._disable_orders_import_cron()
+        elif self.sync_type == 'sync_fba':
+            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
+            self._disable_fba_sync_cron()
+        elif self.sync_type == 'returns':
+            params.set_param('ke_amazon_sync.returns_state', 'idle')
+            self._disable_returns_cron()
         self.write({'state': 'done', 'end_date': fields.Datetime.now()})
 
     def action_export_csv(self):
+        self.ensure_one()
+        if self.sync_type == 'full_import':
+            return self._export_csv_full_import()
+        return self._export_csv_reconcile()
+
+    def _export_csv_reconcile(self):
         import base64
         import csv
         import io
@@ -79,12 +107,15 @@ class AmazonSyncLog(models.Model):
         self.ensure_one()
 
         # Pattern delle righe del log di riconciliazione
-        patterns = [
-            ('OK',          re.compile(r'^\[OK\]\s+(.+?)\s+SKU=(\S+)\s+stato=(\S+)\s+prezzo=([\d.]+)€$')),
-            ('SOLO_ODOO',   re.compile(r'^\[SOLO ODOO\]\s+(.+?)\s+SKU=(\S+)')),
-            ('SOLO_AMAZON', re.compile(r'^\[SOLO AMAZON\]\s+SKU=(\S+)\s+ASIN=(\S+)\s+"(.*)"$')),
-            ('ERRORE',      re.compile(r'^\[ERRORE\]\s+(?:variante\s+)?SKU=(\S+):\s+(.+)$')),
-        ]
+        pat_ok          = re.compile(r'^\[OK\]\s+(.+?)\s+SKU=(\S+)\s+stato=(\S+)\s+prezzo=([\d.]+)€')
+        pat_solo_odoo   = re.compile(r'^\[SOLO ODOO\]\s+(.+?)\s+SKU=(\S+)(?:\s+ASIN=(\S+))?')
+        pat_solo_amazon = re.compile(r'^\[SOLO AMAZON\]\s+SKU=(\S+)\s+ASIN=(\S+)\s+"(.*)"$')
+        pat_sku_upd_asin = re.compile(r'^\[SKU AGGIORNATO\]\s+(.+?)\s+ASIN=(\S+)\s+(\S+)\s+→\s+(\S+)')
+        pat_sku_upd_plus = re.compile(
+            r'^\[SKU AGGIORNATO\]\s+(.+?)\s+SKU=(\S+)\s+→\s+(\S+)'
+            r'(?:\s+stato=(\S+))?(?:\s+prezzo=([\d.]+)€)?$'
+        )
+        pat_errore      = re.compile(r'^\[ERRORE\]\s+(?:variante\s+)?SKU=(\S+):\s+(.+)$')
 
         rows = []
         for line in (self.log_lines or '').splitlines():
@@ -93,7 +124,7 @@ class AmazonSyncLog(models.Model):
                 continue
 
             if line.startswith('[OK]'):
-                m = patterns[0][1].match(line)
+                m = pat_ok.match(line)
                 if m:
                     rows.append({
                         'tipo': 'OK',
@@ -105,19 +136,19 @@ class AmazonSyncLog(models.Model):
                         'note': '',
                     })
             elif line.startswith('[SOLO ODOO]'):
-                m = patterns[1][1].match(line)
+                m = pat_solo_odoo.match(line)
                 if m:
                     rows.append({
                         'tipo': 'SOLO_ODOO',
                         'nome': m.group(1),
                         'sku': m.group(2),
-                        'asin': '',
+                        'asin': m.group(3) or '',
                         'stato_amazon': '',
                         'prezzo_amazon': '',
                         'note': 'Presente in Odoo ma non trovato su Amazon',
                     })
             elif line.startswith('[SOLO AMAZON]'):
-                m = patterns[2][1].match(line)
+                m = pat_solo_amazon.match(line)
                 if m:
                     rows.append({
                         'tipo': 'SOLO_AMAZON',
@@ -128,8 +159,33 @@ class AmazonSyncLog(models.Model):
                         'prezzo_amazon': '',
                         'note': 'Presente su Amazon ma non importato in Odoo',
                     })
+            elif line.startswith('[SKU AGGIORNATO]'):
+                if 'ASIN=' in line:
+                    m = pat_sku_upd_asin.match(line)
+                    if m:
+                        rows.append({
+                            'tipo': 'SKU_AGGIORNATO',
+                            'nome': m.group(1),
+                            'sku': m.group(4),
+                            'asin': m.group(2),
+                            'stato_amazon': '',
+                            'prezzo_amazon': '',
+                            'note': f'SKU aggiornato da {m.group(3)} (rifornimento)',
+                        })
+                else:
+                    m = pat_sku_upd_plus.match(line)
+                    if m:
+                        rows.append({
+                            'tipo': 'SKU_AGGIORNATO',
+                            'nome': m.group(1),
+                            'sku': m.group(3),
+                            'asin': '',
+                            'stato_amazon': m.group(4) or '',
+                            'prezzo_amazon': m.group(5) or '',
+                            'note': f'SKU aggiornato da {m.group(2)} (rifornimento)',
+                        })
             elif line.startswith('[ERRORE]'):
-                m = patterns[3][1].match(line)
+                m = pat_errore.match(line)
                 if m:
                     rows.append({
                         'tipo': 'ERRORE',
@@ -148,6 +204,117 @@ class AmazonSyncLog(models.Model):
         writer.writerows(rows)
 
         filename = f'riconciliazione_amazon_{self.id}.csv'
+        attachment = self.env['ir.attachment'].create({
+            'name': filename,
+            'type': 'binary',
+            'datas': base64.b64encode(('﻿' + buf.getvalue()).encode('utf-8')).decode(),
+            'res_model': self._name,
+            'res_id': self.id,
+        })
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content/{attachment.id}/{filename}?download=true',
+            'target': 'self',
+        }
+
+    def _export_csv_full_import(self):
+        import base64
+        import csv
+        import io
+        import re
+
+        self.ensure_one()
+
+        # Pattern delle righe del log di import (full_import / full_import_chunk / full_import_report_rows)
+        pat_creato           = re.compile(r'^CREATO:\s+(\S+)\s+/\s+(\S+)\s+—\s+(.*)$')
+        pat_creato_variante  = re.compile(r'^CREATO variante:\s+(\S+)\s+/\s+(\S+)\s+\[(.*?)\]\s+→\s+(.*)$')
+        pat_aggiornato       = re.compile(r'^AGGIORNATO:\s+(\S+)\s+/\s+(\S+)\s+—\s+(.*)$')
+        pat_aggiornato_var   = re.compile(r'^AGGIORNATO variante:\s+(\S+)\s+/\s+(\S+)\s+→\s+(.*)$')
+        pat_saltato_sost     = re.compile(r'^SALTATO \(sostituito da (\S+)\):\s+(\S+)$')
+        pat_saltato_esiste   = re.compile(r'^SALTATO \((?:già esiste|variante già esiste)\):\s+(\S+)$')
+        pat_saltato_parent   = re.compile(r'^SALTATO \(parent listing\):\s+(\S+)\s+/\s+(\S+)$')
+        pat_saltato_dim      = re.compile(r'^SALTATO\s+(\S+)\s+/\s+(\S+):\s+(.*)$')
+        pat_errore_var_crea  = re.compile(r'^ERRORE creazione variante:\s+(\S+)\s+/\s+(\S+)$')
+        pat_errore_variante  = re.compile(r'^ERRORE variante\s+(\S+):\s+(.*)$')
+        pat_errore           = re.compile(r'^ERRORE\s+(\S+):\s+(.*)$')
+
+        rows = []
+        unmatched = 0
+        for raw_line in (self.log_lines or '').splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith('Report ') or line.startswith('Store Amazon'):
+                continue
+
+            m = pat_creato_variante.match(line)
+            if m:
+                rows.append({'tipo': 'CREATO_VARIANTE', 'sku': m.group(1), 'asin': m.group(2),
+                             'nome': m.group(4), 'note': m.group(3)})
+                continue
+            m = pat_creato.match(line)
+            if m:
+                rows.append({'tipo': 'CREATO', 'sku': m.group(1), 'asin': m.group(2),
+                             'nome': m.group(3), 'note': ''})
+                continue
+            m = pat_aggiornato_var.match(line)
+            if m:
+                rows.append({'tipo': 'AGGIORNATO_VARIANTE', 'sku': m.group(1), 'asin': m.group(2),
+                             'nome': m.group(3), 'note': ''})
+                continue
+            m = pat_aggiornato.match(line)
+            if m:
+                rows.append({'tipo': 'AGGIORNATO', 'sku': m.group(1), 'asin': m.group(2),
+                             'nome': m.group(3), 'note': ''})
+                continue
+            m = pat_saltato_sost.match(line)
+            if m:
+                rows.append({'tipo': 'SALTATO', 'sku': m.group(2), 'asin': '', 'nome': '',
+                             'note': f'sostituito da {m.group(1)}'})
+                continue
+            m = pat_saltato_esiste.match(line)
+            if m:
+                rows.append({'tipo': 'SALTATO', 'sku': m.group(1), 'asin': '', 'nome': '',
+                             'note': 'già esistente in Odoo'})
+                continue
+            m = pat_saltato_parent.match(line)
+            if m:
+                rows.append({'tipo': 'SALTATO', 'sku': m.group(1), 'asin': m.group(2), 'nome': '',
+                             'note': 'parent listing'})
+                continue
+            m = pat_saltato_dim.match(line)
+            if m:
+                rows.append({'tipo': 'SALTATO', 'sku': m.group(1), 'asin': m.group(2), 'nome': '',
+                             'note': m.group(3)})
+                continue
+            m = pat_errore_var_crea.match(line)
+            if m:
+                rows.append({'tipo': 'ERRORE', 'sku': m.group(1), 'asin': m.group(2), 'nome': '',
+                             'note': 'errore creazione variante'})
+                continue
+            m = pat_errore_variante.match(line)
+            if m:
+                rows.append({'tipo': 'ERRORE', 'sku': m.group(1), 'asin': '', 'nome': '',
+                             'note': m.group(2)})
+                continue
+            m = pat_errore.match(line)
+            if m:
+                rows.append({'tipo': 'ERRORE', 'sku': m.group(1), 'asin': '', 'nome': '',
+                             'note': m.group(2)})
+                continue
+
+            # Riga non riconosciuta dal parser: esportata comunque per non perdere informazioni
+            unmatched += 1
+            rows.append({'tipo': 'ALTRO', 'sku': '', 'asin': '', 'nome': '', 'note': line})
+
+        if unmatched:
+            _log.info('Export CSV import log %d: %d righe non riconosciute dal parser (tipo=ALTRO)',
+                       self.id, unmatched)
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=['tipo', 'sku', 'asin', 'nome', 'note'], delimiter=';')
+        writer.writeheader()
+        writer.writerows(rows)
+
+        filename = f'import_amazon_{self.id}.csv'
         attachment = self.env['ir.attachment'].create({
             'name': filename,
             'type': 'binary',
@@ -437,27 +604,280 @@ class AmazonSyncLog(models.Model):
             _log.error('Cron check_new_products fallito: %s', e, exc_info=True)
             log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
 
-    def _cron_reconcile_store(self):
+    def _cron_reconcile_store(self, name_prefix='Riconciliazione store'):
+        """
+        Avvia una nuova riconciliazione via Reports API (nessun limite di prodotti).
+        Crea il log, imposta i parametri di stato e abilita il cron di elaborazione chunk.
+        Usata sia dal cron automatico sia dal trigger manuale (impostazioni).
+        Ritorna il log creato, o None se non è stato possibile avviarla.
+        """
         client = SpApiClient(self.env)
         try:
             client.validate_credentials()
         except ValueError:
             _log.warning('Cron reconcile_store saltato: credenziali SP-API non configurate.')
-            return
+            return None
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.reconcile_state') == 'running':
+            _log.info('Riconciliazione già in corso, salto avvio.')
+            return None
         log_rec = self.create({
-            'name': f'Riconciliazione store — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'reconcile',
             'state': 'running',
             'start_date': fields.Datetime.now(),
         })
+        params.set_param('ke_amazon_sync.reconcile_state', 'running')
+        params.set_param('ke_amazon_sync.reconcile_log_id', str(log_rec.id))
+        params.set_param('ke_amazon_sync.reconcile_report_id', '')
+        params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
+        self.env.cr.commit()
+        cron = self.env.ref('ke_amazon_sync.cron_reconcile_chunk', raise_if_not_found=False)
+        if cron:
+            cron.sudo().active = True
+        return log_rec
+
+    def _cron_reconcile_chunk(self):
+        """
+        Cron di elaborazione riconciliazione (ogni 2 min, abilitato da _cron_reconcile_store).
+        State machine a tre fasi:
+          Fase 1 – nessun report_id: richiede il report Amazon
+          Fase 2 – report_id presente ma nessun allegato: controlla/scarica il report
+          Fase 3 – allegato presente: esegue la riconciliazione e chiude
+        """
+        import base64
+        import json
+
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.reconcile_state') != 'running':
+            self._disable_reconcile_cron()
+            return
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron reconcile_chunk saltato: credenziali SP-API non configurate.')
+            return
+
+        log_id = int(params.get_param('ke_amazon_sync.reconcile_log_id', '0') or 0)
+        if not log_id:
+            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+            self.env.cr.commit()
+            self._disable_reconcile_cron()
+            return
+
+        log_rec = self.browse(log_id)
+        if not log_rec.exists():
+            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+            self.env.cr.commit()
+            self._disable_reconcile_cron()
+            return
+
+        report_id = params.get_param('ke_amazon_sync.reconcile_report_id', '')
+        attach_id_s = params.get_param('ke_amazon_sync.reconcile_report_attach_id', '')
+
+        # Fase 1: crea il report
+        if not report_id:
+            try:
+                report_id = client.request_listings_report()
+            except Exception as e:
+                _log.error('Creazione report per riconciliazione fallita: %s', e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+                self.env.cr.commit()
+                self._disable_reconcile_cron()
+                return
+            params.set_param('ke_amazon_sync.reconcile_report_id', report_id)
+            msg = f'Report Amazon richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
+            log_rec.write({'log_lines': msg})
+            _log.info(msg)
+            self.env.cr.commit()
+            return
+
+        # Fase 2: scarica il report quando è pronto
+        if not attach_id_s:
+            try:
+                document_id = client.check_report_ready(report_id)
+            except Exception as e:
+                _log.error('Errore controllo stato report %s: %s', report_id, e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+                self.env.cr.commit()
+                self._disable_reconcile_cron()
+                return
+
+            if document_id is None:
+                current_log = log_rec.log_lines or ''
+                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
+                self.env.cr.commit()
+                return
+
+            try:
+                rows = client.download_report_rows(document_id)
+            except Exception as e:
+                _log.error('Download report riconciliazione %s fallito: %s', document_id, e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+                self.env.cr.commit()
+                self._disable_reconcile_cron()
+                return
+
+            rows_json = json.dumps(rows, ensure_ascii=False)
+            attachment = self.env['ir.attachment'].create({
+                'name': f'amazon_reconcile_report_{log_rec.id}.json',
+                'type': 'binary',
+                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
+                'res_model': 'ke.amazon.sync.log',
+                'res_id': log_rec.id,
+            })
+            params.set_param('ke_amazon_sync.reconcile_report_attach_id', str(attachment.id))
+            msg = f'Report scaricato: {len(rows)} listing totali. Avvio riconciliazione...'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+            _log.info(msg)
+            self.env.cr.commit()
+            return
+
+        # Fase 3: esegui la riconciliazione
+        try:
+            attach_id = int(attach_id_s)
+            attachment = self.env['ir.attachment'].browse(attach_id)
+            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
+        except Exception as e:
+            _log.error('Errore lettura allegato report riconciliazione: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+            self.env.cr.commit()
+            self._disable_reconcile_cron()
+            return
+
         try:
             engine = SyncEngine(self.env, client)
-            matched, only_odoo, only_amazon, errors = engine.reconcile_store(log_rec)
+            matched, only_odoo, only_amazon, errors = engine.reconcile_from_report_rows(log_rec, rows)
             _log.info('Riconciliazione: %d trovati, %d solo Odoo, %d solo Amazon, %d errori',
                       matched, only_odoo, only_amazon, errors)
         except Exception as e:
-            _log.error('Cron reconcile_store fallito: %s', e, exc_info=True)
+            _log.error('Cron reconcile_chunk fallito: %s', e, exc_info=True)
             log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+            self.env.cr.commit()
+            self._disable_reconcile_cron()
+            return
+
+        attachment.unlink()
+        params.set_param('ke_amazon_sync.reconcile_report_id', '')
+        params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
+        params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+        params.set_param('ke_amazon_sync.reconcile_log_id', '')
+        self.env.cr.commit()
+        self._disable_reconcile_cron()
+
+    def _disable_reconcile_cron(self):
+        cron = self.env.ref('ke_amazon_sync.cron_reconcile_chunk', raise_if_not_found=False)
+        if cron:
+            try:
+                cron.sudo().active = False
+            except Exception:
+                _log.warning('_disable_reconcile_cron: impossibile disabilitare da dentro il cron, '
+                             'sarà idle al prossimo ciclo.')
+
+    _CAT_MAP_CHUNK_SIZE = 50
+
+    def action_start_apply_category_mapping(self):
+        from odoo.exceptions import UserError
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError as exc:
+            raise UserError(str(exc)) from exc
+
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.cat_map_state') == 'running':
+            raise UserError('Mapping categorie già in corso. Controlla il log sincronizzazioni.')
+
+        log_rec = self.create({
+            'name': f'Aggiornamento da Catalog API — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'apply_cat_mapping',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+        })
+        params.set_param('ke_amazon_sync.cat_map_state', 'running')
+        params.set_param('ke_amazon_sync.cat_map_log_id', str(log_rec.id))
+        params.set_param('ke_amazon_sync.cat_map_offset', '0')
+        self.env.cr.commit()
+
+        cron = self.env.ref('ke_amazon_sync.cron_apply_category_mapping', raise_if_not_found=False)
+        if cron:
+            cron.sudo().active = True
+
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Log Mapping Categorie',
+            'res_model': 'ke.amazon.sync.log',
+            'res_id': log_rec.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    def _cron_apply_category_mapping(self):
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.cat_map_state') != 'running':
+            self._disable_cat_map_cron()
+            return
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron apply_category_mapping saltato: credenziali SP-API non configurate.')
+            return
+
+        log_id = int(params.get_param('ke_amazon_sync.cat_map_log_id', '0') or 0)
+        if not log_id:
+            params.set_param('ke_amazon_sync.cat_map_state', 'idle')
+            self.env.cr.commit()
+            self._disable_cat_map_cron()
+            return
+
+        log_rec = self.browse(log_id)
+        if not log_rec.exists():
+            params.set_param('ke_amazon_sync.cat_map_state', 'idle')
+            self.env.cr.commit()
+            self._disable_cat_map_cron()
+            return
+
+        offset = int(params.get_param('ke_amazon_sync.cat_map_offset', '0') or 0)
+        try:
+            engine = SyncEngine(self.env, client)
+            next_offset, total = engine.apply_category_mapping(log_rec, offset, self._CAT_MAP_CHUNK_SIZE)
+        except Exception as e:
+            _log.error('Cron apply_category_mapping fallito: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.cat_map_state', 'idle')
+            self.env.cr.commit()
+            self._disable_cat_map_cron()
+            return
+
+        if next_offset is None:
+            log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.cat_map_state', 'idle')
+            params.set_param('ke_amazon_sync.cat_map_offset', '')
+            self.env.cr.commit()
+            self._disable_cat_map_cron()
+            _log.info('apply_category_mapping completato: %d prodotti totali.', total)
+        else:
+            params.set_param('ke_amazon_sync.cat_map_offset', str(next_offset))
+            _log.info('apply_category_mapping: %d/%d prodotti elaborati.', next_offset, total)
+
+    def _disable_cat_map_cron(self):
+        cron = self.env.ref('ke_amazon_sync.cron_apply_category_mapping', raise_if_not_found=False)
+        if cron:
+            try:
+                cron.sudo().active = False
+            except Exception:
+                _log.warning('_disable_cat_map_cron: impossibile disabilitare da dentro il cron, '
+                             'sarà idle al prossimo ciclo.')
 
     def _cron_sync_prices_quantities(self):
         client = SpApiClient(self.env)
@@ -479,4 +899,471 @@ class AmazonSyncLog(models.Model):
             _log.info('Sync prezzi/quantità: %d ok, %d errori', ok, errors)
         except Exception as e:
             _log.error('Cron sync_prices_quantities fallito: %s', e, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Import Ordini Amazon
+    # ------------------------------------------------------------------
+
+    def _cron_import_orders_store(self):
+        """
+        Avvia automaticamente un nuovo import ordini, se non ce n'è già uno in
+        corso. Schedulato periodicamente per tenere sincronizzati gli ordini senza
+        bisogno di avviarlo manualmente ogni volta (stesso pattern di
+        _cron_reconcile_store per i prodotti).
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.orders_import_state') == 'running':
+            _log.info('Import ordini già in corso, salto avvio automatico.')
+            return
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron import_orders_store saltato: credenziali SP-API non configurate.')
+            return
+        self.action_start_import_orders(name_prefix='Import Ordini Amazon (automatico)')
+
+    def action_start_import_orders(self, name_prefix='Import Ordini Amazon'):
+        """Avvia l'import degli ordini Amazon degli ultimi N giorni."""
+        from datetime import timedelta, timezone
+        params = self.env['ir.config_parameter'].sudo()
+        days_back = int(params.get_param('ke_amazon_sync.orders_days_back', '30'))
+        created_after = (
+            fields.Datetime.now().replace(tzinfo=timezone.utc) - timedelta(days=days_back)
+        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        log_rec = self.create({
+            'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'import_orders',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+            'log_lines': f'Importazione ordini degli ultimi {days_back} giorni (da {created_after[:10]}).',
+        })
+        params.set_param('ke_amazon_sync.orders_import_state', 'running')
+        params.set_param('ke_amazon_sync.orders_import_log_id', str(log_rec.id))
+        params.set_param('ke_amazon_sync.orders_import_next_token', '')
+        params.set_param('ke_amazon_sync.orders_import_created_after', created_after)
+        params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
+        params.set_param('ke_amazon_sync.orders_import_offset', '0')
+        self.env.cr.commit()
+
+        cron = self.env.ref('ke_amazon_sync.cron_import_orders_chunk', raise_if_not_found=False)
+        if cron:
+            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': self._name,
+            'res_id': log_rec.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    def _cron_import_orders_chunk(self):
+        """
+        State machine a due fasi, per evitare che una singola invocazione superi
+        il --limit-time-real-cron del server (il rate-limit Amazon di 2s per ordine
+        può far durare una pagina intera diversi minuti):
+          Fase 1 – nessuna pagina in cache: scarica una pagina di ordini Amazon
+                   (fino a 100) e la mette in cache in un ir.attachment
+          Fase 2 – pagina in cache: elabora un blocco di _ORDERS_CHUNK_SIZE ordini
+                   per invocazione, finché la pagina non è esaurita
+        """
+        import base64
+        import json
+
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.orders_import_state') != 'running':
+            self._disable_orders_import_cron()
+            return
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError as e:
+            _log.warning('Cron import_orders saltato: %s', e)
+            log_id = int(params.get_param('ke_amazon_sync.orders_import_log_id', '0') or 0)
+            if log_id:
+                log_rec = self.browse(log_id)
+                if log_rec.exists():
+                    log_rec.write({'state': 'error', 'error_summary': str(e),
+                                   'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_orders_import_cron()
+            return
+
+        log_id = int(params.get_param('ke_amazon_sync.orders_import_log_id', '0') or 0)
+        if not log_id:
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_orders_import_cron()
+            return
+
+        log_rec = self.browse(log_id)
+        if not log_rec.exists():
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_orders_import_cron()
+            return
+
+        created_after = params.get_param('ke_amazon_sync.orders_import_created_after', '')
+        page_attach_id_s = params.get_param('ke_amazon_sync.orders_import_page_attach_id', '')
+        engine = SyncEngine(self.env, client)
+
+        # Fase 1: nessuna pagina in cache → scaricane una nuova
+        if not page_attach_id_s:
+            next_token = params.get_param('ke_amazon_sync.orders_import_next_token') or None
+            try:
+                orders, new_next_token = engine.fetch_orders_page(created_after, next_token)
+            except Exception as e:
+                _log.error('Download pagina ordini fallito: %s', e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+                self.env.cr.commit()
+                self._disable_orders_import_cron()
+                return
+
+            if not orders:
+                log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+                params.set_param('ke_amazon_sync.orders_import_next_token', '')
+                self.env.cr.commit()
+                self._disable_orders_import_cron()
+                return
+
+            orders_json = json.dumps(orders, ensure_ascii=False)
+            attachment = self.env['ir.attachment'].create({
+                'name': f'amazon_orders_page_{log_rec.id}.json',
+                'type': 'binary',
+                'datas': base64.b64encode(orders_json.encode('utf-8')).decode(),
+                'res_model': 'ke.amazon.sync.log',
+                'res_id': log_rec.id,
+            })
+            params.set_param('ke_amazon_sync.orders_import_page_attach_id', str(attachment.id))
+            params.set_param('ke_amazon_sync.orders_import_offset', '0')
+            params.set_param('ke_amazon_sync.orders_import_next_token', new_next_token or '')
+            self.env.cr.commit()
+            return
+
+        # Fase 2: pagina in cache → elabora un blocco
+        try:
+            attach_id = int(page_attach_id_s)
+            attachment = self.env['ir.attachment'].browse(attach_id)
+            orders = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
+        except Exception as e:
+            _log.error('Errore lettura pagina ordini in cache: %s', e, exc_info=True)
             log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_orders_import_cron()
+            return
+
+        offset = int(params.get_param('ke_amazon_sync.orders_import_offset', '0') or 0)
+
+        try:
+            new_offset = engine.import_orders_chunk(log_rec, orders, offset)
+        except Exception as e:
+            _log.error('Cron import_orders_chunk fallito: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_orders_import_cron()
+            return
+
+        if new_offset is not None:
+            params.set_param('ke_amazon_sync.orders_import_offset', str(new_offset))
+            return
+
+        # Pagina esaurita: pulizia; se non c'è un'altra pagina, l'import è completo
+        attachment.unlink()
+        params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
+        params.set_param('ke_amazon_sync.orders_import_offset', '0')
+        next_token = params.get_param('ke_amazon_sync.orders_import_next_token', '')
+        if not next_token:
+            log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_orders_import_cron()
+        else:
+            self.env.cr.commit()
+
+    def _disable_orders_import_cron(self):
+        cron = self.env.ref('ke_amazon_sync.cron_import_orders_chunk', raise_if_not_found=False)
+        if cron:
+            try:
+                cron.sudo().active = False
+            except Exception:
+                _log.warning('_disable_orders_import_cron: impossibile disabilitare il cron.')
+
+    # ------------------------------------------------------------------
+    # Sync Giacenze FBA
+    # ------------------------------------------------------------------
+
+    def action_start_sync_fba_quantities(self):
+        """Avvia la sincronizzazione delle giacenze FBA da Amazon verso Odoo."""
+        log_rec = self.create({
+            'name': f'Sync Giacenze FBA — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'sync_fba',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+            'log_lines': 'Avvio sync giacenze FBA...',
+        })
+        params = self.env['ir.config_parameter'].sudo()
+        params.set_param('ke_amazon_sync.fba_sync_state', 'running')
+        params.set_param('ke_amazon_sync.fba_sync_log_id', str(log_rec.id))
+        self.env.cr.commit()
+
+        cron = self.env.ref('ke_amazon_sync.cron_sync_fba_quantities', raise_if_not_found=False)
+        if cron:
+            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': self._name,
+            'res_id': log_rec.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    def _cron_sync_fba_quantities(self):
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.fba_sync_state') != 'running':
+            self._disable_fba_sync_cron()
+            return
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron sync_fba saltato: credenziali SP-API non configurate.')
+            self._disable_fba_sync_cron()
+            return
+
+        log_id = int(params.get_param('ke_amazon_sync.fba_sync_log_id', '0') or 0)
+        if not log_id:
+            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fba_sync_cron()
+            return
+
+        log_rec = self.browse(log_id)
+        if not log_rec.exists():
+            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fba_sync_cron()
+            return
+
+        try:
+            engine = SyncEngine(self.env, client)
+            engine.sync_fba_quantities(log_rec)
+        except Exception as e:
+            _log.error('Cron sync_fba_quantities fallito: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e),
+                           'end_date': fields.Datetime.now()})
+            self.env.cr.commit()
+        finally:
+            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fba_sync_cron()
+
+    def _disable_fba_sync_cron(self):
+        cron = self.env.ref('ke_amazon_sync.cron_sync_fba_quantities', raise_if_not_found=False)
+        if cron:
+            try:
+                cron.sudo().active = False
+            except Exception:
+                _log.warning('_disable_fba_sync_cron: impossibile disabilitare il cron.')
+
+    # ------------------------------------------------------------------
+    # Import Resi Amazon
+    # ------------------------------------------------------------------
+
+    def action_start_returns_report(self):
+        """Avvia l'import dei resi cliente FBA degli ultimi N giorni."""
+        from datetime import timedelta, timezone
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.returns_state') == 'running':
+            log_id = int(params.get_param('ke_amazon_sync.returns_log_id', '0') or 0)
+            if log_id and self.browse(log_id).exists():
+                return {
+                    'type': 'ir.actions.act_window',
+                    'res_model': self._name,
+                    'res_id': log_id,
+                    'view_mode': 'form',
+                    'target': 'current',
+                }
+        days_back = int(params.get_param('ke_amazon_sync.returns_days_back', '30'))
+        data_start_time = (
+            fields.Datetime.now().replace(tzinfo=timezone.utc) - timedelta(days=days_back)
+        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        log_rec = self.create({
+            'name': f'Import Resi Amazon — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'returns',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+            'log_lines': f'Richiesta report resi degli ultimi {days_back} giorni (da {data_start_time[:10]}).',
+        })
+        params.set_param('ke_amazon_sync.returns_state', 'running')
+        params.set_param('ke_amazon_sync.returns_log_id', str(log_rec.id))
+        params.set_param('ke_amazon_sync.returns_report_id', '')
+        params.set_param('ke_amazon_sync.returns_report_attach_id', '')
+        params.set_param('ke_amazon_sync.returns_data_start_time', data_start_time)
+        self.env.cr.commit()
+
+        cron = self.env.ref('ke_amazon_sync.cron_returns_chunk', raise_if_not_found=False)
+        if cron:
+            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': self._name,
+            'res_id': log_rec.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    def _cron_returns_chunk(self):
+        """
+        Cron di elaborazione resi (ogni 2 min, abilitato da action_start_returns_report).
+        State machine a tre fasi, stesso schema di _cron_reconcile_chunk:
+          Fase 1 – nessun report_id: richiede il report resi ad Amazon
+          Fase 2 – report_id presente ma nessun allegato: controlla/scarica il report
+          Fase 3 – allegato presente: abbina i resi agli ordini e chiude
+        """
+        import base64
+        import json
+
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.returns_state') != 'running':
+            self._disable_returns_cron()
+            return
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron returns_chunk saltato: credenziali SP-API non configurate.')
+            return
+
+        log_id = int(params.get_param('ke_amazon_sync.returns_log_id', '0') or 0)
+        if not log_id:
+            params.set_param('ke_amazon_sync.returns_state', 'idle')
+            self.env.cr.commit()
+            self._disable_returns_cron()
+            return
+
+        log_rec = self.browse(log_id)
+        if not log_rec.exists():
+            params.set_param('ke_amazon_sync.returns_state', 'idle')
+            self.env.cr.commit()
+            self._disable_returns_cron()
+            return
+
+        report_id = params.get_param('ke_amazon_sync.returns_report_id', '')
+        attach_id_s = params.get_param('ke_amazon_sync.returns_report_attach_id', '')
+
+        # Fase 1: crea il report
+        if not report_id:
+            data_start_time = params.get_param('ke_amazon_sync.returns_data_start_time', '')
+            try:
+                report_id = client.request_returns_report(data_start_time)
+            except Exception as e:
+                _log.error('Creazione report resi fallita: %s', e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.returns_state', 'idle')
+                self.env.cr.commit()
+                self._disable_returns_cron()
+                return
+            params.set_param('ke_amazon_sync.returns_report_id', report_id)
+            msg = f'Report resi richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+            _log.info(msg)
+            self.env.cr.commit()
+            return
+
+        # Fase 2: scarica il report quando è pronto
+        if not attach_id_s:
+            try:
+                document_id = client.check_report_ready(report_id)
+            except Exception as e:
+                _log.error('Errore controllo stato report resi %s: %s', report_id, e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.returns_state', 'idle')
+                self.env.cr.commit()
+                self._disable_returns_cron()
+                return
+
+            if document_id is None:
+                current_log = log_rec.log_lines or ''
+                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
+                self.env.cr.commit()
+                return
+
+            try:
+                rows = client.download_report_rows(document_id)
+            except Exception as e:
+                _log.error('Download report resi %s fallito: %s', document_id, e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.returns_state', 'idle')
+                self.env.cr.commit()
+                self._disable_returns_cron()
+                return
+
+            rows_json = json.dumps(rows, ensure_ascii=False)
+            attachment = self.env['ir.attachment'].create({
+                'name': f'amazon_returns_report_{log_rec.id}.json',
+                'type': 'binary',
+                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
+                'res_model': 'ke.amazon.sync.log',
+                'res_id': log_rec.id,
+            })
+            params.set_param('ke_amazon_sync.returns_report_attach_id', str(attachment.id))
+            msg = f'Report scaricato: {len(rows)} resi totali. Abbinamento agli ordini...'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+            _log.info(msg)
+            self.env.cr.commit()
+            return
+
+        # Fase 3: abbina i resi agli ordini
+        try:
+            attach_id = int(attach_id_s)
+            attachment = self.env['ir.attachment'].browse(attach_id)
+            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
+        except Exception as e:
+            _log.error('Errore lettura allegato report resi: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.returns_state', 'idle')
+            self.env.cr.commit()
+            self._disable_returns_cron()
+            return
+
+        try:
+            engine = SyncEngine(self.env, client)
+            matched, not_found, errors = engine.process_returns_report_rows(log_rec, rows)
+            _log.info('Import resi: %d abbinati, %d ordini non trovati, %d errori',
+                      matched, not_found, errors)
+        except Exception as e:
+            _log.error('Cron returns_chunk fallito: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.returns_state', 'idle')
+            self.env.cr.commit()
+            self._disable_returns_cron()
+            return
+
+        attachment.unlink()
+        params.set_param('ke_amazon_sync.returns_report_id', '')
+        params.set_param('ke_amazon_sync.returns_report_attach_id', '')
+        params.set_param('ke_amazon_sync.returns_state', 'idle')
+        params.set_param('ke_amazon_sync.returns_log_id', '')
+        self.env.cr.commit()
+        self._disable_returns_cron()
+
+    def _disable_returns_cron(self):
+        cron = self.env.ref('ke_amazon_sync.cron_returns_chunk', raise_if_not_found=False)
+        if cron:
+            try:
+                cron.sudo().active = False
+            except Exception:
+                _log.warning('_disable_returns_cron: impossibile disabilitare il cron.')
