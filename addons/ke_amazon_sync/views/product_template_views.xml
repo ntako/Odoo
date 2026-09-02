@@ -82,7 +82,7 @@
                     <group string="Dati Amazon (sola lettura)">
                         <group>
                             <field name="x_amazon_price" string="Prezzo attuale su Amazon"/>
-                            <field name="x_amazon_qty" string="Quantità FBA disponibile"/>
+                            <field name="x_amazon_qty" string="Quantità dichiarata su Amazon"/>
                             <field name="x_amazon_category" string="Categoria Amazon"/>
                             <field name="x_amazon_browse_node_id" string="Browse Node ID"/>
                             <div class="o_field_widget" invisible="x_amazon_browse_node_id">

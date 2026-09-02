@@ -301,7 +301,10 @@ class SpApiClient:
                 sku = s.get('sellerSku', '')
                 qty = s.get('inventoryDetails', {}).get('fulfillableQuantity', 0)
                 inventory[sku] = qty
-            page_token = payload.get('pagination', {}).get('nextToken')
+            # response.next_token (non payload['pagination']['nextToken'], percorso
+            # sbagliato per questo endpoint) — stesso meccanismo già usato e
+            # verificato per la paginazione dei listing.
+            page_token = response.next_token
             if not page_token:
                 break
         return inventory
