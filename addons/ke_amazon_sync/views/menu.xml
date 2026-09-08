@@ -133,4 +133,10 @@
               parent="menu_amazon_sync_root"
               action="action_amazon_config_settings"
               sequence="30"/>
+
+    <menuitem id="menu_amazon_product_inventory_list"
+              name="Vista Inventario"
+              parent="menu_amazon_sync_root"
+              action="action_product_inventory_list"
+              sequence="5"/>
 </odoo>

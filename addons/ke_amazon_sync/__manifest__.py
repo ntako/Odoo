@@ -22,6 +22,7 @@
         'views/res_company_views.xml',
         'views/amazon_sync_log_views.xml',
         'views/product_template_views.xml',
+        'views/product_inventory_list_views.xml',
         'views/sale_order_views.xml',
         'views/menu.xml',
     ],

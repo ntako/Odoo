@@ -176,20 +176,105 @@ class ProductTemplate(models.Model):
              'Utile per ordinare/filtrare il catalogo e trovare le divergenze più grandi.',
     )
 
-    @api.depends('x_amazon_qty', 'x_amazon_fulfillment')
+    @api.depends('x_amazon_qty', 'x_amazon_fulfillment', 'x_amazon_stock_fbm')
     def _compute_x_amazon_odoo_fbm_qty(self):
-        params = self.env['ir.config_parameter'].sudo()
-        fbm_id = int(params.get_param('ke_amazon_sync.fbm_warehouse_id', 0) or 0)
-        fbm_warehouse = self.env['stock.warehouse'].browse(fbm_id) if fbm_id else None
-        ctx = {'warehouse': fbm_warehouse.id} if fbm_warehouse else {}
         for product in self:
-            if product.x_amazon_fulfillment != 'fbm' or not fbm_warehouse:
+            if product.x_amazon_fulfillment != 'fbm':
                 product.x_amazon_odoo_fbm_qty = 0.0
                 product.x_amazon_qty_diff = 0.0
                 continue
-            odoo_qty = product.with_context(**ctx).qty_available
+            odoo_qty = product.x_amazon_stock_fbm
             product.x_amazon_odoo_fbm_qty = odoo_qty
             product.x_amazon_qty_diff = (product.x_amazon_qty or 0) - odoo_qty
+
+    # --- Giacenza reale per ciascuno dei 3 magazzini Amazon (Generale/FBA/FBM) ---
+    # Non memorizzati: rappresentano la giacenza ATTUALE, quindi vanno sempre
+    # ricalcolati al volo (a differenza di x_amazon_odoo_fbm_qty sopra, che è
+    # volutamente uno snapshot aggiornato solo ad ogni sync). Interrogano
+    # direttamente stock.quant (child_of ubicazione di vista del magazzino,
+    # usage='internal') invece del contesto 'warehouse' su qty_available: su
+    # product.template quel contesto non scorpora correttamente per
+    # magazzino e ritorna sempre il totale non filtrato (bug verificato e
+    # corretto con lo stesso pattern nel modulo ke_product_dimensions).
+    x_amazon_stock_generale = fields.Float(
+        'Giacenza magazzino Generale',
+        compute='_compute_x_amazon_stock_by_warehouse',
+        help='Giacenza reale in Odoo nel magazzino Generale (fisico) configurato.',
+    )
+    x_amazon_stock_fba = fields.Float(
+        'Giacenza magazzino FBA',
+        compute='_compute_x_amazon_stock_by_warehouse',
+        help='Giacenza reale in Odoo nel magazzino FBA configurato.',
+    )
+    x_amazon_stock_fbm = fields.Float(
+        'Giacenza magazzino FBM',
+        compute='_compute_x_amazon_stock_by_warehouse',
+        help='Giacenza reale in Odoo nel magazzino FBM configurato.',
+    )
+
+    def _compute_x_amazon_stock_by_warehouse(self):
+        params = self.env['ir.config_parameter'].sudo()
+        default_id = int(params.get_param('ke_amazon_sync.default_warehouse_id', 0) or 0)
+        fba_id = int(params.get_param('ke_amazon_sync.fba_warehouse_id', 0) or 0)
+        fbm_id = int(params.get_param('ke_amazon_sync.fbm_warehouse_id', 0) or 0)
+        warehouse_ids = [i for i in (default_id, fba_id, fbm_id) if i]
+
+        variant_ids = self.mapped('product_variant_ids').ids
+        qty_by_wh_variant = {}  # {(warehouse_id, variant_id): qty}
+        if variant_ids and warehouse_ids:
+            Quant = self.env['stock.quant']
+            warehouses = self.env['stock.warehouse'].browse(warehouse_ids)
+            for wh in warehouses:
+                quants = Quant.search([
+                    ('product_id', 'in', variant_ids),
+                    ('location_id', 'child_of', wh.view_location_id.id),
+                    ('location_id.usage', '=', 'internal'),
+                ])
+                for q in quants:
+                    key = (wh.id, q.product_id.id)
+                    qty_by_wh_variant[key] = qty_by_wh_variant.get(key, 0.0) + q.quantity
+
+        for product in self:
+            variants = product.product_variant_ids.ids
+
+            def _sum_for(wh_id):
+                if not wh_id:
+                    return 0.0
+                return sum(qty_by_wh_variant.get((wh_id, vid), 0.0) for vid in variants)
+
+            product.x_amazon_stock_generale = _sum_for(default_id)
+            product.x_amazon_stock_fba = _sum_for(fba_id)
+            product.x_amazon_stock_fbm = _sum_for(fbm_id)
+
+    x_amazon_sales_30d = fields.Float(
+        'Vendite (ultimi 30gg)',
+        compute='_compute_x_amazon_sales_30d',
+        help='Quantità totale venduta (righe ordine confermate, tutti i canali) '
+             'negli ultimi 30 giorni.',
+    )
+
+    def _compute_x_amazon_sales_30d(self):
+        from datetime import timedelta
+        date_from = fields.Datetime.now() - timedelta(days=30)
+        variant_ids = self.mapped('product_variant_ids').ids
+        sums = {}
+        if variant_ids:
+            groups = self.env['sale.order.line']._read_group(
+                [
+                    ('product_id', 'in', variant_ids),
+                    ('order_id.state', 'in', ('sale', 'done')),
+                    ('order_id.date_order', '>=', date_from),
+                ],
+                groupby=['product_id'],
+                aggregates=['product_uom_qty:sum'],
+            )
+            for product_rec, qty_sum in groups:
+                if product_rec:
+                    sums[product_rec.id] = qty_sum
+        for product in self:
+            product.x_amazon_sales_30d = sum(
+                sums.get(vid, 0.0) for vid in product.product_variant_ids.ids
+            )
 
     x_amazon_found_by_manufacturer = fields.Boolean(
         'Presente su Amazon (produttore)',

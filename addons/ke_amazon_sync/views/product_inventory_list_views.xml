@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_product_template_inventory_list" model="ir.ui.view">
+        <field name="name">product.template.inventory.list</field>
+        <field name="model">product.template</field>
+        <field name="arch" type="xml">
+            <list string="Inventario Amazon" create="0" default_order="name">
+                <field name="image_128" widget="image" class="oe_avatar" nolabel="1" string="Immagine"/>
+                <field name="name" string="Nome"/>
+                <field name="x_amazon_sku" string="SKU"/>
+                <field name="x_amazon_asin" string="ASIN"/>
+                <field name="x_amazon_sales_30d" string="Vendite (30gg)" sum="Totale"/>
+                <field name="x_amazon_stock_fba" string="Giacenza FBA" sum="Totale"/>
+                <field name="x_amazon_stock_fbm" string="Giacenza FBM" sum="Totale"/>
+                <field name="x_amazon_stock_generale" string="Giacenza Generale" sum="Totale"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_product_template_inventory_search" model="ir.ui.view">
+        <field name="name">product.template.inventory.search</field>
+        <field name="model">product.template</field>
+        <field name="arch" type="xml">
+            <search string="Inventario Amazon">
+                <field name="name"/>
+                <field name="x_amazon_sku"/>
+                <field name="x_amazon_asin"/>
+                <filter string="Con SKU Amazon" name="has_amazon_sku" domain="[('x_amazon_sku', '!=', False)]"/>
+                <group expand="0" string="Raggruppa per">
+                    <filter string="Fulfillment" name="group_fulfillment" context="{'group_by': 'x_amazon_fulfillment'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_product_inventory_list" model="ir.actions.act_window">
+        <field name="name">Vista Inventario</field>
+        <field name="res_model">product.template</field>
+        <field name="view_mode">list</field>
+        <field name="view_id" ref="view_product_template_inventory_list"/>
+        <field name="search_view_id" ref="view_product_template_inventory_search"/>
+        <field name="context">{'search_default_has_amazon_sku': 1}</field>
+    </record>
+</odoo>
