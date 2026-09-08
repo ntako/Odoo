@@ -119,4 +119,18 @@
         <field name="active">False</field>
         <field name="user_id" ref="base.user_root"/>
     </record>
+
+    <!-- Funzione 9: Aggiorna le colonne (memorizzate) della Vista Inventario:
+         giacenza per magazzino e vendite 30gg, non hanno un trigger @api.depends
+         affidabile (dati esterni/tempo che scorre), vanno ricalcolate a intervalli. -->
+    <record id="cron_refresh_inventory_view_stats" model="ir.cron">
+        <field name="name">Amazon Sync: Aggiorna Vista Inventario</field>
+        <field name="model_id" ref="product.model_product_template"/>
+        <field name="state">code</field>
+        <field name="code">env['product.template']._cron_refresh_inventory_view_stats()</field>
+        <field name="interval_number">4</field>
+        <field name="interval_type">hours</field>
+        <field name="active">True</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
 </odoo>

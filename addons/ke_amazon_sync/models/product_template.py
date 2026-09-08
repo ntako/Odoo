@@ -190,28 +190,37 @@ class ProductTemplate(models.Model):
     # --- Giacenza reale per ciascuno dei 3 magazzini Amazon (Generale/FBA/FBM) ---
     # Non memorizzati: rappresentano la giacenza ATTUALE, quindi vanno sempre
     # ricalcolati al volo (a differenza di x_amazon_odoo_fbm_qty sopra, che è
-    # volutamente uno snapshot aggiornato solo ad ogni sync). Interrogano
-    # direttamente stock.quant (child_of ubicazione di vista del magazzino,
-    # usage='internal') invece del contesto 'warehouse' su qty_available: su
-    # product.template quel contesto non scorpora correttamente per
-    # magazzino e ritorna sempre il totale non filtrato (bug verificato e
-    # corretto con lo stesso pattern nel modulo ke_product_dimensions).
+    # volutamente uno snapshot aggiornato solo ad ogni sync). store=True per
+    # essere ordinabili/filtrabili/esportabili in lista (in Odoo l'ordinamento
+    # per colonna richiede una colonna DB vera, non un valore calcolato al
+    # volo) — come contropartita non sono più istantanei: vengono aggiornati
+    # dal cron _cron_refresh_inventory_view_stats (vedi ir_cron.xml), non ad
+    # ogni movimento di magazzino. Interrogano direttamente stock.quant
+    # (child_of ubicazione di vista del magazzino, usage='internal') invece
+    # del contesto 'warehouse' su qty_available: su product.template quel
+    # contesto non scorpora correttamente per magazzino e ritorna sempre il
+    # totale non filtrato (bug verificato e corretto con lo stesso pattern
+    # nel modulo ke_product_dimensions).
     x_amazon_stock_generale = fields.Float(
         'Giacenza magazzino Generale',
-        compute='_compute_x_amazon_stock_by_warehouse',
-        help='Giacenza reale in Odoo nel magazzino Generale (fisico) configurato.',
+        compute='_compute_x_amazon_stock_by_warehouse', store=True,
+        help='Giacenza in Odoo nel magazzino Generale (fisico) configurato. '
+             'Snapshot aggiornato periodicamente, non in tempo reale.',
     )
     x_amazon_stock_fba = fields.Float(
         'Giacenza magazzino FBA',
-        compute='_compute_x_amazon_stock_by_warehouse',
-        help='Giacenza reale in Odoo nel magazzino FBA configurato.',
+        compute='_compute_x_amazon_stock_by_warehouse', store=True,
+        help='Giacenza in Odoo nel magazzino FBA configurato. '
+             'Snapshot aggiornato periodicamente, non in tempo reale.',
     )
     x_amazon_stock_fbm = fields.Float(
         'Giacenza magazzino FBM',
-        compute='_compute_x_amazon_stock_by_warehouse',
-        help='Giacenza reale in Odoo nel magazzino FBM configurato.',
+        compute='_compute_x_amazon_stock_by_warehouse', store=True,
+        help='Giacenza in Odoo nel magazzino FBM configurato. '
+             'Snapshot aggiornato periodicamente, non in tempo reale.',
     )
 
+    @api.depends('x_amazon_qty')
     def _compute_x_amazon_stock_by_warehouse(self):
         params = self.env['ir.config_parameter'].sudo()
         default_id = int(params.get_param('ke_amazon_sync.default_warehouse_id', 0) or 0)
@@ -246,13 +255,19 @@ class ProductTemplate(models.Model):
             product.x_amazon_stock_fba = _sum_for(fba_id)
             product.x_amazon_stock_fbm = _sum_for(fbm_id)
 
+    # store=True per essere ordinabile/filtrabile in lista. Nessuna dipendenza
+    # reale possibile: la finestra "ultimi 30 giorni" scorre col passare del
+    # tempo da sola, non per una modifica a un campo — va per forza tenuto
+    # aggiornato da un cron (_cron_refresh_inventory_view_stats), non da un
+    # @api.depends. Calcolato una volta alla creazione, poi solo dal cron.
     x_amazon_sales_30d = fields.Float(
         'Vendite (ultimi 30gg)',
-        compute='_compute_x_amazon_sales_30d',
+        compute='_compute_x_amazon_sales_30d', store=True,
         help='Quantità totale venduta (righe ordine confermate, tutti i canali) '
-             'negli ultimi 30 giorni.',
+             'negli ultimi 30 giorni. Snapshot aggiornato periodicamente.',
     )
 
+    @api.depends()
     def _compute_x_amazon_sales_30d(self):
         from datetime import timedelta
         date_from = fields.Datetime.now() - timedelta(days=30)
@@ -275,6 +290,22 @@ class ProductTemplate(models.Model):
             product.x_amazon_sales_30d = sum(
                 sums.get(vid, 0.0) for vid in product.product_variant_ids.ids
             )
+
+    def _cron_refresh_inventory_view_stats(self):
+        """
+        Ricalcola e salva giacenza per magazzino e vendite 30gg per i prodotti
+        Amazon (store=True, ma senza un trigger @api.depends affidabile per
+        questi dati — vedi commenti sui campi). Schedulato periodicamente
+        (ir_cron.xml): tenere l'intervallo abbastanza rado da non appesantire
+        il DB con migliaia di ricalcoli, ma abbastanza frequente da restare
+        utile per la Vista Inventario.
+        """
+        products = self.search([('x_amazon_sku', '!=', False)])
+        if not products:
+            return
+        products._compute_x_amazon_stock_by_warehouse()
+        products._compute_x_amazon_sales_30d()
+        self.env.cr.commit()
 
     x_amazon_found_by_manufacturer = fields.Boolean(
         'Presente su Amazon (produttore)',
