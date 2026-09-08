@@ -1181,8 +1181,16 @@ class SyncEngine:
         total = len(products)
         ok = errors = skipped = 0
         lines = []
+        # Progresso scritto su log_rec periodicamente (non solo a fine ciclo):
+        # con centinaia/migliaia di prodotti senza immagine, l'utente vedrebbe
+        # altrimenti tutti i contatori a zero per lungo tempo, senza modo di
+        # distinguere "sta lavorando" da "è bloccato".
+        _PROGRESS_EVERY = 20
 
-        for product in products:
+        log_rec.write({'products_total': total})
+        self.env.cr.commit()
+
+        for idx, product in enumerate(products, start=1):
             asin = product.x_amazon_asin
             try:
                 catalog = self.client.get_catalog_item(asin)
@@ -1208,7 +1216,13 @@ class SyncEngine:
             lines.append(msg)
             _log.info(msg)
 
-            if ok % 20 == 0 and ok:
+            if idx % _PROGRESS_EVERY == 0:
+                log_rec.write({
+                    'products_updated': ok,
+                    'products_skipped': skipped,
+                    'products_error': errors,
+                    'log_lines': '\n'.join(lines),
+                })
                 self.env.cr.commit()
 
         log_rec.write({

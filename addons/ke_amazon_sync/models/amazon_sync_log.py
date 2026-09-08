@@ -93,6 +93,12 @@ class AmazonSyncLog(models.Model):
         elif self.sync_type == 'returns':
             params.set_param('ke_amazon_sync.returns_state', 'idle')
             self._disable_returns_cron()
+        elif self.sync_type == 'download_images':
+            # Come sync_fba: thread di background, qui liberiamo solo lo
+            # stato per permettere un nuovo avvio, non fermiamo un thread
+            # già in esecuzione (terminerà da solo, sovrascrivendo poi
+            # questo stesso stato a 'idle' di nuovo alla sua fine).
+            params.set_param('ke_amazon_sync.download_images_state', 'idle')
         self.write({'state': 'done', 'end_date': fields.Datetime.now()})
 
     def action_export_csv(self):

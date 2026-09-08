@@ -221,7 +221,11 @@ class SpApiClient:
     # Catalog v2022
     # ------------------------------------------------------------------
 
-    @_with_retry(DELAY_CATALOG_S)
+    # retry_max/backoff_s ridotti (stesso motivo di _inventory_call): questa
+    # chiamata è usata anche da cron a chunk (Aggiorna da Catalog API), dove
+    # i default (5 tentativi, backoff fino a 480s) rischierebbero di superare
+    # il limite di tempo reale del cron su un singolo prodotto throttled.
+    @_with_retry(DELAY_CATALOG_S, retry_max=3, backoff_s=8)
     def _catalog_call(self, asin):
         from sp_api.api.catalog_items.catalog_items_2022_04_01 import CatalogItemsV20220401
         api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials)
