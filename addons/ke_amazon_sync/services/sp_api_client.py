@@ -13,7 +13,9 @@ _log = logging.getLogger(__name__)
 DELAY_CATALOG_S = 0.6
 DELAY_LISTINGS_S = 0.3
 DELAY_SEARCH_S = 0.5
-DELAY_ORDERS_S = 2.0   # Orders API: max 0.5 req/s → 2s tra ogni chiamata
+DELAY_ORDERS_GET_S = 60.0   # getOrders (lista/pagina ordini): rate ufficiale sostenuto 0.0167 req/s (1 ogni 60s), burst 20
+DELAY_ORDERS_ITEMS_S = 2.0  # getOrderItems (righe ordine): rate ufficiale 0.5 req/s, burst 30
+DELAY_INVENTORY_S = 0.5   # getInventorySummaries: max 2 req/s (burst 2) → 0.5s tra ogni chiamata
 RETRY_MAX = 5
 RETRY_BACKOFF_S = 60
 
@@ -23,7 +25,17 @@ _D_MARKETPLACE_ID = 'APJ6JRA9NG5V4'
 RETRY_NET_BACKOFF_S = 15  # Attesa fissa per errori di rete/SSL (non throttling)
 
 
-def _with_retry(delay_s):
+def _with_retry(delay_s, retry_max=None, backoff_s=None):
+    """
+    retry_max/backoff_s permettono di stringere i tempi di attesa per le
+    chiamate usate dentro cicli a budget di tempo (es. sync FBA a pagine):
+    con i default (RETRY_MAX=5, RETRY_BACKOFF_S=60) un'unica chiamata può
+    restare bloccata in time.sleep per diversi minuti in caso di throttling
+    ripetuto, superando facilmente il limite di tempo reale del cron.
+    """
+    retry_max = retry_max or RETRY_MAX
+    backoff_s = backoff_s or RETRY_BACKOFF_S
+
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -33,22 +45,22 @@ def _with_retry(delay_s):
             from sp_api.base.exceptions import (
                 SellingApiRequestThrottledException, SellingApiException,
             )
-            for attempt in range(1, RETRY_MAX + 1):
+            for attempt in range(1, retry_max + 1):
                 time.sleep(delay_s)
                 try:
                     return fn(*args, **kwargs)
                 except SellingApiRequestThrottledException:
-                    wait = RETRY_BACKOFF_S * (2 ** (attempt - 1))
+                    wait = backoff_s * (2 ** (attempt - 1))
                     _log.warning('%s: 429 throttled (tentativo %d/%d), attendo %ds',
-                                 fn.__name__, attempt, RETRY_MAX, wait)
-                    if attempt == RETRY_MAX:
+                                 fn.__name__, attempt, retry_max, wait)
+                    if attempt == retry_max:
                         raise
                     time.sleep(wait)
                 except SellingApiException as exc:
-                    if attempt < RETRY_MAX:
-                        wait = RETRY_BACKOFF_S * (2 ** (attempt - 1))
+                    if attempt < retry_max:
+                        wait = backoff_s * (2 ** (attempt - 1))
                         _log.warning('%s: errore API %s (tentativo %d/%d), attendo %ds',
-                                     fn.__name__, exc, attempt, RETRY_MAX, wait)
+                                     fn.__name__, exc, attempt, retry_max, wait)
                         time.sleep(wait)
                     else:
                         raise
@@ -56,8 +68,8 @@ def _with_retry(delay_s):
                         socket.timeout, OSError) as exc:
                     # Errori di rete/SSL transitori: retry con attesa fissa breve
                     _log.warning('%s: errore rete/SSL "%s" (tentativo %d/%d), attendo %ds',
-                                 fn.__name__, exc, attempt, RETRY_MAX, RETRY_NET_BACKOFF_S)
-                    if attempt == RETRY_MAX:
+                                 fn.__name__, exc, attempt, retry_max, RETRY_NET_BACKOFF_S)
+                    if attempt == retry_max:
                         raise
                     time.sleep(RETRY_NET_BACKOFF_S)
         return wrapper
@@ -276,7 +288,11 @@ class SpApiClient:
     # Inventory FBA
     # ------------------------------------------------------------------
 
-    @_with_retry(DELAY_LISTINGS_S)
+    # retry_max/backoff_s ridotti: un singolo blocco d'attesa deve restare
+    # breve (worst case ~0.5+8+0.5+16 ≈ 25s) invece dei minuti che il backoff
+    # esponenziale di default comporterebbe, per non tenere il thread di sync
+    # bloccato a lungo su un throttling temporaneo.
+    @_with_retry(DELAY_INVENTORY_S, retry_max=3, backoff_s=8)
     def _inventory_call(self, page_token):
         from sp_api.api import Inventories
         api = Inventories(marketplace=self._marketplace(), credentials=self.credentials)
@@ -308,6 +324,29 @@ class SpApiClient:
             if not page_token:
                 break
         return inventory
+
+    def fetch_inventory_page(self, page_token=None):
+        """
+        Scarica UNA pagina di inventario FBA (senza scorrere tutte le pagine).
+        Ritorna ([{'sku':..., 'qty':...}, ...], next_token_o_None). Usata dalla
+        sync a blocchi per evitare che un'unica invocazione del cron debba
+        scaricare tutte le pagine (potenzialmente centinaia) in un colpo solo,
+        rischiando di superare il limite di tempo reale del cron in caso di
+        throttling/retry con backoff su una singola pagina.
+        In caso di errore la chiamata viene rilanciata (non va confusa con la
+        fine della paginazione): il chiamante deve trattarla come fallimento,
+        altrimenti la sync verrebbe erroneamente segnata come completata a metà.
+        """
+        response = self._inventory_call(page_token)
+        payload = response.payload
+        items = [
+            {
+                'sku': s.get('sellerSku', ''),
+                'qty': s.get('inventoryDetails', {}).get('fulfillableQuantity', 0),
+            }
+            for s in payload.get('inventorySummaries', [])
+        ]
+        return items, response.next_token
 
     # ------------------------------------------------------------------
     # Reports API (GET_MERCHANT_LISTINGS_ALL_DATA) — nessun limite di 1000
@@ -373,7 +412,13 @@ class SpApiClient:
     # Orders API
     # ------------------------------------------------------------------
 
-    @_with_retry(DELAY_ORDERS_S)
+    # retry_max=1 (nessun retry interno): DELAY_ORDERS_GET_S=60s è già una
+    # sleep dominante di per sé; un retry con backoff aggiuntivo rischierebbe
+    # di far durare l'invocazione più del limite di tempo reale del cron
+    # (osservato a 120s su questo deployment, vedi fix analogo su sync_fba).
+    # In caso di errore l'invocazione fallisce e il prossimo tick del cron
+    # (2 min dopo) riprova — stesso principio già adottato altrove.
+    @_with_retry(DELAY_ORDERS_GET_S, retry_max=1)
     def _get_orders_call(self, **params):
         from sp_api.api import Orders
         api = Orders(marketplace=self._marketplace(), credentials=self.credentials)
@@ -398,7 +443,7 @@ class SpApiClient:
         payload = self._get_orders_call(**params)
         return payload.get('Orders', []), payload.get('NextToken')
 
-    @_with_retry(DELAY_ORDERS_S)
+    @_with_retry(DELAY_ORDERS_ITEMS_S)
     def _get_order_items_call(self, order_id):
         from sp_api.api import Orders
         api = Orders(marketplace=self._marketplace(), credentials=self.credentials)

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_product_template_dimensions" model="ir.ui.view">
+        <field name="name">product.template.dimensions</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <!-- Rimuove peso/volume dalla posizione originale (tab Magazzino,
+                 gruppo Logistica). Il campo vero e proprio vive dentro un
+                 <div name="weight">/<div name="volume"> insieme al campo
+                 "gemello" che mostra l'unità di misura (weight_uom_name/
+                 volume_uom_name): va tolto il div intero, non solo il
+                 campo, altrimenti resta un'etichetta orfana con la sola
+                 unità di misura e nessun valore. Restano al loro posto solo
+                 Responsabile e Tempo di consegna. -->
+            <xpath expr="//label[@for='weight']" position="replace"/>
+            <xpath expr="//div[@name='weight']" position="replace"/>
+            <xpath expr="//label[@for='volume']" position="replace"/>
+            <xpath expr="//div[@name='volume']" position="replace"/>
+
+            <xpath expr="//page[@name='general_information']" position="inside">
+                <group string="Logistica" name="group_product_logistics">
+                    <label for="weight"/>
+                    <div class="o_row">
+                        <field name="weight"/>
+                        <field name="weight_uom_name"/>
+                    </div>
+                    <label for="volume"/>
+                    <div class="o_row">
+                        <field name="volume"/>
+                        <field name="volume_uom_name"/>
+                    </div>
+                    <field name="product_length" string="Lunghezza"/>
+                    <field name="product_width" string="Larghezza"/>
+                    <field name="product_height" string="Altezza"/>
+                </group>
+                <group string="Giacenza" name="group_warehouse_qty">
+                    <field name="warehouse_qty_summary" nolabel="1" colspan="2"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

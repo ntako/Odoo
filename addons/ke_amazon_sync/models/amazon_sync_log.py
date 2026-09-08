@@ -85,8 +85,11 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.orders_import_offset', '0')
             self._disable_orders_import_cron()
         elif self.sync_type == 'sync_fba':
+            # La sync gira in un thread di background (non un cron a pagine):
+            # qui possiamo solo liberare lo stato per permettere un nuovo avvio,
+            # non fermare un thread già in esecuzione (terminerà da solo).
             params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
-            self._disable_fba_sync_cron()
+            params.set_param('ke_amazon_sync.fba_sync_log_id', '')
         elif self.sync_type == 'returns':
             params.set_param('ke_amazon_sync.returns_state', 'idle')
             self._disable_returns_cron()
@@ -1100,23 +1103,42 @@ class AmazonSyncLog(models.Model):
     # Sync Giacenze FBA
     # ------------------------------------------------------------------
 
-    def action_start_sync_fba_quantities(self):
-        """Avvia la sincronizzazione delle giacenze FBA da Amazon verso Odoo."""
+    def action_start_sync_fba_quantities(self, name_prefix='Sync Giacenze FBA'):
+        """
+        Avvia la sincronizzazione delle giacenze FBA da Amazon verso Odoo in un
+        thread di background (stesso pattern di _thread_seed_fbm_stock ecc. in
+        res_config_settings.py), non tramite cron a pagine: il nextToken
+        restituito dall'Inventory API scade in pochi minuti, quindi se le
+        pagine venissero richieste a distanza di tick di cron (ogni 2 min) il
+        token risulterebbe già scaduto ("Next token is invalid or expired").
+        Un thread continua a scorrere le pagine senza pause tra una chiamata e
+        l'altra (a parte il rate-limit di ~0.5s), e non è soggetto al limite
+        di tempo reale del cron perché non è un thread cron.
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.fba_sync_state') == 'running':
+            log_id = int(params.get_param('ke_amazon_sync.fba_sync_log_id', '0') or 0)
+            if log_id and self.browse(log_id).exists():
+                return {
+                    'type': 'ir.actions.act_window',
+                    'res_model': self._name,
+                    'res_id': log_id,
+                    'view_mode': 'form',
+                    'target': 'current',
+                }
+
         log_rec = self.create({
-            'name': f'Sync Giacenze FBA — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'sync_fba',
             'state': 'running',
             'start_date': fields.Datetime.now(),
             'log_lines': 'Avvio sync giacenze FBA...',
         })
-        params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.fba_sync_state', 'running')
         params.set_param('ke_amazon_sync.fba_sync_log_id', str(log_rec.id))
         self.env.cr.commit()
 
-        cron = self.env.ref('ke_amazon_sync.cron_sync_fba_quantities', raise_if_not_found=False)
-        if cron:
-            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+        self._start_fba_sync_thread(log_rec.id)
 
         return {
             'type': 'ir.actions.act_window',
@@ -1126,54 +1148,87 @@ class AmazonSyncLog(models.Model):
             'target': 'current',
         }
 
-    def _cron_sync_fba_quantities(self):
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.fba_sync_state') != 'running':
-            self._disable_fba_sync_cron()
-            return
+    def _start_fba_sync_thread(self, log_id):
+        import threading
+        db = self.env.cr.dbname
+        uid = self.env.uid
+        ctx = dict(self.env.context)
+        t = threading.Thread(
+            target=self._thread_sync_fba_quantities,
+            args=(db, uid, ctx, log_id),
+            daemon=True,
+        )
+        t.start()
 
+    # Se il nextToken risulta scaduto/non valido nonostante l'elaborazione
+    # continua (es. una pagina particolarmente lenta), ripartiamo da capo
+    # invece di fallire l'intera sync: l'aggiornamento quantità è idempotente,
+    # quindi rielaborare pagine già fatte è solo tempo perso, non un errore.
+    # Limitato a poche ripartenze per non girare all'infinito se la causa
+    # fosse in realtà un altro problema permanente.
+    _FBA_SYNC_MAX_TOKEN_RESTARTS = 5
+
+    def _thread_sync_fba_quantities(self, db, uid, ctx, log_id):
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            params = env['ir.config_parameter'].sudo()
+            client = SpApiClient(env)
+            engine = SyncEngine(env, client)
+            page_token = None
+            token_restarts = 0
+            try:
+                while True:
+                    try:
+                        new_page_token = engine.sync_fba_quantities_page(log_rec, page_token)
+                    except Exception as exc:
+                        msg = str(exc).lower()
+                        is_token_error = 'token' in msg and ('expired' in msg or 'invalid' in msg)
+                        if is_token_error and token_restarts < self._FBA_SYNC_MAX_TOKEN_RESTARTS:
+                            token_restarts += 1
+                            _log.warning(
+                                'sync_fba: nextToken scaduto/non valido, riparto dalla prima '
+                                'pagina (tentativo %d/%d): %s',
+                                token_restarts, self._FBA_SYNC_MAX_TOKEN_RESTARTS, exc,
+                            )
+                            page_token = None
+                            continue
+                        raise
+                    if not new_page_token:
+                        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+                        break
+                    page_token = new_page_token
+            except Exception as exc:
+                _log.error('Thread sync_fba_quantities fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc),
+                               'end_date': fields.Datetime.now()})
+            finally:
+                params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
+                params.set_param('ke_amazon_sync.fba_sync_log_id', '')
+                cr.commit()
+
+    def _cron_sync_fba_quantities_store(self):
+        """
+        Avvia automaticamente una nuova sync giacenze FBA, se non ce n'è già una
+        in corso. Schedulata periodicamente (ogni N ore) — stesso pattern di
+        _cron_reconcile_store/_cron_import_orders_store, ma qui la sync vera e
+        propria gira in un thread di background (vedi action_start_sync_fba_quantities),
+        non in ulteriori cron a pagine.
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.fba_sync_state') == 'running':
+            _log.info('Sync giacenze FBA già in corso, salto avvio automatico.')
+            return
         client = SpApiClient(self.env)
         try:
             client.validate_credentials()
         except ValueError:
-            _log.warning('Cron sync_fba saltato: credenziali SP-API non configurate.')
-            self._disable_fba_sync_cron()
+            _log.warning('Cron sync_fba_store saltato: credenziali SP-API non configurate.')
             return
-
-        log_id = int(params.get_param('ke_amazon_sync.fba_sync_log_id', '0') or 0)
-        if not log_id:
-            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fba_sync_cron()
-            return
-
-        log_rec = self.browse(log_id)
-        if not log_rec.exists():
-            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fba_sync_cron()
-            return
-
-        try:
-            engine = SyncEngine(self.env, client)
-            engine.sync_fba_quantities(log_rec)
-        except Exception as e:
-            _log.error('Cron sync_fba_quantities fallito: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e),
-                           'end_date': fields.Datetime.now()})
-            self.env.cr.commit()
-        finally:
-            params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fba_sync_cron()
-
-    def _disable_fba_sync_cron(self):
-        cron = self.env.ref('ke_amazon_sync.cron_sync_fba_quantities', raise_if_not_found=False)
-        if cron:
-            try:
-                cron.sudo().active = False
-            except Exception:
-                _log.warning('_disable_fba_sync_cron: impossibile disabilitare il cron.')
+        self.action_start_sync_fba_quantities(name_prefix='Sync Giacenze FBA (automatico)')
 
     # ------------------------------------------------------------------
     # Import Resi Amazon

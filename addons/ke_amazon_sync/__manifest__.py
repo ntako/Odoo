@@ -4,7 +4,9 @@
     'category': 'Inventory/Configuration',
     'summary': 'Sincronizzazione prodotti con Amazon Seller Central',
     'author': 'KE',
-    'depends': ['stock', 'product', 'base_setup', 'sale'],
+    # sale_management (non solo 'sale'): serve per avere l'app Vendite completa
+    # con il menu Configurazione → Listini Prezzi, usato per il listino "Amazon".
+    'depends': ['stock', 'product', 'base_setup', 'sale', 'sale_management', 'ke_product_dimensions'],
     'data': [
         'security/ir.model.access.csv',
         'data/ir_cron.xml',

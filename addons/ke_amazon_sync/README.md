@@ -252,6 +252,13 @@ ke_amazon_sync/
 
 ## Campi aggiunti a `product.template`
 
+Lunghezza/larghezza/altezza e il volume NON sono più campi Amazon-specifici:
+sono forniti dal modulo condiviso `ke_product_dimensions` (dipendenza di
+questo modulo) come `product_length`/`product_width`/`product_height`, così
+da poter essere riusati da altre integrazioni (es. ecommerce) senza doversi
+accoppiare a `ke_amazon_sync`. Questo modulo si limita a scriverli durante
+l'import/sync dal Catalog Amazon.
+
 | Campo | Descrizione |
 |---|---|
 | `x_amazon_asin` | ASIN collegato |
@@ -270,9 +277,6 @@ ke_amazon_sync/
 | `x_amazon_sync_qty` | Abilita sync quantità automatica (solo FBM) |
 | `x_amazon_price` | Prezzo letto da Amazon (sola lettura) |
 | `x_amazon_qty` | Quantità FBA letta da Amazon (sola lettura) |
-| `x_amazon_length` | Lunghezza (cm) letta dal Catalog API |
-| `x_amazon_width` | Larghezza (cm) letta dal Catalog API |
-| `x_amazon_height` | Altezza (cm) letta dal Catalog API |
 | `x_amazon_last_sync` | Data/ora ultima sincronizzazione |
 | `x_amazon_sync_error` | Ultimo errore di sincronizzazione |
 

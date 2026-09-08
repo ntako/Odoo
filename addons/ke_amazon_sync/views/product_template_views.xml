@@ -6,15 +6,9 @@
         <field name="model">product.template</field>
         <field name="inherit_id" ref="product.product_template_form_view"/>
         <field name="arch" type="xml">
-            <!-- Dimensioni nella tab Magazzino, sezione separata -->
-            <xpath expr="//page[@name='inventory']" position="inside">
-                <group string="Dimensioni Amazon (cm)" name="group_amazon_dimensions">
-                    <field name="x_amazon_length" string="Lunghezza"/>
-                    <field name="x_amazon_width" string="Larghezza"/>
-                    <field name="x_amazon_height" string="Altezza"/>
-                </group>
-            </xpath>
-
+            <!-- Le dimensioni fisiche (lunghezza/larghezza/altezza) e il volume
+                 sono forniti dal modulo condiviso ke_product_dimensions, non
+                 specifici di Amazon: qui vengono solo scritti durante la sync. -->
             <xpath expr="//notebook" position="inside">
                 <page string="Amazon" name="amazon_tab">
                     <div class="mb-3">

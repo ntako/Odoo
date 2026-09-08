@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_stock_warehouse_total_volume" model="ir.ui.view">
+        <field name="name">stock.warehouse.total.volume</field>
+        <field name="model">stock.warehouse</field>
+        <field name="inherit_id" ref="stock.view_warehouse"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <group string="Volume" name="group_warehouse_volume">
+                    <field name="total_volume"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

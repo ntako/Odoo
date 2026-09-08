@@ -874,9 +874,9 @@ class SyncEngine:
             'x_amazon_price': data['price'],
             'x_amazon_qty': data['qty_available'],
             'x_amazon_last_sync': datetime.now(),
-            'x_amazon_length': data.get('length_cm') or 0.0,
-            'x_amazon_width': data.get('width_cm') or 0.0,
-            'x_amazon_height': data.get('height_cm') or 0.0,
+            'product_length': data.get('length_cm') or 0.0,
+            'product_width': data.get('width_cm') or 0.0,
+            'product_height': data.get('height_cm') or 0.0,
             'x_amazon_category': data.get('category', ''),
             'x_amazon_browse_node_id': data.get('browse_node_id', ''),
         }
@@ -888,7 +888,9 @@ class SyncEngine:
         template = self.env['product.template'].create(vals)
         if data.get('spec_attrs'):
             self._set_product_attributes(template, data['spec_attrs'])
-        self._init_product_warehouse_quant(template.product_variant_id, data['fulfillment'])
+        self._init_product_warehouse_quant(
+            template.product_variant_id, data['fulfillment'], data.get('qty_available') or 0,
+        )
         return template
 
     def _set_product_attributes(self, template, spec_attrs):
@@ -945,11 +947,11 @@ class SyncEngine:
         if data.get('weight_kg') is not None:
             vals['weight'] = data['weight_kg']
         if data.get('length_cm') is not None:
-            vals['x_amazon_length'] = data['length_cm']
+            vals['product_length'] = data['length_cm']
         if data.get('width_cm') is not None:
-            vals['x_amazon_width'] = data['width_cm']
+            vals['product_width'] = data['width_cm']
         if data.get('height_cm') is not None:
-            vals['x_amazon_height'] = data['height_cm']
+            vals['product_height'] = data['height_cm']
         if data.get('category'):
             vals['x_amazon_category'] = data['category']
         if data.get('browse_node_id'):
@@ -1051,7 +1053,9 @@ class SyncEngine:
         variant = self._add_variant_to_template(tmpl, product, attr_label, attr_value)
         if variant:
             existing_variant_by_asin[asin] = variant
-            self._init_product_warehouse_quant(variant, product.get('fulfillment', 'fbm'))
+            self._init_product_warehouse_quant(
+                variant, product.get('fulfillment', 'fbm'), product.get('qty_available') or 0,
+            )
             msg = f'CREATO variante: {sku} / {asin} [{attr_label}={attr_value}] → {tmpl.name[:40]}'
             return 'created', msg
 
@@ -1491,7 +1495,7 @@ class SyncEngine:
             ref = product.default_code or asin
             needs_catalog = (
                 not product.x_amazon_category
-                or not product.x_amazon_length
+                or not product.product_length
                 or not product.x_amazon_product_type
                 or not product.x_amazon_browse_node_id
             )
@@ -1529,11 +1533,11 @@ class SyncEngine:
                 if weight_kg is not None:
                     vals['weight'] = weight_kg
                 if length_cm is not None:
-                    vals['x_amazon_length'] = length_cm
+                    vals['product_length'] = length_cm
                 if width_cm is not None:
-                    vals['x_amazon_width'] = width_cm
+                    vals['product_width'] = width_cm
                 if height_cm is not None:
-                    vals['x_amazon_height'] = height_cm
+                    vals['product_height'] = height_cm
 
                 if vals:
                     product.write(vals)
@@ -1571,12 +1575,17 @@ class SyncEngine:
         warehouse = getattr(self.env.company, company_field, False)
         return warehouse.lot_stock_id if warehouse else None
 
-    def _init_product_warehouse_quant(self, variant, fulfillment):
+    def _init_product_warehouse_quant(self, variant, fulfillment, qty=0):
         """
-        Alla creazione di un prodotto (o di una variante), crea un quant a zero nel
-        magazzino Amazon configurato (FBA o FBM, in base a 'fulfillment') così è
-        subito associato al magazzino corretto invece di comparire senza ubicazione
-        fino al primo conteggio manuale (che di norma finisce nel magazzino di default).
+        Alla creazione di un prodotto (o di una variante), crea un quant nel
+        magazzino Amazon configurato (FBA o FBM, in base a 'fulfillment') con la
+        quantità dichiarata nel report Amazon ('qty', 0 se non disponibile) —
+        così è subito associato al magazzino corretto con una giacenza di
+        partenza reale, invece di comparire senza ubicazione fino al primo
+        conteggio manuale (che di norma finisce nel magazzino di default).
+        Solo alla creazione: i sync successivi non toccano più questo valore
+        (stessa logica di list_price) — per FBA verrà comunque corretto al
+        valore reale dal prossimo giro di sync_fba_quantities.
         Non fa nulla se il magazzino corrispondente non è ancora configurato.
         """
         field = 'amazon_fba_warehouse_id' if fulfillment == 'fba' else 'amazon_fbm_warehouse_id'
@@ -1592,7 +1601,7 @@ class SyncEngine:
         self.env['stock.quant'].sudo().create({
             'product_id': variant.id,
             'location_id': location.id,
-            'quantity': 0,
+            'quantity': qty or 0,
         })
 
     def _set_product_stock(self, product_variant, location, new_qty):
@@ -1842,6 +1851,7 @@ class SyncEngine:
         Amazon ha confermato di aver ricevuto (fino a) qty_received unità: sposta la
         stessa quantità dalla location 'In transito' al magazzino FBA reale, fino
         all'esaurimento di quanto disponibile in transito per quel prodotto.
+        Ritorna la quantità effettivamente spostata (0 se non c'era nulla in transito).
         """
         quant = self.env['stock.quant'].search([
             ('product_id', '=', product_variant.id),
@@ -1850,7 +1860,7 @@ class SyncEngine:
         available = quant.quantity if quant else 0.0
         qty_to_move = min(available, qty_received)
         if qty_to_move <= 0:
-            return
+            return 0.0
         move = self.env['stock.move'].create({
             'name': f'Ricezione Amazon FBA: {product_variant.display_name}',
             'product_id': product_variant.id,
@@ -1862,37 +1872,39 @@ class SyncEngine:
         move._action_confirm()
         move.quantity = qty_to_move
         move._action_done()
+        return qty_to_move
 
-    def sync_fba_quantities(self, log_rec):
+    def sync_fba_quantities_page(self, log_rec, page_token=None):
         """
-        Legge le giacenze FBA da Amazon (Inventory API) e aggiorna i quant Odoo
-        nel magazzino FBA configurato. Solo prodotti con x_amazon_fulfillment=AFN.
+        Scarica e processa UNA pagina di inventario FBA da Amazon, aggiornando i
+        quant Odoo nel magazzino FBA configurato. Pensata per essere richiamata
+        a ripetizione (una pagina per invocazione del cron) invece di scaricare
+        tutte le pagine in un colpo solo: con centinaia di pagine possibili, un
+        singolo retry/backoff per throttling potrebbe far superare il limite di
+        tempo reale del cron se si tenta di fare tutto in un'unica chiamata.
         Se la giacenza riportata da Amazon per uno SKU è aumentata rispetto
         all'ultima sync, la differenza viene "consumata" dalla location
         'In transito verso Amazon' (rifornimenti registrati con ship_to_fba).
+        Ritorna il next_token per la pagina successiva, o None se era l'ultima.
         """
         fba_location = self._get_warehouse_location('amazon_fba_warehouse_id')
         if not fba_location:
-            msg = 'Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).'
-            log_rec.write({'state': 'error', 'error_summary': msg, 'end_date': datetime.now()})
-            self.env.cr.commit()
-            return
+            raise UserError('Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).')
         transit_location = self._get_or_create_transit_location(fba_location)
 
-        log_rec.write({'log_lines': 'Recupero giacenze FBA da Amazon...'})
-        self.env.cr.commit()
-
-        inventory_map = self.client.get_inventory_map()  # {sku: qty}
+        items, new_page_token = self.client.fetch_inventory_page(page_token)
 
         updated = errors = skipped = 0
-        lines = []
+        lines = [f'Pagina ricevuta: {len(items)} SKU.']
 
-        for sku, fba_qty in inventory_map.items():
-            fba_qty = float(fba_qty)
+        for entry in items:
+            sku = entry['sku']
+            fba_qty = float(entry['qty'] or 0)
 
             product_tmpl = self.env['product.template'].search(
                 [('x_amazon_sku', '=', sku)], limit=1,
             )
+            matched_on = 'template'
             if product_tmpl:
                 product_variant = product_tmpl.product_variant_id
             else:
@@ -1901,7 +1913,9 @@ class SyncEngine:
                 )
                 if not variant:
                     skipped += 1
+                    lines.append(f'SALTATO {sku}: nessun prodotto Odoo con questo x_amazon_sku')
                     continue
+                matched_on = 'variante'
                 product_variant = variant
                 product_tmpl = variant.product_tmpl_id
 
@@ -1909,29 +1923,42 @@ class SyncEngine:
                 previous_qty = product_tmpl.x_amazon_qty or 0
                 increase = fba_qty - previous_qty
                 self._set_product_stock(product_variant, fba_location, fba_qty)
+                moved = 0.0
                 if increase > 0:
-                    self._consume_transit_stock(
+                    moved = self._consume_transit_stock(
                         product_variant, transit_location, fba_location, increase,
                     )
                 product_tmpl.write({'x_amazon_qty': int(fba_qty)})
                 updated += 1
-                lines.append(f'OK {sku}: FBA qty={int(fba_qty)}')
+                msg = (
+                    f'OK {sku} ({matched_on} #{product_tmpl.id}): '
+                    f'FBA qty {previous_qty:g} → {fba_qty:g}'
+                )
+                if moved > 0:
+                    msg += f' — {moved:g} spostate da transito verso FBA'
+                lines.append(msg)
             except Exception as exc:
                 errors += 1
                 lines.append(f'ERRORE {sku}: {exc}')
                 _log.error('sync_fba: errore aggiornamento %s: %s', sku, exc)
 
+        if not new_page_token:
+            lines.append(
+                f'Riepilogo: {log_rec.products_updated + updated} aggiornati, '
+                f'{log_rec.products_skipped + skipped} saltati (nessun match), '
+                f'{log_rec.products_error + errors} errori, '
+                f'{log_rec.products_total + len(items)} SKU totali da Amazon.'
+            )
         new_log = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
-            'products_total': len(inventory_map),
-            'products_updated': updated,
-            'products_skipped': skipped,
-            'products_error': errors,
+            'products_total': log_rec.products_total + len(items),
+            'products_updated': log_rec.products_updated + updated,
+            'products_skipped': log_rec.products_skipped + skipped,
+            'products_error': log_rec.products_error + errors,
             'log_lines': new_log,
-            'state': 'done',
-            'end_date': datetime.now(),
         })
         self.env.cr.commit()
+        return new_page_token
 
     # ------------------------------------------------------------------
     # Import ordini Amazon → sale.order

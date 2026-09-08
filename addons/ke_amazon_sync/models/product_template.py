@@ -4,22 +4,65 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 
 
-def _apply_amazon_pricelist_markup(env, base_price):
+def _amazon_pricelist_items_by_priority(pricelist, product):
     """
-    Applica al prezzo base la regola del listino 'Amazon' (Vendite/Inventario →
-    Configurazione → Listini prezzi), gestita dall'utente nella UI standard di
-    Odoo. Se il listino/la regola non esistono, ritorna il prezzo base invariato
-    (nessun markup).
+    Ritorna le regole del listino applicabili a 'product', dalla più specifica
+    alla più generica — stessa priorità che userebbe Odoo: variante → template
+    → categoria (risalendo la gerarchia) → globale. Possono esserci più regole
+    allo stesso livello (es. una 'fixed' e una 'formula' entrambe sulla stessa
+    variante): vengono ritornate tutte, nell'ordine.
     """
-    pricelist = env.ref('ke_amazon_sync.pricelist_amazon', raise_if_not_found=False)
+    variant = product if product._name == 'product.product' else product.product_variant_id
+    template = variant.product_tmpl_id if variant else product
+    items = pricelist.item_ids
+    result = []
+    if variant:
+        result += list(items.filtered(
+            lambda i: i.applied_on == '0_product_variant' and i.product_id == variant
+        ))
+    if template:
+        result += list(items.filtered(
+            lambda i: i.applied_on == '1_product' and i.product_tmpl_id == template
+        ))
+    categ = template.categ_id if template else False
+    while categ:
+        result += list(items.filtered(
+            lambda i: i.applied_on == '2_product_category' and i.categ_id == categ
+        ))
+        categ = categ.parent_id
+    result += list(items.filtered(lambda i: i.applied_on == '3_global'))
+    return result
+
+
+def _apply_amazon_pricelist_markup(product, base_price):
+    """
+    Applica al prezzo base le regole del listino 'Amazon' (Vendite/Inventario →
+    Configurazione → Listini prezzi) applicabili a questo prodotto specifico,
+    rispettando la priorità di Odoo (variante > template > categoria > globale)
+    invece di usare sempre la prima regola del listino.
+    - Una regola 'fixed' più specifica sostituisce il prezzo base netto di
+      partenza (non è il prezzo finale: la maggiorazione si applica comunque).
+    - La prima regola 'formula'/'percentage' trovata (alla priorità più alta
+      disponibile) fornisce la percentuale di maggiorazione.
+    Se il listino/le regole non esistono, ritorna il prezzo base invariato.
+    """
+    pricelist = product.env.ref('ke_amazon_sync.pricelist_amazon', raise_if_not_found=False)
     if not pricelist or not pricelist.item_ids:
         return base_price
-    item = pricelist.item_ids[0]
-    # Convenzione Odoo per le regole 'formula': uno sconto negativo è una maggiorazione.
-    markup_pct = -(item.price_discount or 0.0)
-    price = base_price * (1 + markup_pct / 100.0)
-    if item.price_round:
-        price = round(price / item.price_round) * item.price_round
+
+    applicable = _amazon_pricelist_items_by_priority(pricelist, product)
+
+    fixed_item = next((i for i in applicable if i.compute_price == 'fixed'), None)
+    price = fixed_item.fixed_price if fixed_item else base_price
+
+    markup_item = next((i for i in applicable if i.compute_price in ('formula', 'percentage')), None)
+    if markup_item:
+        # Convenzione Odoo per le regole 'formula'/'percentage': uno sconto
+        # negativo è una maggiorazione.
+        markup_pct = -(markup_item.price_discount or 0.0)
+        price = price * (1 + markup_pct / 100.0)
+        if markup_item.price_round:
+            price = round(price / markup_item.price_round) * markup_item.price_round
     return price
 
 
@@ -53,7 +96,7 @@ def compute_amazon_sale_price(product, base_price):
     """
     rate, price_include = _get_amazon_vat_info(product)
     net_price = base_price / (1 + rate / 100.0) if price_include else base_price
-    marked_up = _apply_amazon_pricelist_markup(product.env, net_price)
+    marked_up = _apply_amazon_pricelist_markup(product, net_price)
     return round(marked_up * (1 + rate / 100.0), 2)
 
 
@@ -208,19 +251,10 @@ class ProductTemplate(models.Model):
         'Errore pubblicazione', readonly=True, copy=False,
     )
 
-    # --- Dimensioni prodotto ---
-    x_amazon_length = fields.Float(
-        'Lunghezza (cm)', copy=False,
-        help='Lunghezza del prodotto in cm. Popolata automaticamente dal Catalog Amazon.',
-    )
-    x_amazon_width = fields.Float(
-        'Larghezza (cm)', copy=False,
-        help='Larghezza del prodotto in cm. Popolata automaticamente dal Catalog Amazon.',
-    )
-    x_amazon_height = fields.Float(
-        'Altezza (cm)', copy=False,
-        help='Altezza del prodotto in cm. Popolata automaticamente dal Catalog Amazon.',
-    )
+    # Le dimensioni fisiche (lunghezza/larghezza/altezza) e il volume sono
+    # campi neutri forniti dal modulo condiviso ke_product_dimensions (non
+    # specifici di Amazon, riutilizzabili da altre integrazioni): vedi
+    # product_length/product_width/product_height, scritti durante la sync.
 
     # ------------------------------------------------------------------
     # Azioni manuali sul singolo prodotto
