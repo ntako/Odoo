@@ -245,12 +245,16 @@ class ResConfigSettings(models.TransientModel):
     def action_run_download_images(self):
         """Scarica le immagini mancanti dai prodotti Amazon in background."""
         self._validate_credentials()
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.download_images_state') == 'running':
+            raise UserError('Un download immagini è già in corso.')
         log_rec = self.env['ke.amazon.sync.log'].create({
             'name': f'Download immagini mancanti — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'download_images',
             'state': 'running',
             'start_date': datetime.now(),
         })
+        params.set_param('ke_amazon_sync.download_images_state', 'running')
         self.env.cr.commit()
         self._start_thread('_thread_download_images', log_rec.id)
         return self._open_log_action()
@@ -280,6 +284,7 @@ class ResConfigSettings(models.TransientModel):
         with odoo_registry(db).cursor() as cr:
             env = odoo_api.Environment(cr, uid, ctx)
             log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            params = env['ir.config_parameter'].sudo()
             try:
                 engine = SyncEngine(env, SpApiClient(env))
                 ok, skipped, errors = engine.download_missing_images(log_rec)
@@ -288,6 +293,9 @@ class ResConfigSettings(models.TransientModel):
                 _log.error('Thread download_images fallito: %s', exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc),
                                'end_date': datetime.now()})
+                cr.commit()
+            finally:
+                params.set_param('ke_amazon_sync.download_images_state', 'idle')
                 cr.commit()
 
     @api.model

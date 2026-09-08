@@ -1231,6 +1231,42 @@ class AmazonSyncLog(models.Model):
         self.action_start_sync_fba_quantities(name_prefix='Sync Giacenze FBA (automatico)')
 
     # ------------------------------------------------------------------
+    # Download immagini mancanti
+    # ------------------------------------------------------------------
+
+    def _cron_download_images_store(self):
+        """
+        Avvia automaticamente il download delle immagini mancanti, se non ce
+        n'è già uno in corso. Schedulata periodicamente — stesso pattern di
+        _cron_sync_fba_quantities_store, ma qui il lavoro vero e proprio gira
+        nel thread già usato dal pulsante manuale "Scarica immagini mancanti"
+        (Impostazioni → Amazon Seller Central), riusato tale e quale.
+        Scarica solo per i prodotti che ancora non hanno un'immagine — non
+        ricontrolla quelle già scaricate (vedi download_missing_images).
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.download_images_state') == 'running':
+            _log.info('Download immagini già in corso, salto avvio automatico.')
+            return
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron download_images_store saltato: credenziali SP-API non configurate.')
+            return
+
+        log_rec = self.create({
+            'name': f'Download immagini mancanti (automatico) — '
+                    f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'download_images',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+        })
+        params.set_param('ke_amazon_sync.download_images_state', 'running')
+        self.env.cr.commit()
+        self.env['res.config.settings']._start_thread('_thread_download_images', log_rec.id)
+
+    # ------------------------------------------------------------------
     # Import Resi Amazon
     # ------------------------------------------------------------------
 
