@@ -20,16 +20,13 @@
     <record id="view_product_template_inventory_search" model="ir.ui.view">
         <field name="name">product.template.inventory.search</field>
         <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view"/>
         <field name="arch" type="xml">
-            <search string="Inventario Amazon">
-                <field name="name"/>
-                <field name="x_amazon_sku"/>
-                <field name="x_amazon_asin"/>
+            <xpath expr="//search" position="inside">
                 <filter string="Con SKU Amazon" name="has_amazon_sku" domain="[('x_amazon_sku', '!=', False)]"/>
-                <group expand="0" string="Raggruppa per">
-                    <filter string="Fulfillment" name="group_fulfillment" context="{'group_by': 'x_amazon_fulfillment'}"/>
-                </group>
-            </search>
+                <filter string="Fulfillment Amazon" name="groupby_amazon_fulfillment_inv"
+                        context="{'group_by': 'x_amazon_fulfillment'}"/>
+            </xpath>
         </field>
     </record>
 
