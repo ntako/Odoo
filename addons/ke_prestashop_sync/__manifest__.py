@@ -1,8 +1,8 @@
 {
     'name': 'KE PrestaShop Sync',
-    'version': '19.0.1.0.0',
+    'version': '19.0.2.0.0',
     'category': 'Inventory/Configuration',
-    'summary': 'Sincronizzazione prodotti con PrestaShop (WebService API)',
+    'summary': 'Sincronizzazione prodotti, stock, prezzi, immagini e ordini con PrestaShop (WebService API)',
     'author': 'KE',
     'depends': ['stock', 'product', 'sale', 'base_setup'],
     'data': [

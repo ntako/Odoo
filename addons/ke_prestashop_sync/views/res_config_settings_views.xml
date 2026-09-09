@@ -23,8 +23,25 @@
                         <setting string="ID Lingua PrestaShop" help="Di solito 1 per l'italiano">
                             <field name="ps_default_lang_id"/>
                         </setting>
-                        <setting string="Magazzino sorgente stock">
+                        <setting string="Magazzino PrestaShop"
+                                 help="Sorgente delle quantità e magazzino degli ordini importati">
                             <field name="ps_warehouse_id"/>
+                        </setting>
+                        <setting string="Filtra i prodotti per magazzino"
+                                 help="Sincronizza verso PS solo i prodotti con giacenza > 0 nel magazzino selezionato">
+                            <field name="ps_filter_by_warehouse"/>
+                        </setting>
+                        <setting string="ID Shop PrestaShop"
+                                 help="Multistore: ID dello shop usato per lo stock (1 di default)">
+                            <field name="ps_shop_id"/>
+                        </setting>
+                        <setting string="Categoria PS di default"
+                                 help="ID categoria assegnata ai prodotti creati dall'export">
+                            <field name="ps_category_id"/>
+                        </setting>
+                        <setting string="Gruppo regole IVA PS"
+                                 help="ID id_tax_rules_group assegnato ai prodotti creati dall'export">
+                            <field name="ps_tax_rules_group_id"/>
                         </setting>
                         <div class="mt8">
                             <button name="action_test_connection" type="object"
@@ -75,6 +92,10 @@
                                  help="Importa tutti gli ordini PS creati nelle ultime N ore">
                             <field name="ps_import_orders_hours_back"/>
                         </setting>
+                        <setting string="Conferma automatica ordini"
+                                 help="Conferma gli ordini importati invece di lasciarli come preventivo">
+                            <field name="ps_order_auto_confirm"/>
+                        </setting>
                         <div class="mt8">
                             <button name="action_run_import_orders" type="object"
                                     string="Import ordini adesso" class="btn btn-sm btn-secondary"/>
@@ -83,6 +104,13 @@
 
                     <!-- Sync immagini -->
                     <block title="Sync Immagini (Odoo → PS)">
+                        <setting string="Abilita cron automatico">
+                            <field name="ps_cron_sync_images_active"/>
+                        </setting>
+                        <setting string="Intervallo (minuti)"
+                                 invisible="not ps_cron_sync_images_active">
+                            <field name="ps_sync_images_interval"/>
+                        </setting>
                         <setting string="Upload immagini prodotti"
                                  help="Carica l'immagine principale di ogni prodotto su PrestaShop. Salta i prodotti già sincronizzati (usa Re-upload per forzare).">
                             <div>

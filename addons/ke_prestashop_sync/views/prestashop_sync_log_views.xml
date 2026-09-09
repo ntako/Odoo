@@ -8,13 +8,19 @@
             <list string="Log Sincronizzazioni PS" default_order="create_date desc"
                   decoration-success="state=='done'"
                   decoration-danger="state=='error'"
+                  decoration-muted="state=='cancelled'"
+                  decoration-info="state=='queued'"
                   decoration-warning="state=='running'">
                 <field name="name"/>
                 <field name="sync_type"/>
                 <field name="state" widget="badge"
                        decoration-success="state=='done'"
                        decoration-danger="state=='error'"
+                       decoration-muted="state=='cancelled'"
+                       decoration-info="state=='queued'"
                        decoration-warning="state=='running'"/>
+                <field name="progress_done" string="Prog."/>
+                <field name="progress_total" string="/ Tot"/>
                 <field name="products_total"/>
                 <field name="products_created"/>
                 <field name="products_updated"/>
@@ -33,10 +39,29 @@
                 <header>
                     <button name="action_refresh" type="object"
                             string="Aggiorna" icon="fa-refresh"/>
+                    <button name="action_cancel" type="object"
+                            string="Interrompi" icon="fa-stop"
+                            class="btn-warning"
+                            confirm="Interrompere la sincronizzazione?"
+                            invisible="state not in ('queued', 'running') or cancel_requested"/>
+                    <button name="action_force_close" type="object"
+                            string="Forza chiusura" icon="fa-power-off"
+                            class="btn-danger"
+                            confirm="Chiudere a forza questo job? Usa solo se risulta bloccato (nessun avanzamento)."
+                            invisible="state not in ('queued', 'running')"/>
+                    <field name="cancel_requested" invisible="1"/>
                 </header>
                 <sheet>
                     <div class="oe_title">
                         <h1><field name="name"/></h1>
+                    </div>
+                    <div class="alert alert-info" role="alert"
+                         invisible="state != 'queued'">
+                        In coda: verrà eseguito a breve dal job scheduler di Odoo.
+                    </div>
+                    <div class="alert alert-info" role="alert"
+                         invisible="not (state == 'running' and cancel_requested)">
+                        Interruzione richiesta: la sincronizzazione si fermerà a breve.
                     </div>
                     <group>
                         <group>
@@ -44,7 +69,15 @@
                             <field name="state" widget="badge"
                                    decoration-success="state=='done'"
                                    decoration-danger="state=='error'"
+                                   decoration-muted="state=='cancelled'"
+                                   decoration-info="state=='queued'"
                                    decoration-warning="state=='running'"/>
+                            <label for="progress_done" string="Avanzamento"/>
+                            <div>
+                                <field name="progress_done" class="oe_inline"/>
+                                <span> / </span>
+                                <field name="progress_total" class="oe_inline"/>
+                            </div>
                         </group>
                         <group>
                             <field name="start_date"/>

@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
@@ -27,14 +26,40 @@ class ResConfigSettings(models.TransientModel):
         default=1,
         help='ID della lingua di default in PrestaShop (normalmente 1).',
     )
+    ps_shop_id = fields.Integer(
+        string='ID Shop PS',
+        config_parameter='ke_prestashop_sync.shop_id',
+        default=1,
+        help='ID dello shop PrestaShop usato per lo stock (multistore: 1 di default).',
+    )
+    ps_category_id = fields.Integer(
+        string='Categoria PS di default',
+        config_parameter='ke_prestashop_sync.category_id',
+        default=2,
+        help='ID categoria PrestaShop assegnata ai prodotti creati dall\'export.',
+    )
+    ps_tax_rules_group_id = fields.Integer(
+        string='Gruppo regole IVA PS',
+        config_parameter='ke_prestashop_sync.tax_rules_group_id',
+        default=1,
+        help='ID id_tax_rules_group assegnato ai prodotti creati dall\'export.',
+    )
 
     # --- Magazzino sorgente per la sync stock ---
     ps_warehouse_id = fields.Many2one(
         'stock.warehouse',
-        string='Magazzino per sync stock',
+        string='Magazzino PrestaShop',
         compute='_compute_ps_warehouse',
         inverse='_set_ps_warehouse',
-        help='Magazzino Odoo da cui leggere le quantità da inviare a PS.',
+        help='Magazzino Odoo da cui leggere le quantità da inviare a PS e '
+             'assegnato agli ordini importati da PrestaShop.',
+    )
+    ps_filter_by_warehouse = fields.Boolean(
+        string='Sincronizza solo i prodotti con giacenza nel magazzino',
+        config_parameter='ke_prestashop_sync.filter_by_warehouse',
+        help='Se attivo, le sincronizzazioni Odoo → PrestaShop (stock, prezzi, '
+             'immagini, export) considerano solo i prodotti con quantità '
+             'disponibile maggiore di zero nel magazzino selezionato.',
     )
 
     # --- Cron: sync stock ---
@@ -44,9 +69,9 @@ class ResConfigSettings(models.TransientModel):
         inverse='_set_cron_sync_stock_active',
     )
     ps_sync_stock_interval = fields.Integer(
-        string='Ogni (minuti)',
-        config_parameter='ke_prestashop_sync.stock_interval_minutes',
-        default=30,
+        string='Sync stock ogni (minuti)',
+        compute='_compute_cron_states',
+        inverse='_set_sync_stock_interval',
     )
 
     # --- Cron: sync prezzi ---
@@ -56,9 +81,9 @@ class ResConfigSettings(models.TransientModel):
         inverse='_set_cron_sync_prices_active',
     )
     ps_sync_prices_interval = fields.Integer(
-        string='Ogni (minuti)',
-        config_parameter='ke_prestashop_sync.prices_interval_minutes',
-        default=60,
+        string='Sync prezzi ogni (minuti)',
+        compute='_compute_cron_states',
+        inverse='_set_sync_prices_interval',
     )
 
     # --- Cron: import ordini ---
@@ -68,14 +93,32 @@ class ResConfigSettings(models.TransientModel):
         inverse='_set_cron_import_orders_active',
     )
     ps_import_orders_interval = fields.Integer(
-        string='Ogni (minuti)',
-        config_parameter='ke_prestashop_sync.orders_interval_minutes',
-        default=15,
+        string='Import ordini ogni (minuti)',
+        compute='_compute_cron_states',
+        inverse='_set_import_orders_interval',
     )
     ps_import_orders_hours_back = fields.Integer(
         string='Importa ordini ultime N ore',
         config_parameter='ke_prestashop_sync.orders_hours_back',
         default=24,
+    )
+    ps_order_auto_confirm = fields.Boolean(
+        string='Conferma automaticamente gli ordini importati',
+        config_parameter='ke_prestashop_sync.order_auto_confirm',
+        help='Se attivo, gli ordini PrestaShop importati vengono confermati '
+             '(action_confirm) invece di restare come preventivi.',
+    )
+
+    # --- Cron: sync immagini ---
+    ps_cron_sync_images_active = fields.Boolean(
+        string='Abilita sync automatica immagini',
+        compute='_compute_cron_states',
+        inverse='_set_cron_sync_images_active',
+    )
+    ps_sync_images_interval = fields.Integer(
+        string='Sync immagini ogni (minuti)',
+        compute='_compute_cron_states',
+        inverse='_set_sync_images_interval',
     )
 
     # --- Opzioni import prodotti ---
@@ -121,127 +164,83 @@ class ResConfigSettings(models.TransientModel):
         cron_stock = self._get_cron('cron_sync_stock')
         cron_prices = self._get_cron('cron_sync_prices')
         cron_orders = self._get_cron('cron_import_orders')
+        cron_images = self._get_cron('cron_sync_images')
         for rec in self:
-            rec.ps_cron_sync_stock_active = cron_stock.active if cron_stock else False
-            rec.ps_cron_sync_prices_active = cron_prices.active if cron_prices else False
-            rec.ps_cron_import_orders_active = cron_orders.active if cron_orders else False
+            rec.ps_cron_sync_stock_active = bool(cron_stock and cron_stock.active)
+            rec.ps_cron_sync_prices_active = bool(cron_prices and cron_prices.active)
+            rec.ps_cron_import_orders_active = bool(cron_orders and cron_orders.active)
+            rec.ps_cron_sync_images_active = bool(cron_images and cron_images.active)
+            rec.ps_sync_stock_interval = cron_stock.interval_number if cron_stock else 30
+            rec.ps_sync_prices_interval = cron_prices.interval_number if cron_prices else 60
+            rec.ps_import_orders_interval = cron_orders.interval_number if cron_orders else 15
+            rec.ps_sync_images_interval = cron_images.interval_number if cron_images else 360
+
+    def _set_cron_active(self, xml_id, active):
+        cron = self._get_cron(xml_id)
+        if cron:
+            cron.sudo().active = bool(active)
+
+    def _set_cron_interval(self, xml_id, minutes):
+        cron = self._get_cron(xml_id)
+        if cron and minutes and minutes > 0:
+            cron.sudo().write({'interval_number': minutes, 'interval_type': 'minutes'})
 
     def _set_cron_sync_stock_active(self):
-        cron = self._get_cron('cron_sync_stock')
-        if cron:
-            cron.sudo().active = self.ps_cron_sync_stock_active
+        self._set_cron_active('cron_sync_stock', self.ps_cron_sync_stock_active)
 
     def _set_cron_sync_prices_active(self):
-        cron = self._get_cron('cron_sync_prices')
-        if cron:
-            cron.sudo().active = self.ps_cron_sync_prices_active
+        self._set_cron_active('cron_sync_prices', self.ps_cron_sync_prices_active)
 
     def _set_cron_import_orders_active(self):
-        cron = self._get_cron('cron_import_orders')
-        if cron:
-            cron.sudo().active = self.ps_cron_import_orders_active
+        self._set_cron_active('cron_import_orders', self.ps_cron_import_orders_active)
+
+    def _set_cron_sync_images_active(self):
+        self._set_cron_active('cron_sync_images', self.ps_cron_sync_images_active)
+
+    def _set_sync_stock_interval(self):
+        self._set_cron_interval('cron_sync_stock', self.ps_sync_stock_interval)
+
+    def _set_sync_prices_interval(self):
+        self._set_cron_interval('cron_sync_prices', self.ps_sync_prices_interval)
+
+    def _set_import_orders_interval(self):
+        self._set_cron_interval('cron_import_orders', self.ps_import_orders_interval)
+
+    def _set_sync_images_interval(self):
+        self._set_cron_interval('cron_sync_images', self.ps_sync_images_interval)
 
     # ------------------------------------------------------------------
-    # Bottoni manuali (esecuzione sincrona — nessun thread)
+    # Bottoni manuali (esecuzione asincrona in thread dedicato)
     # ------------------------------------------------------------------
+
+    def _run(self, sync_type, engine_method, label=None, **kwargs):
+        log_id = self.env['ke.prestashop.sync.log'].enqueue(
+            sync_type, engine_method, label=label, validate=True, **kwargs)
+        return self._open_log_record(log_id)
 
     def action_test_connection(self):
         self._validate_credentials()
         raise UserError('Connessione a PrestaShop riuscita!')
 
     def action_run_sync_stock(self):
-        from ..services.ps_api_client import PsApiClient
-        from ..services.sync_engine import SyncEngine
-        self._validate_credentials()
-        log_rec = self.env['ke.prestashop.sync.log'].create({
-            'name': f'Sync quantità → PS (manuale) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'sync_stock',
-            'state': 'running',
-            'start_date': datetime.now(),
-        })
-        try:
-            SyncEngine(self.env, PsApiClient(self.env)).sync_stock_to_prestashop(log_rec)
-        except Exception as exc:
-            _log.error('sync_stock fallito: %s', exc, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(exc),
-                           'end_date': datetime.now()})
-        return self._open_log_record(log_rec.id)
+        return self._run('sync_stock', 'sync_stock_to_prestashop')
 
     def action_run_sync_prices(self):
-        from ..services.ps_api_client import PsApiClient
-        from ..services.sync_engine import SyncEngine
-        self._validate_credentials()
-        log_rec = self.env['ke.prestashop.sync.log'].create({
-            'name': f'Sync prezzi → PS (manuale) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'sync_prices',
-            'state': 'running',
-            'start_date': datetime.now(),
-        })
-        try:
-            SyncEngine(self.env, PsApiClient(self.env)).sync_prices_to_prestashop(log_rec)
-        except Exception as exc:
-            _log.error('sync_prices fallito: %s', exc, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(exc),
-                           'end_date': datetime.now()})
-        return self._open_log_record(log_rec.id)
+        return self._run('sync_prices', 'sync_prices_to_prestashop')
 
     def action_run_import_orders(self):
-        from ..services.ps_api_client import PsApiClient
-        from ..services.sync_engine import SyncEngine
-        self._validate_credentials()
         hours_back = int(self.env['ir.config_parameter'].sudo().get_param(
             'ke_prestashop_sync.orders_hours_back', '24'))
-        log_rec = self.env['ke.prestashop.sync.log'].create({
-            'name': f'Import ordini PS (manuale) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'import_orders',
-            'state': 'running',
-            'start_date': datetime.now(),
-        })
-        try:
-            SyncEngine(self.env, PsApiClient(self.env)).import_orders_from_ps(
-                log_rec, hours_back=hours_back)
-        except Exception as exc:
-            _log.error('import_orders fallito: %s', exc, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(exc),
-                           'end_date': datetime.now()})
-        return self._open_log_record(log_rec.id)
+        return self._run('import_orders', 'import_orders_from_ps', hours_back=hours_back)
 
     def action_run_sync_images(self):
-        from ..services.ps_api_client import PsApiClient
-        from ..services.sync_engine import SyncEngine
-        self._validate_credentials()
-        log_rec = self.env['ke.prestashop.sync.log'].create({
-            'name': f'Sync immagini → PS (manuale) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'sync_images',
-            'state': 'running',
-            'start_date': datetime.now(),
-        })
-        try:
-            SyncEngine(self.env, PsApiClient(self.env)).sync_images_to_prestashop(log_rec)
-        except Exception as exc:
-            _log.error('sync_images fallito: %s', exc, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(exc),
-                           'end_date': datetime.now()})
-        return self._open_log_record(log_rec.id)
+        return self._run('sync_images', 'sync_images_to_prestashop')
 
     def action_run_sync_images_force(self):
-        from ..services.ps_api_client import PsApiClient
-        from ..services.sync_engine import SyncEngine
-        self._validate_credentials()
-        log_rec = self.env['ke.prestashop.sync.log'].create({
-            'name': f'Sync immagini → PS (forza) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'sync_images',
-            'state': 'running',
-            'start_date': datetime.now(),
-        })
-        try:
-            SyncEngine(self.env, PsApiClient(self.env)).sync_images_to_prestashop(
-                log_rec, force=True)
-        except Exception as exc:
-            _log.error('sync_images_force fallito: %s', exc, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(exc),
-                           'end_date': datetime.now()})
-        return self._open_log_record(log_rec.id)
+        label = (f'Sync immagini → PS (re-upload) — '
+                 f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}')
+        return self._run('sync_images', 'sync_images_to_prestashop',
+                         label=label, force=True)
 
     def action_diagnose_ps_links(self):
         self.env.cr.execute("""
@@ -295,7 +294,7 @@ class ResConfigSettings(models.TransientModel):
         from ..services.ps_api_client import PsApiClient
         try:
             PsApiClient(self.env).validate_credentials()
-        except (ValueError, Exception) as exc:
+        except Exception as exc:
             raise UserError(str(exc)) from exc
 
     def _open_log_record(self, log_id):

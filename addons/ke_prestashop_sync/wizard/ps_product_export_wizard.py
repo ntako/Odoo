@@ -1,12 +1,6 @@
-import logging
-import threading
 from datetime import datetime
 
-from odoo import api, models, fields
-from odoo import registry as Registry
-from odoo.exceptions import UserError
-
-_log = logging.getLogger(__name__)
+from odoo import api, fields, models
 
 
 class PsProductExportWizard(models.TransientModel):
@@ -14,7 +8,8 @@ class PsProductExportWizard(models.TransientModel):
     _description = 'Wizard Export Prodotti verso PrestaShop'
 
     export_mode = fields.Selection([
-        ('new_only', 'Solo prodotti non ancora su PS'),
+        ('new_only', 'Solo prodotti non ancora su PS (+ configurabili)'),
+        ('full_resync', 'Ri-sincronizza tutto il catalogo'),
         ('selected', 'Prodotti selezionati'),
     ], string='Modalità', default='new_only', required=True)
 
@@ -24,52 +19,65 @@ class PsProductExportWizard(models.TransientModel):
         help='Seleziona i prodotti da esportare su PrestaShop.',
     )
 
-    def action_run_export(self):
-        from ..services.ps_api_client import PsApiClient
+    only_in_stock = fields.Boolean(
+        string='Solo prodotti con disponibilità libera > 0',
+        default=True,
+        help='Esclude dall\'export i prodotti senza disponibilità libera '
+             '(giacenza meno quantità riservata) nel magazzino indicato.',
+    )
+    warehouse_id = fields.Many2one(
+        'stock.warehouse',
+        string='Magazzino di riferimento',
+        default=lambda self: self._default_warehouse_id(),
+        help='Le giacenze considerate per l\'opzione qui sopra sono quelle di '
+             'questo magazzino.',
+    )
+
+    preview_count = fields.Integer(
+        string='Prodotti da esportare', compute='_compute_preview')
+    preview_info = fields.Char(compute='_compute_preview')
+
+    @api.model
+    def _default_warehouse_id(self):
         from ..services.sync_engine import SyncEngine
+        return SyncEngine(self.env, None)._warehouse()
 
-        client = PsApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except (ValueError, Exception) as exc:
-            raise UserError(str(exc)) from exc
+    @api.depends('export_mode', 'product_ids', 'only_in_stock', 'warehouse_id')
+    def _compute_preview(self):
+        from ..services.sync_engine import SyncEngine
+        engine = SyncEngine(self.env, None)
+        for wiz in self:
+            try:
+                pids = wiz.product_ids.ids if wiz.export_mode == 'selected' else None
+                count = len(engine.export_candidates(
+                    product_ids=pids,
+                    full_resync=wiz.export_mode == 'full_resync',
+                    only_in_stock=wiz.only_in_stock,
+                    warehouse_id=wiz.warehouse_id.id or None,
+                ))
+            except Exception:  # noqa: BLE001 - l'anteprima non deve bloccare il wizard
+                wiz.preview_count = -1
+                wiz.preview_info = 'Impossibile calcolare l\'anteprima (vedi log).'
+                continue
+            wiz.preview_count = count
+            scope = (
+                f'disponibilità libera > 0 in "{wiz.warehouse_id.display_name}"'
+                if wiz.only_in_stock and wiz.warehouse_id
+                else 'tutti i magazzini'
+            )
+            wiz.preview_info = f'{count} prodotti verranno esportati   ·   {scope}'
 
+    def action_run_export(self):
         product_ids = self.product_ids.ids if self.export_mode == 'selected' else None
+        full_resync = self.export_mode == 'full_resync'
 
-        log_rec = self.env['ke.prestashop.sync.log'].create({
-            'name': f'Export prodotti → PS — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'export_products',
-            'state': 'running',
-            'start_date': datetime.now(),
-        })
-        self.env.cr.commit()
-
-        db_name = self._cr.dbname
-        uid = self.env.uid
-        context = dict(self.env.context)
-        log_id = log_rec.id
-
-        def _run():
-            with Registry(db_name).cursor() as cr:
-                env = api.Environment(cr, uid, context)
-                try:
-                    SyncEngine(env, PsApiClient(env)).export_products_to_ps(
-                        env['ke.prestashop.sync.log'].browse(log_id),
-                        product_ids=product_ids,
-                    )
-                    cr.commit()
-                except Exception as exc:
-                    _log.error('export_products fallito: %s', exc, exc_info=True)
-                    env['ke.prestashop.sync.log'].browse(log_id).write({
-                        'state': 'error',
-                        'error_summary': str(exc),
-                        'end_date': datetime.now(),
-                    })
-                    cr.commit()
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-
+        label = f'Export prodotti → PS — {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+        log_id = self.env['ke.prestashop.sync.log'].enqueue(
+            'export_products', 'export_products_to_ps', label=label, validate=True,
+            product_ids=product_ids, full_resync=full_resync,
+            only_in_stock=self.only_in_stock,
+            warehouse_id=self.warehouse_id.id or None,
+        )
         return {
             'type': 'ir.actions.act_window',
             'name': 'Log Export PrestaShop',

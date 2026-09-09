@@ -37,11 +37,28 @@
                 <group>
                     <field name="export_mode" widget="radio"/>
                     <field name="product_ids" widget="many2many_tags"
-                           invisible="export_mode == 'new_only'"/>
+                           invisible="export_mode != 'selected'"
+                           required="export_mode == 'selected'"/>
+                    <field name="only_in_stock"/>
+                    <field name="warehouse_id"
+                           invisible="not only_in_stock"
+                           required="only_in_stock"/>
                 </group>
+                <div class="alert alert-info" role="status">
+                    <field name="preview_info" readonly="1" nolabel="1"/>
+                    <field name="preview_count" invisible="1"/>
+                </div>
+                <div class="alert alert-warning" role="alert"
+                     invisible="preview_count != 0">
+                    Nessun prodotto verrà esportato con questi criteri: verifica il
+                    magazzino, la disponibilità libera e l'opzione "Solo prodotti con
+                    disponibilità libera &gt; 0".
+                </div>
                 <footer>
                     <button name="action_run_export" type="object"
-                            string="Avvia export" class="btn-primary"/>
+                            string="Avvia export" class="btn-primary"
+                            invisible="preview_count == 0"
+                            confirm="Confermi l'export del numero di prodotti indicato?"/>
                     <button string="Annulla" class="btn-secondary" special="cancel"/>
                 </footer>
             </form>

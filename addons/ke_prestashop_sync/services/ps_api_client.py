@@ -32,6 +32,10 @@ class PsApiClient:
         self._url = (params.get_param('ke_prestashop_sync.url') or '').rstrip('/')
         self._key = params.get_param('ke_prestashop_sync.api_key') or ''
         self._lang_id = int(params.get_param('ke_prestashop_sync.lang_id') or 1)
+        self._shop_id = int(params.get_param('ke_prestashop_sync.shop_id') or 1)
+        self._category_id = int(params.get_param('ke_prestashop_sync.category_id') or 2)
+        self._tax_rules_group_id = int(
+            params.get_param('ke_prestashop_sync.tax_rules_group_id') or 1)
 
     # ------------------------------------------------------------------
     # Primitivi HTTP
@@ -42,6 +46,32 @@ class PsApiClient:
         # della Basic Auth con proxy/web server che filtrano Authorization).
         return {'ws_key': self._key}
 
+    @staticmethod
+    def _ps_error_detail(text):
+        """Estrae i messaggi <error><message> da una risposta di errore PS."""
+        try:
+            root = ET.fromstring(text or '')
+            msgs = []
+            for err in root.iter('error'):
+                code = (err.findtext('code') or '').strip()
+                msg = (err.findtext('message') or '').strip()
+                msgs.append(f'{msg} (code {code})' if code else msg)
+            msgs = [m for m in msgs if m]
+            if msgs:
+                return ' | '.join(msgs)
+        except ET.ParseError:
+            pass
+        return (text or '').strip().replace('\n', ' ')[:500]
+
+    def _check(self, resp, what):
+        """Solleva un'eccezione leggibile (con il messaggio PS) se la risposta non è OK."""
+        if resp.ok:
+            return
+        detail = self._ps_error_detail(resp.text)
+        _log.error('PS %s → HTTP %s: %s', what, resp.status_code, resp.text[:1000])
+        raise requests.HTTPError(
+            f'{what} → HTTP {resp.status_code}: {detail}', response=resp)
+
     def _get_json(self, resource, params=None):
         url = f'{self._url}/api/{resource}'
         p = {'output_format': 'JSON', 'display': 'full'}
@@ -49,7 +79,7 @@ class PsApiClient:
         if params:
             p.update(params)
         resp = requests.get(url, params=p, timeout=30)
-        resp.raise_for_status()
+        self._check(resp, f'GET {resource}')
         return resp.json()
 
     def _get_xml_str(self, resource, resource_id):
@@ -57,7 +87,7 @@ class PsApiClient:
         url = f'{self._url}/api/{resource}/{resource_id}'
         resp = requests.get(url,
                             params=self._ps_key_param() or None, timeout=30)
-        resp.raise_for_status()
+        self._check(resp, f'GET {resource}/{resource_id}')
         return resp.text
 
     def _put_xml(self, resource, resource_id, xml_bytes):
@@ -69,7 +99,7 @@ class PsApiClient:
             params=self._ps_key_param(),
             timeout=30,
         )
-        resp.raise_for_status()
+        self._check(resp, f'PUT {resource}/{resource_id}')
 
     def _post_xml(self, resource, xml_bytes):
         """Crea una nuova risorsa e restituisce l'ID creato."""
@@ -83,9 +113,7 @@ class PsApiClient:
             params=p,
             timeout=30,
         )
-        if not resp.ok:
-            _log.error('PS POST %s → HTTP %s: %s', resource, resp.status_code, resp.text[:1000])
-        resp.raise_for_status()
+        self._check(resp, f'POST {resource}')
         data = resp.json()
         if not isinstance(data, dict):
             _log.error('PS POST %s: risposta JSON inattesa (tipo %s): %s',
@@ -109,7 +137,7 @@ class PsApiClient:
         # Usa XML (senza output_format=JSON): il root endpoint PS non supporta JSON
         p = self._ps_key_param()
         resp = requests.get(f'{self._url}/api/', params=p, timeout=30)
-        resp.raise_for_status()
+        self._check(resp, 'GET /api/')
         return True
 
     # ------------------------------------------------------------------
@@ -157,10 +185,7 @@ class PsApiClient:
             params={**self._ps_key_param(), 'output_format': 'JSON'},
             timeout=60,
         )
-        if not resp.ok:
-            _log.error('PS POST images/products/%s → HTTP %s: %s',
-                       ps_id, resp.status_code, resp.text[:500])
-        resp.raise_for_status()
+        self._check(resp, f'POST images/products/{ps_id}')
 
     @staticmethod
     def _detect_image_mime(data):
@@ -172,15 +197,43 @@ class PsApiClient:
             return 'image/gif', 'product.gif'
         return 'image/jpeg', 'product.jpg'
 
+    def _update_resource_fields(self, resource, resource_id, updates):
+        """GET del body XML, sovrascrive gli elementi indicati e fa PUT.
+
+        updates: dict {xpath_relativo_alla_root: nuovo_testo}.
+        """
+        xml_str = self._get_xml_str(resource, resource_id)
+        root = ET.fromstring(xml_str)
+        for xpath, value in updates.items():
+            el = root.find(xpath)
+            if el is not None:
+                el.text = value
+        xml_bytes = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+        self._put_xml(resource, resource_id, xml_bytes)
+
     def update_product_price(self, ps_id, new_price):
         """Aggiorna il prezzo di un prodotto su PS (GET → modifica → PUT)."""
-        xml_str = self._get_xml_str('products', ps_id)
-        root = ET.fromstring(xml_str)
-        price_el = root.find('.//product/price')
-        if price_el is not None:
-            price_el.text = f'{float(new_price):.6f}'
-        xml_bytes = ET.tostring(root, encoding='utf-8', xml_declaration=True)
-        self._put_xml('products', ps_id, xml_bytes)
+        self._update_resource_fields('products', ps_id, {
+            './/product/price': f'{float(new_price):.6f}',
+        })
+
+    def update_product_active(self, ps_id, active):
+        """Attiva/disattiva un prodotto su PS (active = 0/1)."""
+        self._update_resource_fields('products', ps_id, {
+            './/product/active': str(int(bool(active))),
+        })
+
+    @staticmethod
+    def _clean_reference(reference):
+        """Sanifica un codice riferimento per PrestaShop.
+
+        PS `Validate::isReference` vieta i caratteri < > ; = { } (e in alcune
+        installazioni anche #) e il campo DB è varchar(64). Un valore non
+        conforme dà HTTP 400 (code 85).
+        """
+        ref = re.sub(r'[<>;={}#]', '', reference or '')
+        ref = re.sub(r'[\x00-\x1f]', '', ref).strip()
+        return ref[:64]
 
     @staticmethod
     def _make_slug(name):
@@ -195,6 +248,9 @@ class PsApiClient:
 
     def find_product_by_reference(self, reference):
         """Cerca un prodotto PS per codice riferimento; restituisce l'ID o None."""
+        reference = self._clean_reference(reference)
+        if not reference:
+            return None
         data = self._get_json('products', {
             'display': '[id]',
             'filter[reference]': f'[{reference}]',
@@ -223,8 +279,8 @@ class PsApiClient:
         name_xml = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         # description_short: CDATA senza pre-escaping HTML (solo ]]> va protetto)
         desc_cdata = description_short.replace(']]>', ']]&gt;')
-        # reference: CDATA senza pre-escaping
-        ref_cdata = (reference or '').replace(']]>', ']]&gt;')
+        # reference: sanificato (PS vieta < > ; = { }, max 64 char)
+        ref_cdata = self._clean_reference(reference).replace(']]>', ']]&gt;')
         slug = self._make_slug(name)
         xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -236,7 +292,7 @@ class PsApiClient:
     <available_for_order>1</available_for_order>
     <show_price>1</show_price>
     <price>{float(price):.6f}</price>
-    <id_tax_rules_group>1</id_tax_rules_group>
+    <id_tax_rules_group>{self._tax_rules_group_id}</id_tax_rules_group>
     <reference><![CDATA[{ref_cdata}]]></reference>
     <ean13>{ean13}</ean13>
     <name>
@@ -248,10 +304,10 @@ class PsApiClient:
     <description_short>
       <language id="{self._lang_id}"><![CDATA[{desc_cdata}]]></language>
     </description_short>
-    <id_category_default>2</id_category_default>
+    <id_category_default>{self._category_id}</id_category_default>
     <associations>
       <categories>
-        <category><id>2</id></category>
+        <category><id>{self._category_id}</id></category>
       </categories>
     </associations>
   </product>
@@ -323,11 +379,22 @@ class PsApiClient:
 </prestashop>""".encode('utf-8')
         return self._post_xml('product_option_values', xml)
 
+    def get_combination(self, combo_id):
+        """Dettaglio combinazione come dict JSON."""
+        data = self._get_json(f'combinations/{combo_id}')
+        return data.get('combination', {}) if isinstance(data, dict) else {}
+
+    def update_combination_price(self, combo_id, price_impact):
+        """Aggiorna l'impatto prezzo di una combinazione su PS."""
+        self._update_resource_fields('combinations', combo_id, {
+            './/combination/price': f'{float(price_impact):.6f}',
+        })
+
     def create_combination(self, ps_product_id, option_value_ids,
                            reference='', ean13='', price_impact=0.0):
         """Crea una combinazione PS e restituisce il suo ID."""
         ean13 = ean13 if (ean13 and len(str(ean13)) == 13 and str(ean13).isdigit()) else ''
-        ref_cdata = (reference or '').replace(']]>', ']]&gt;')
+        ref_cdata = self._clean_reference(reference).replace(']]>', ']]&gt;')
         ov_xml = ''.join(
             f'<product_option_value><id>{ov}</id></product_option_value>'
             for ov in option_value_ids
@@ -358,8 +425,9 @@ class PsApiClient:
         return data.get('stock_availables') or []
 
     def update_stock_available(self, stock_id, ps_product_id,
-                                ps_attribute_id, quantity, id_shop=1):
+                                ps_attribute_id, quantity, id_shop=None):
         """Aggiorna la quantità disponibile su PS."""
+        id_shop = id_shop or self._shop_id
         xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <stock_available>
