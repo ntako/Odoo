@@ -15,6 +15,15 @@ import requests
 
 _log = logging.getLogger(__name__)
 
+
+class PsResourceNotFound(requests.HTTPError):
+    """La risorsa PrestaShop richiesta non esiste (HTTP 404).
+
+    Tipicamente: un ps_product_id / ps_combination_id salvato in Odoo che punta
+    a un prodotto cancellato su PrestaShop (link orfano).
+    """
+
+
 _PS_ORDER_STATES = {
     1: 'Awaiting check payment',
     2: 'Payment accepted',
@@ -69,7 +78,8 @@ class PsApiClient:
             return
         detail = self._ps_error_detail(resp.text)
         _log.error('PS %s → HTTP %s: %s', what, resp.status_code, resp.text[:1000])
-        raise requests.HTTPError(
+        exc_cls = PsResourceNotFound if resp.status_code == 404 else requests.HTTPError
+        raise exc_cls(
             f'{what} → HTTP {resp.status_code}: {detail}', response=resp)
 
     def _get_json(self, resource, params=None):

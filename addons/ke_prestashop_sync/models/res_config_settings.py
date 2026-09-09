@@ -286,6 +286,16 @@ class ResConfigSettings(models.TransientModel):
             f'Riesegui l\'export per ricrearli.'
         ) if count else UserError('Nessun link orfano trovato: tutti i ps_product_id sono validi.')
 
+    def action_reset_all_ps_links(self):
+        from ..services.ps_api_client import PsApiClient
+        from ..services.sync_engine import SyncEngine
+        n_t, n_v = SyncEngine(self.env, PsApiClient(self.env)).reset_all_ps_links()
+        raise UserError(
+            f'Collegamenti PrestaShop azzerati: {n_t} prodotti, {n_v} varianti.\n'
+            f'Nessuna chiamata a PrestaShop è stata fatta. Esegui un export per '
+            f'ricreare il catalogo.'
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

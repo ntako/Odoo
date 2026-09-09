@@ -135,11 +135,20 @@
                             </div>
                         </setting>
                         <setting string="Reset link orfani"
-                                 help="Azzera ps_product_id sui prodotti Odoo il cui prodotto PS è stato eliminato. Dopo il reset, riesegui l'export per ricrearli.">
+                                 help="Azzera ps_product_id sui prodotti Odoo il cui prodotto PS è stato eliminato (verifica via API). Dopo il reset, riesegui l'export per ricrearli.">
                             <div>
                                 <button name="action_reset_orphaned_ps_links" type="object"
                                         string="Trova e azzera link orfani"
                                         class="btn btn-sm btn-warning"/>
+                            </div>
+                        </setting>
+                        <setting string="Azzera tutti i collegamenti PS"
+                                 help="Azzera ps_product_id / ps_combination_id / immagine su TUTTI i prodotti, senza chiamare PrestaShop. Da usare dopo aver svuotato il catalogo su PS per ripartire da zero.">
+                            <div>
+                                <button name="action_reset_all_ps_links" type="object"
+                                        string="Azzera tutti i collegamenti"
+                                        class="btn btn-sm btn-danger"
+                                        confirm="Azzerare TUTTI i collegamenti PrestaShop su tutti i prodotti? Il prossimo export ricreerà l'intero catalogo su PS."/>
                             </div>
                         </setting>
                     </block>

@@ -106,8 +106,24 @@ Tutti i cron sono **disabilitati per default** e vanno attivati dalle impostazio
 
 - **Diagnostica link PS**: elenca i `ps_product_id` duplicati (più prodotti Odoo
   collegati allo stesso prodotto PS).
-- **Reset link orfani**: azzera `ps_product_id` sui prodotti il cui prodotto PS
-  non esiste più.
+- **Reset link orfani**: azzera `ps_product_id` (e `ps_combination_id`) sui
+  prodotti il cui prodotto PS non esiste più. Non tocca `ps_sync_enabled`, così
+  un export successivo li ricrea.
+
+- **Azzera tutti i collegamenti PS**: azzera `ps_product_id` / `ps_combination_id`
+  / `ps_image_synced` su **tutti** i prodotti, **senza** chiamare PrestaShop. Da
+  usare dopo aver svuotato il catalogo su PS per ripartire da zero.
+
+Inoltre l'auto-riparazione è integrata nei flussi: se durante export / sync
+prezzi / sync immagini una chiamata a PrestaShop restituisce **404** (il
+`ps_product_id` punta a un prodotto cancellato), il link viene azzerato
+automaticamente — l'export lo ricrea subito (`[RELINK]` → `[NEW→PS]`), gli altri
+flussi lo segnano `[ORPHAN]` per il prossimo export.
+
+L'export in modalità **"Solo nuovi"** lavora a **lotti di 400 prodotti**: al
+termine di ogni lotto riaccoda automaticamente un job per i rimanenti, così un
+catalogo grande viene esportato in più passaggi senza superare il limite di tempo
+del cron worker (`limit_time_real_cron`).
 
 ## Note tecniche
 

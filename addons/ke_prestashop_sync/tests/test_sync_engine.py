@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
 
-from odoo.addons.ke_prestashop_sync.services.ps_api_client import PsApiClient
+from odoo.addons.ke_prestashop_sync.services.ps_api_client import (
+    PsApiClient, PsResourceNotFound)
 from odoo.addons.ke_prestashop_sync.services.sync_engine import SyncEngine
 
 
@@ -27,13 +28,19 @@ class FakePsClient:
         self.combo_price_updates = []
         self.stock_updates = []
         self.deactivated = []
+        self.missing_ids = set()
         self._next_id = 500
+
+    def _guard(self, ps_id):
+        if ps_id in self.missing_ids:
+            raise PsResourceNotFound(f'GET products/{ps_id} → HTTP 404')
 
     # --- prodotti ---
     def get_product_ids(self):
         return [101]
 
     def get_product(self, ps_id):
+        self._guard(ps_id)
         return {
             'id': ps_id,
             'reference': 'REF101',
@@ -60,6 +67,7 @@ class FakePsClient:
         return None
 
     def update_product_price(self, ps_id, price):
+        self._guard(ps_id)
         self.price_updates.append((ps_id, price))
 
     def update_product_active(self, ps_id, active):
@@ -187,6 +195,51 @@ class TestSyncEngine(TransactionCase):
         self.assertIn('Disponibile qui', names)
         self.assertNotIn('Disponibile altrove', names)
         self.assertNotIn('Senza giacenza', names)
+
+    def test_export_relinks_orphaned_product(self):
+        self.client.missing_ids = {777}
+        tmpl = self.env['product.template'].create({
+            'name': 'Orfano', 'default_code': 'ORF1', 'list_price': 8.0,
+            'type': 'consu', 'ps_product_id': 777,
+        })
+        self.engine.export_products_to_ps(
+            self._log('export_products'), product_ids=tmpl.ids, only_in_stock=False)
+        self.assertNotEqual(tmpl.ps_product_id, 777)
+        self.assertTrue(tmpl.ps_product_id)
+        self.assertEqual(len(self.client.created_products), 1)
+
+    def test_sync_prices_clears_orphaned_link(self):
+        self.client.missing_ids = {888}
+        tmpl = self.env['product.template'].create({
+            'name': 'Orfano prezzo', 'ps_product_id': 888,
+            'list_price': 5.0, 'type': 'consu',
+        })
+        self.engine.sync_prices_to_prestashop(self._log('sync_prices'))
+        self.assertEqual(tmpl.ps_product_id, 0)
+
+    def test_reset_all_ps_links(self):
+        t1 = self.env['product.template'].create({
+            'name': 'Collegato', 'type': 'consu',
+            'ps_product_id': 10, 'ps_image_synced': True,
+        })
+        n_t, _n_v = self.engine.reset_all_ps_links()
+        self.assertEqual(t1.ps_product_id, 0)
+        self.assertFalse(t1.ps_image_synced)
+        self.assertGreaterEqual(n_t, 1)
+
+    def test_export_batches_and_reenqueues(self):
+        Log = self.env['ke.prestashop.sync.log']
+        self.env['product.template'].search([]).write({'ps_sync_enabled': False})
+        for n in range(3):
+            self.env['product.template'].create({
+                'name': f'Lotto {n}', 'default_code': f'L{n}',
+                'list_price': 1.0, 'type': 'consu',
+            })
+        with patch.object(SyncEngine, '_EXPORT_BATCH', 2):
+            self.engine.export_products_to_ps(self._log('export_products'))
+        self.assertEqual(len(self.client.created_products), 2)
+        self.assertTrue(Log.search([
+            ('state', '=', 'queued'), ('sync_type', '=', 'export_products')]))
 
     def test_export_deactivates_archived_products(self):
         tmpl = self.env['product.template'].create({

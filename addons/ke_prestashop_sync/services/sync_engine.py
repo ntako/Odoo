@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 
 from odoo import fields
 
+from .ps_api_client import PsResourceNotFound
+
 _log = logging.getLogger(__name__)
 
 _TIMEOUT_STOCK_ID = 30  # secondi per singola chiamata PS stock
@@ -31,6 +33,10 @@ class SyncEngine:
     # Ogni quanti elementi scrivere l'avanzamento sul log e controllare
     # se è stata richiesta l'interruzione.
     _PROGRESS_EVERY = 5
+
+    # Prodotti per singola esecuzione dell'export "Solo nuovi": oltre, si
+    # riaccoda un nuovo job (evita il timeout del cron worker).
+    _EXPORT_BATCH = 400
 
     def __init__(self, env, client):
         self.env = env
@@ -273,6 +279,12 @@ class SyncEngine:
                                 f'[ERR combo] {variant.display_name}: {exc}')
                             err += 1
 
+            except PsResourceNotFound:
+                tmpl.write({'ps_product_id': 0})
+                lines.append(
+                    f'[ORPHAN] {tmpl.name}: ps_id={ps_id} inesistente su PS, '
+                    f'link azzerato (riesporta per ricrearlo)')
+                skip += 1
             except Exception as exc:
                 _log.warning('sync_prices: errore prodotto %s (ps_id=%s): %s', tmpl.name, ps_id, exc)
                 lines.append(f'[ERR] {tmpl.name} (ps_id={ps_id}): {exc}')
@@ -478,8 +490,15 @@ class SyncEngine:
         only_in_stock=True limita ai prodotti con disponibilità libera > 0 nel
         magazzino warehouse_id.
         """
-        products = self.export_candidates(
+        all_candidates = self.export_candidates(
             product_ids, full_resync, only_in_stock, warehouse_id)
+
+        # In modalità "Solo nuovi" la lista si riduce da sola man mano che i
+        # prodotti ricevono ps_product_id: si lavora a lotti e si riaccoda un
+        # export per il resto, così non si supera il limite di tempo del cron.
+        auto_continue = not product_ids and not full_resync
+        products = all_candidates[:self._EXPORT_BATCH] if auto_continue else all_candidates
+        remaining = len(all_candidates) - len(products)
 
         total = len(products)
         created = updated = skipped = err = 0
@@ -500,13 +519,21 @@ class SyncEngine:
                 else:
                     ps_id = tmpl.ps_product_id
                     if ps_id:
-                        # Già collegato: aggiorna prezzo
-                        self.client.update_product_price(ps_id, tmpl.list_price)
-                        tmpl.write({'ps_sync_enabled': True,
-                                    'ps_last_sync_date': fields.Datetime.now()})
-                        lines.append(f'[UPD] {tmpl.name} → ps_id={ps_id}')
-                        updated += 1
-                    else:
+                        try:
+                            # Già collegato: aggiorna prezzo
+                            self.client.update_product_price(ps_id, tmpl.list_price)
+                            tmpl.write({'ps_sync_enabled': True,
+                                        'ps_last_sync_date': fields.Datetime.now()})
+                            lines.append(f'[UPD] {tmpl.name} → ps_id={ps_id}')
+                            updated += 1
+                        except PsResourceNotFound:
+                            # Link orfano: il prodotto non esiste più su PS → ricrea
+                            lines.append(
+                                f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
+                            tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
+                            ps_id = 0
+
+                    if not ps_id:
                         # Cerca per reference per evitare duplicati
                         found_id = None
                         if tmpl.default_code:
@@ -545,8 +572,20 @@ class SyncEngine:
                 self._finalize_cancelled(log_rec, lines, counters)
                 return created, updated, err
 
-        # --- Prodotti archiviati in Odoo → disattiva su PS ---
-        if not product_ids:
+        # --- Lotto successivo: riaccoda un export per i prodotti rimanenti ---
+        if auto_continue and remaining > 0 and (created + updated) > 0:
+            lines.append(
+                f'[CONTINUA] restano ~{remaining} prodotti da esportare: '
+                f'accodato un nuovo job')
+            self.env['ke.prestashop.sync.log'].enqueue(
+                'export_products', 'export_products_to_ps',
+                label=f'Export prodotti → PS (segue) — '
+                      f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+                only_in_stock=only_in_stock, warehouse_id=warehouse_id,
+            )
+
+        # --- Prodotti archiviati in Odoo → disattiva su PS (solo ultimo lotto) ---
+        if not product_ids and remaining == 0:
             archived = self.env['product.template'].with_context(active_test=False).search([
                 ('active', '=', False),
                 ('ps_product_id', '>', 0),
@@ -584,6 +623,17 @@ class SyncEngine:
         """
         ps_id = tmpl.ps_product_id
         created_parent = False
+
+        if ps_id:
+            # Verifica che il prodotto padre esista ancora su PS
+            try:
+                self.client.get_product(ps_id)
+            except PsResourceNotFound:
+                lines.append(
+                    f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
+                tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
+                tmpl.product_variant_ids.write({'ps_combination_id': 0})
+                ps_id = 0
 
         if not ps_id:
             new_ps_id = self.client.create_product(
@@ -679,6 +729,11 @@ class SyncEngine:
                     })
                     lines.append(f'[OK] {tmpl.name} (ps_id={ps_id})')
                     ok += 1
+                except PsResourceNotFound:
+                    tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
+                    lines.append(
+                        f'[ORPHAN] {tmpl.name}: ps_id={ps_id} inesistente su PS, link azzerato')
+                    skip += 1
                 except Exception as exc:
                     _log.warning('sync_images: errore prodotto %s (ps_id=%s): %s',
                                  tmpl.name, ps_id, exc)
@@ -709,8 +764,9 @@ class SyncEngine:
 
     def reset_orphaned_ps_links(self):
         """
-        Azzera ps_product_id sui prodotti Odoo il cui ID non esiste più su PS.
-        Restituisce il numero di prodotti resettati.
+        Azzera ps_product_id (e ps_combination_id delle varianti) sui prodotti
+        Odoo il cui ID non esiste più su PS. Lascia ps_sync_enabled invariato,
+        così un successivo export li ricrea. Restituisce il numero di prodotti.
         """
         ps_ids = set(self.client.get_product_ids())
         orphans = self.env['product.template'].search([
@@ -718,9 +774,29 @@ class SyncEngine:
         ]).filtered(lambda t: t.ps_product_id not in ps_ids)
         count = len(orphans)
         if orphans:
-            orphans.write({'ps_product_id': 0, 'ps_sync_enabled': False})
+            orphans.write({'ps_product_id': 0, 'ps_image_synced': False})
+            orphans.product_variant_ids.filtered('ps_combination_id').write(
+                {'ps_combination_id': 0})
             self.env.cr.commit()
         return count
+
+    def reset_all_ps_links(self):
+        """Azzera TUTTI i collegamenti PrestaShop (ps_product_id,
+        ps_combination_id, ps_image_synced) senza chiamate API. Da usare per
+        ripartire da zero dopo aver svuotato il catalogo su PrestaShop.
+        Restituisce (n_prodotti, n_varianti).
+        """
+        templates = self.env['product.template'].search([
+            '|', ('ps_product_id', '!=', 0), ('ps_image_synced', '=', True),
+        ])
+        variants = self.env['product.product'].search([('ps_combination_id', '!=', 0)])
+        n_t, n_v = len(templates), len(variants)
+        if templates:
+            templates.write({'ps_product_id': 0, 'ps_image_synced': False})
+        if variants:
+            variants.write({'ps_combination_id': 0})
+        self.env.cr.commit()
+        return n_t, n_v
 
     # ------------------------------------------------------------------
     # 7. Import ordini PS → Odoo
