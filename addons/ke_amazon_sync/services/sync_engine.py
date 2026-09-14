@@ -2332,6 +2332,56 @@ class SyncEngine:
         self.env.cr.commit()
         return matched, not_found, errors
 
+    def process_fnsku_report_rows(self, log_rec, rows):
+        """
+        Elabora il report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA) per popolare
+        x_amazon_fnsku. Abbina per SKU (colonna 'sku' del report, corrisponde a
+        x_amazon_sku) — righe senza SKU riconosciuto in Odoo vengono segnalate come
+        saltate, non è un errore (es. inventario storico/archiviato non più in Odoo).
+        Ritorna (matched, not_found, errors).
+        """
+        matched = not_found = errors = 0
+        lines = []
+
+        for row in rows:
+            sku = (row.get('sku') or '').strip()
+            fnsku = (row.get('fnsku') or '').strip()
+            if not sku or not fnsku:
+                continue
+
+            try:
+                product = self.env['product.template'].search(
+                    [('x_amazon_sku', '=', sku)], limit=1,
+                )
+                if not product:
+                    not_found += 1
+                    lines.append(f'SKU NON TROVATO: {sku} — FNSKU: {fnsku}')
+                    continue
+
+                if product.x_amazon_fnsku != fnsku:
+                    product.write({'x_amazon_fnsku': fnsku})
+                    lines.append(f'OK {sku} → {fnsku}')
+                else:
+                    lines.append(f'INVARIATO {sku}: {fnsku}')
+                matched += 1
+            except Exception as exc:
+                errors += 1
+                lines.append(f'ERRORE {sku}: {exc}')
+                _log.error('Errore elaborazione FNSKU %s: %s', sku, exc, exc_info=True)
+
+        new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
+        log_rec.write({
+            'products_total': len(rows),
+            'products_updated': matched,
+            'products_skipped': not_found,
+            'products_error': errors,
+            'log_lines': new_lines,
+            'state': 'done',
+            'end_date': datetime.now(),
+        })
+        self.env.cr.commit()
+        return matched, not_found, errors
+
     def reconcile_from_report_rows(self, log_rec, rows):
         """
         Confronta i prodotti nel report listing Amazon (TSV completo) con quelli in Odoo.

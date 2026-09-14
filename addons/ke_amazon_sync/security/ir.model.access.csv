@@ -13,3 +13,7 @@ access_ke_amazon_receive_wizard_line,ke.amazon.receive.wizard.line,model_ke_amaz
 access_ke_amazon_allocate_fbm_wizard,ke.amazon.allocate.fbm.wizard,model_ke_amazon_allocate_fbm_wizard,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_allocate_fbm_wizard_line,ke.amazon.allocate.fbm.wizard.line,model_ke_amazon_allocate_fbm_wizard_line,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_move_to_general_wizard,ke.amazon.move.to.general.wizard,model_ke_amazon_move_to_general_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_marketplace_user,ke.amazon.marketplace user,model_ke_amazon_marketplace,stock.group_stock_user,1,0,0,0
+access_ke_amazon_marketplace_manager,ke.amazon.marketplace manager,model_ke_amazon_marketplace,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_listing_user,ke.amazon.listing user,model_ke_amazon_listing,stock.group_stock_user,1,0,0,0
+access_ke_amazon_listing_manager,ke.amazon.listing manager,model_ke_amazon_listing,stock.group_stock_manager,1,1,1,1

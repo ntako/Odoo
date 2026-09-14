@@ -140,6 +140,24 @@
                         </setting>
                     </block>
 
+                    <block title="Multi-marketplace (fase 1)" name="amazon_multimarketplace">
+                        <setting string="Marketplace configurati"
+                                 help="Elenco marketplace disponibili (IT/DE/FR/ES/UK/US). Attiva quelli che usi da Magazzino → Amazon Sync → Marketplace.">
+                            <button name="%(action_amazon_marketplace)d"
+                                    string="Gestisci marketplace →"
+                                    type="action"
+                                    class="btn btn-secondary"/>
+                        </setting>
+                        <setting string="Migra a modello multi-marketplace"
+                                 help="Operazione una tantum: crea le inserzioni (ke.amazon.listing) sul marketplace oggi configurato qui sopra, a partire dai campi Amazon già presenti sui prodotti. Non tocca i campi originali, sicura da rilanciare più volte. Non ancora usata dalle sync (fase successiva) — serve solo a preparare i dati.">
+                            <button name="action_migrate_to_amazon_listings"
+                                    string="Migra dati esistenti"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Crea una riga inserzione per ogni prodotto Amazon già presente, sul marketplace oggi configurato. Non modifica i dati originali. Continuare?"/>
+                        </setting>
+                    </block>
+
                 </app>
             </xpath>
         </field>

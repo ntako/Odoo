@@ -377,6 +377,23 @@ class SpApiClient:
         )
         return resp.payload['reportId']
 
+    def request_fnsku_report(self):
+        """
+        Crea il report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA). Ritorna il
+        reportId. Oltre alla colonna 'fnsku' (identificatore giacenza FBA specifico
+        di questo venditore, usato sulle etichette) contiene anche le quantità
+        granulari per stato (riservato, in transito, non vendibile, ecc.) — non
+        ancora usate qui, ma utili per una futura scomposizione della giacenza FBA
+        per stato invece del solo totale disponibile.
+        """
+        from sp_api.api import Reports
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        resp = api.create_report(
+            reportType='GET_FBA_MYI_ALL_INVENTORY_DATA',
+            marketplaceIds=[self.marketplace_id],
+        )
+        return resp.payload['reportId']
+
     def check_report_ready(self, report_id):
         """
         Controlla lo stato del report.

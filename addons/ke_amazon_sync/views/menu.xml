@@ -139,4 +139,32 @@
               parent="menu_amazon_sync_root"
               action="action_product_inventory_list"
               sequence="5"/>
+
+    <!-- Server action import FNSKU -->
+    <record id="action_amazon_fnsku_import_server" model="ir.actions.server">
+        <field name="name">Import FNSKU</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_fnsku_import()</field>
+    </record>
+
+    <menuitem id="menu_amazon_fnsku_import"
+              name="Import FNSKU"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_fnsku_import_server"
+              sequence="23"/>
+
+    <!-- Fase 1 multi-marketplace: modelli di base, non ancora usati dalle sync
+         (vedi TASK.md). Menu utile per ispezionare/gestire i dati fin da ora. -->
+    <menuitem id="menu_amazon_marketplace"
+              name="Marketplace"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_marketplace"
+              sequence="40"/>
+
+    <menuitem id="menu_amazon_listing"
+              name="Inserzioni (multi-marketplace)"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_listing"
+              sequence="41"/>
 </odoo>

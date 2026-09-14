@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_marketplace_list" model="ir.ui.view">
+        <field name="name">ke.amazon.marketplace.list</field>
+        <field name="model">ke.amazon.marketplace</field>
+        <field name="arch" type="xml">
+            <list string="Marketplace Amazon" editable="bottom">
+                <field name="sequence" widget="handle"/>
+                <field name="name"/>
+                <field name="code"/>
+                <field name="marketplace_id"/>
+                <field name="currency_id"/>
+                <field name="active" widget="boolean_toggle"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_marketplace_form" model="ir.ui.view">
+        <field name="name">ke.amazon.marketplace.form</field>
+        <field name="model">ke.amazon.marketplace</field>
+        <field name="arch" type="xml">
+            <form string="Marketplace Amazon">
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="code"/>
+                        <field name="marketplace_id"/>
+                        <field name="currency_id"/>
+                        <field name="active"/>
+                        <field name="sequence"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_marketplace" model="ir.actions.act_window">
+        <field name="name">Marketplace Amazon</field>
+        <field name="res_model">ke.amazon.marketplace</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'active_test': False}</field>
+    </record>
+
+    <record id="view_amazon_listing_list" model="ir.ui.view">
+        <field name="name">ke.amazon.listing.list</field>
+        <field name="model">ke.amazon.listing</field>
+        <field name="arch" type="xml">
+            <list string="Inserzioni Amazon">
+                <field name="product_id"/>
+                <field name="marketplace_id"/>
+                <field name="sku"/>
+                <field name="asin"/>
+                <field name="fulfillment"/>
+                <field name="status"/>
+                <field name="price"/>
+                <field name="qty"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_listing_form" model="ir.ui.view">
+        <field name="name">ke.amazon.listing.form</field>
+        <field name="model">ke.amazon.listing</field>
+        <field name="arch" type="xml">
+            <form string="Inserzione Amazon">
+                <sheet>
+                    <group>
+                        <group string="Identificatori">
+                            <field name="product_id"/>
+                            <field name="marketplace_id"/>
+                            <field name="sku"/>
+                            <field name="asin"/>
+                            <field name="fnsku"/>
+                            <field name="product_type"/>
+                        </group>
+                        <group string="Stato">
+                            <field name="status"/>
+                            <field name="fulfillment"/>
+                            <field name="condition"/>
+                            <field name="found_by_manufacturer"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Dati Amazon (sola lettura)">
+                            <field name="price"/>
+                            <field name="qty"/>
+                            <field name="category"/>
+                            <field name="browse_node_id"/>
+                        </group>
+                        <group string="Sincronizzazione">
+                            <field name="sync_price"/>
+                            <field name="sync_qty"/>
+                            <field name="last_sync"/>
+                            <field name="sync_error"/>
+                        </group>
+                    </group>
+                    <group string="Pubblicazione">
+                        <field name="publish_state"/>
+                        <field name="publish_error"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_listing" model="ir.actions.act_window">
+        <field name="name">Inserzioni Amazon</field>
+        <field name="res_model">ke.amazon.listing</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

@@ -26,6 +26,7 @@ class AmazonSyncLog(models.Model):
         ('returns', 'Import Resi Amazon'),
         ('seed_fbm_stock', 'Recupero Giacenza FBM da Amazon'),
         ('move_to_general', 'Spostamento Giacenza verso Magazzino Generale'),
+        ('import_fnsku', 'Import FNSKU'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),
@@ -1464,3 +1465,216 @@ class AmazonSyncLog(models.Model):
                 cron.sudo().active = False
             except Exception:
                 _log.warning('_disable_returns_cron: impossibile disabilitare il cron.')
+
+    # ------------------------------------------------------------------
+    # Import FNSKU
+    # ------------------------------------------------------------------
+
+    def action_start_fnsku_import(self, name_prefix='Import FNSKU'):
+        """
+        Avvia l'import FNSKU (report GET_FBA_MYI_ALL_INVENTORY_DATA). L'FNSKU non è
+        un dato fisso: Amazon ne genera uno nuovo ogni volta che cambia lo SKU
+        venditore collegato — cosa che succede qui ad ogni riassegnazione SKU al
+        rifornimento (es. 'PFS-1234' → 'PFS-1234+', vedi reconcile_from_report_rows).
+        Per questo esiste anche _cron_fnsku_import_store, per tenerlo aggiornato da
+        solo invece di doverlo rilanciare a mano dopo ogni riconciliazione.
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.fnsku_import_state') == 'running':
+            log_id = int(params.get_param('ke_amazon_sync.fnsku_import_log_id', '0') or 0)
+            if log_id and self.browse(log_id).exists():
+                return {
+                    'type': 'ir.actions.act_window',
+                    'res_model': self._name,
+                    'res_id': log_id,
+                    'view_mode': 'form',
+                    'target': 'current',
+                }
+
+        log_rec = self.create({
+            'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'import_fnsku',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+            'log_lines': 'Richiesta report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA)...',
+        })
+        params.set_param('ke_amazon_sync.fnsku_import_state', 'running')
+        params.set_param('ke_amazon_sync.fnsku_import_log_id', str(log_rec.id))
+        params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
+        params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+        self.env.cr.commit()
+
+        cron = self.env.ref('ke_amazon_sync.cron_fnsku_import_chunk', raise_if_not_found=False)
+        if cron:
+            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': self._name,
+            'res_id': log_rec.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
+    def _cron_fnsku_import_store(self):
+        """
+        Avvia automaticamente un nuovo import FNSKU, se non ce n'è già uno in
+        corso. Schedulata periodicamente — stesso pattern di
+        _cron_sync_fba_quantities_store: qui c'è in più il motivo per cui serve
+        essere periodica e non solo manuale, vedi action_start_fnsku_import.
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.fnsku_import_state') == 'running':
+            _log.info('Import FNSKU già in corso, salto avvio automatico.')
+            return
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron fnsku_import_store saltato: credenziali SP-API non configurate.')
+            return
+        self.action_start_fnsku_import(name_prefix='Import FNSKU (automatico)')
+
+    def _cron_fnsku_import_chunk(self):
+        """
+        Cron di elaborazione import FNSKU (ogni 2 min, abilitato da
+        action_start_fnsku_import). State machine a tre fasi, stesso schema di
+        _cron_returns_chunk:
+          Fase 1 – nessun report_id: richiede il report ad Amazon
+          Fase 2 – report_id presente ma nessun allegato: controlla/scarica il report
+          Fase 3 – allegato presente: abbina le righe per SKU e chiude
+        """
+        import base64
+        import json
+
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.fnsku_import_state') != 'running':
+            self._disable_fnsku_import_cron()
+            return
+
+        client = SpApiClient(self.env)
+        try:
+            client.validate_credentials()
+        except ValueError:
+            _log.warning('Cron fnsku_import_chunk saltato: credenziali SP-API non configurate.')
+            return
+
+        log_id = int(params.get_param('ke_amazon_sync.fnsku_import_log_id', '0') or 0)
+        if not log_id:
+            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fnsku_import_cron()
+            return
+
+        log_rec = self.browse(log_id)
+        if not log_rec.exists():
+            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fnsku_import_cron()
+            return
+
+        report_id = params.get_param('ke_amazon_sync.fnsku_import_report_id', '')
+        attach_id_s = params.get_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+
+        # Fase 1: crea il report
+        if not report_id:
+            try:
+                report_id = client.request_fnsku_report()
+            except Exception as e:
+                _log.error('Creazione report FNSKU fallita: %s', e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+                self.env.cr.commit()
+                self._disable_fnsku_import_cron()
+                return
+            params.set_param('ke_amazon_sync.fnsku_import_report_id', report_id)
+            msg = f'Report FNSKU richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+            _log.info(msg)
+            self.env.cr.commit()
+            return
+
+        # Fase 2: scarica il report quando è pronto
+        if not attach_id_s:
+            try:
+                document_id = client.check_report_ready(report_id)
+            except Exception as e:
+                _log.error('Errore controllo stato report FNSKU %s: %s', report_id, e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+                self.env.cr.commit()
+                self._disable_fnsku_import_cron()
+                return
+
+            if document_id is None:
+                current_log = log_rec.log_lines or ''
+                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
+                self.env.cr.commit()
+                return
+
+            try:
+                rows = client.download_report_rows(document_id)
+            except Exception as e:
+                _log.error('Download report FNSKU %s fallito: %s', document_id, e, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+                self.env.cr.commit()
+                self._disable_fnsku_import_cron()
+                return
+
+            rows_json = json.dumps(rows, ensure_ascii=False)
+            attachment = self.env['ir.attachment'].create({
+                'name': f'amazon_fnsku_report_{log_rec.id}.json',
+                'type': 'binary',
+                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
+                'res_model': 'ke.amazon.sync.log',
+                'res_id': log_rec.id,
+            })
+            params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', str(attachment.id))
+            msg = f'Report scaricato: {len(rows)} righe totali. Abbinamento per SKU...'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+            _log.info(msg)
+            self.env.cr.commit()
+            return
+
+        # Fase 3: abbina le righe per SKU
+        try:
+            attach_id = int(attach_id_s)
+            attachment = self.env['ir.attachment'].browse(attach_id)
+            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
+        except Exception as e:
+            _log.error('Errore lettura allegato report FNSKU: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fnsku_import_cron()
+            return
+
+        try:
+            engine = SyncEngine(self.env, client)
+            matched, not_found, errors = engine.process_fnsku_report_rows(log_rec, rows)
+            _log.info('Import FNSKU: %d abbinati, %d SKU non trovati, %d errori',
+                      matched, not_found, errors)
+        except Exception as e:
+            _log.error('Cron fnsku_import_chunk fallito: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+            self.env.cr.commit()
+            self._disable_fnsku_import_cron()
+            return
+
+        attachment.unlink()
+        params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
+        params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+        params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+        params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
+        self.env.cr.commit()
+        self._disable_fnsku_import_cron()
+
+    def _disable_fnsku_import_cron(self):
+        cron = self.env.ref('ke_amazon_sync.cron_fnsku_import_chunk', raise_if_not_found=False)
+        if cron:
+            try:
+                cron.sudo().active = False
+            except Exception:
+                _log.warning('_disable_fnsku_import_cron: impossibile disabilitare il cron.')

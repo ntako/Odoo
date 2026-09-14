@@ -242,6 +242,76 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_seed_fbm_stock', log_rec.id)
         return self._open_log_action()
 
+    def action_migrate_to_amazon_listings(self):
+        """
+        Operazione una tantum (fase 1 multi-marketplace, vedi TASK.md): crea una
+        riga ke.amazon.listing per ogni prodotto con x_amazon_sku, sul marketplace
+        oggi configurato (Marketplace ID qui sopra). Non tocca né rimuove i campi
+        x_amazon_* originali — sync_engine.py e le viste esistenti continuano a
+        usarli finché non vengono riscritti in una fase successiva. Operazione
+        interna, nessuna chiamata ad Amazon, sicura da rilanciare più volte
+        (salta i prodotti già migrati per quel marketplace).
+        """
+        mp_code = self.env['ir.config_parameter'].sudo().get_param(
+            'ke_amazon_sync.marketplace_id') or _DEF_MARKETPLACE_ID
+        marketplace = self.env['ke.amazon.marketplace'].search(
+            [('marketplace_id', '=', mp_code)], limit=1)
+        if not marketplace:
+            raise UserError(
+                f'Nessun marketplace configurato con Marketplace ID "{mp_code}" '
+                f'(Magazzino → Amazon Sync → Marketplace). Aggiungilo prima di migrare.'
+            )
+
+        Listing = self.env['ke.amazon.listing']
+        products = self.env['product.template'].search([('x_amazon_sku', '!=', False)])
+        already_ids = set(Listing.search([
+            ('marketplace_id', '=', marketplace.id),
+            ('product_id', 'in', products.ids),
+        ]).mapped('product_id').ids)
+
+        vals_list = [
+            {
+                'product_id': product.id,
+                'marketplace_id': marketplace.id,
+                'sku': product.x_amazon_sku,
+                'asin': product.x_amazon_asin,
+                'fnsku': product.x_amazon_fnsku,
+                'product_type': product.x_amazon_product_type,
+                'status': product.x_amazon_status,
+                'fulfillment': product.x_amazon_fulfillment,
+                'price': product.x_amazon_price,
+                'qty': product.x_amazon_qty,
+                'category': product.x_amazon_category,
+                'browse_node_id': product.x_amazon_browse_node_id,
+                'condition': product.x_amazon_condition,
+                'publish_state': product.x_amazon_publish_state,
+                'publish_error': product.x_amazon_publish_error,
+                'found_by_manufacturer': product.x_amazon_found_by_manufacturer,
+                'sync_price': product.x_amazon_sync_price,
+                'sync_qty': product.x_amazon_sync_qty,
+                'last_sync': product.x_amazon_last_sync,
+                'sync_error': product.x_amazon_sync_error,
+            }
+            for product in products if product.id not in already_ids
+        ]
+        if vals_list:
+            Listing.create(vals_list)
+        self.env.cr.commit()
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Migrazione multi-marketplace completata',
+                'message': (
+                    f'{len(vals_list)} inserzioni create su "{marketplace.name}", '
+                    f'{len(already_ids)} già presenti (saltate).'
+                ),
+                'sticky': True,
+                'type': 'success',
+            },
+        }
+
     def action_run_download_images(self):
         """Scarica le immagini mancanti dai prodotti Amazon in background."""
         self._validate_credentials()

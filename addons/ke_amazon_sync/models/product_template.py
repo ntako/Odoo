@@ -118,6 +118,13 @@ class ProductTemplate(models.Model):
         'Amazon SKU', index=True, copy=False,
         help='SKU interno Amazon (può differire dal default_code Odoo).',
     )
+    x_amazon_fnsku = fields.Char(
+        'FNSKU', index=True, copy=False,
+        help='Codice Amazon FNSKU: identifica la giacenza FBA di QUESTO venditore per '
+             'questo SKU (a differenza di EAN/ASIN, non è condiviso con altri venditori). '
+             'Va sulle etichette applicate alle unità spedite in FBA. Popolato da '
+             '"Import FNSKU" (Magazzino → Amazon Sync), non dal full import standard.',
+    )
     x_amazon_product_type = fields.Char(
         'Amazon Product Type', copy=False,
         help='Tipo prodotto Amazon (es. FISHING_PRODUCT). Necessario per le PATCH API.',

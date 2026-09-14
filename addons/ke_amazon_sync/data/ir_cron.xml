@@ -132,6 +132,33 @@
         <field name="user_id" ref="base.user_root"/>
     </record>
 
+    <!-- Funzione 8c: Avvio automatico periodico import FNSKU. Intervallo allineato
+         a cron_reconcile_store: è la riconciliazione a riassegnare lo SKU (quindi
+         a invalidare l'FNSKU) al rifornimento, ha senso ririfare l'import subito dopo. -->
+    <record id="cron_fnsku_import_store" model="ir.cron">
+        <field name="name">Amazon Sync: Import FNSKU</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_fnsku_import_store()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 8d: Import FNSKU, elaborazione chunk (attivata da action_start_fnsku_import
+         o da cron_fnsku_import_store) -->
+    <record id="cron_fnsku_import_chunk" model="ir.cron">
+        <field name="name">Amazon Sync: Import FNSKU (elaborazione)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_fnsku_import_chunk()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
     <!-- Funzione 9: Aggiorna le colonne (memorizzate) della Vista Inventario:
          giacenza per magazzino e vendite 30gg, non hanno un trigger @api.depends
          affidabile (dati esterni/tempo che scorre), vanno ricalcolate a intervalli. -->
