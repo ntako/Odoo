@@ -13,6 +13,7 @@
                             <field name="x_amazon_order_id" string="Numero ordine Amazon"/>
                             <field name="x_amazon_order_status" string="Stato Amazon"/>
                             <field name="x_amazon_fulfillment_channel" string="Fulfillment"/>
+                            <field name="x_amazon_marketplace_id" string="Marketplace"/>
                         </group>
                         <group string="Dettagli">
                             <field name="x_amazon_purchase_date" string="Data acquisto Amazon"/>
@@ -38,6 +39,7 @@
             <xpath expr="//list" position="inside">
                 <field name="x_amazon_order_id" string="N. ordine Amazon" optional="hide"/>
                 <field name="x_amazon_fulfillment_channel" string="Fulfillment" optional="hide"/>
+                <field name="x_amazon_marketplace_id" string="Marketplace" optional="hide"/>
                 <field name="x_amazon_sales_channel" string="Canale" optional="hide"/>
                 <field name="x_amazon_has_return" string="Ha resi" optional="hide" widget="boolean_toggle"/>
             </xpath>

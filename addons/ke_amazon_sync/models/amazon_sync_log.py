@@ -84,6 +84,8 @@ class AmazonSyncLog(models.Model):
                 self.env['ir.attachment'].browse(attach_id).unlink()
             params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
             params.set_param('ke_amazon_sync.orders_import_offset', '0')
+            params.set_param('ke_amazon_sync.orders_import_marketplace_queue', '')
+            params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
             self._disable_orders_import_cron()
         elif self.sync_type == 'sync_fba':
             # La sync gira in un thread di background (non un cron a pagine):
@@ -934,20 +936,34 @@ class AmazonSyncLog(models.Model):
         self.action_start_import_orders(name_prefix='Import Ordini Amazon (automatico)')
 
     def action_start_import_orders(self, name_prefix='Import Ordini Amazon'):
-        """Avvia l'import degli ordini Amazon degli ultimi N giorni."""
+        """
+        Avvia l'import degli ordini Amazon degli ultimi N giorni, su tutti i
+        marketplace attivi (Magazzino → Amazon Sync → Marketplace) — un
+        marketplace alla volta, in coda (vedi _cron_import_orders_chunk).
+        """
         from datetime import timedelta, timezone
+        from odoo.exceptions import UserError
         params = self.env['ir.config_parameter'].sudo()
         days_back = int(params.get_param('ke_amazon_sync.orders_days_back', '30'))
         created_after = (
             fields.Datetime.now().replace(tzinfo=timezone.utc) - timedelta(days=days_back)
         ).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            raise UserError(
+                'Nessun marketplace attivo (Magazzino → Amazon Sync → Marketplace).'
+            )
+
         log_rec = self.create({
             'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'import_orders',
             'state': 'running',
             'start_date': fields.Datetime.now(),
-            'log_lines': f'Importazione ordini degli ultimi {days_back} giorni (da {created_after[:10]}).',
+            'log_lines': (
+                f'Importazione ordini degli ultimi {days_back} giorni (da {created_after[:10]}) '
+                f'su {len(marketplaces)} marketplace: {", ".join(marketplaces.mapped("code"))}.'
+            ),
         })
         params.set_param('ke_amazon_sync.orders_import_state', 'running')
         params.set_param('ke_amazon_sync.orders_import_log_id', str(log_rec.id))
@@ -955,6 +971,9 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.orders_import_created_after', created_after)
         params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
         params.set_param('ke_amazon_sync.orders_import_offset', '0')
+        params.set_param('ke_amazon_sync.orders_import_marketplace_queue',
+                          ','.join(str(i) for i in marketplaces.ids))
+        params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
         self.env.cr.commit()
 
         cron = self.env.ref('ke_amazon_sync.cron_import_orders_chunk', raise_if_not_found=False)
@@ -978,6 +997,11 @@ class AmazonSyncLog(models.Model):
                    (fino a 100) e la mette in cache in un ir.attachment
           Fase 2 – pagina in cache: elabora un blocco di _ORDERS_CHUNK_SIZE ordini
                    per invocazione, finché la pagina non è esaurita
+        Multi-marketplace: un marketplace alla volta, in coda (vedi
+        orders_import_marketplace_queue/orders_import_current_marketplace_id,
+        popolati da action_start_import_orders). Quando un marketplace è
+        esaurito si passa al successivo in coda invece di chiudere subito
+        l'intero import — vedi _orders_import_finish_marketplace.
         """
         import base64
         import json
@@ -1017,9 +1041,26 @@ class AmazonSyncLog(models.Model):
             self._disable_orders_import_cron()
             return
 
+        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
+        # in coda. Coda vuota = import completo su tutti i marketplace attivi.
+        current_mp_id = int(
+            params.get_param('ke_amazon_sync.orders_import_current_marketplace_id', '0') or 0
+        )
+        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
+        if not marketplace.exists():
+            marketplace = self._orders_import_pop_marketplace(params)
+            if not marketplace:
+                log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+                params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+                self.env.cr.commit()
+                self._disable_orders_import_cron()
+                return
+            self.env.cr.commit()
+
         created_after = params.get_param('ke_amazon_sync.orders_import_created_after', '')
         page_attach_id_s = params.get_param('ke_amazon_sync.orders_import_page_attach_id', '')
-        engine = SyncEngine(self.env, client)
+        mp_client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
+        engine = SyncEngine(self.env, mp_client)
 
         # Fase 1: nessuna pagina in cache → scaricane una nuova
         if not page_attach_id_s:
@@ -1035,11 +1076,7 @@ class AmazonSyncLog(models.Model):
                 return
 
             if not orders:
-                log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-                params.set_param('ke_amazon_sync.orders_import_next_token', '')
-                self.env.cr.commit()
-                self._disable_orders_import_cron()
+                self._orders_import_finish_marketplace(log_rec, params, marketplace)
                 return
 
             orders_json = json.dumps(orders, ensure_ascii=False)
@@ -1085,18 +1122,59 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.orders_import_offset', str(new_offset))
             return
 
-        # Pagina esaurita: pulizia; se non c'è un'altra pagina, l'import è completo
+        # Pagina esaurita: pulizia; se non c'è un'altra pagina per questo
+        # marketplace, passa al successivo in coda (o chiudi se era l'ultimo)
         attachment.unlink()
         params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
         params.set_param('ke_amazon_sync.orders_import_offset', '0')
         next_token = params.get_param('ke_amazon_sync.orders_import_next_token', '')
         if not next_token:
-            log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_orders_import_cron()
+            self._orders_import_finish_marketplace(log_rec, params, marketplace)
         else:
             self.env.cr.commit()
+
+    def _orders_import_pop_marketplace(self, params):
+        """
+        Estrae il prossimo marketplace dalla coda (orders_import_marketplace_queue),
+        lo imposta come corrente e azzera lo stato di paginazione per il nuovo
+        segmento. Ritorna il record ke.amazon.marketplace, o un recordset vuoto
+        se la coda è esaurita (import completo su tutti i marketplace).
+        """
+        queue_s = params.get_param('ke_amazon_sync.orders_import_marketplace_queue', '')
+        queue_ids = [int(i) for i in queue_s.split(',') if i]
+        if not queue_ids:
+            return self.env['ke.amazon.marketplace']
+        next_id, rest = queue_ids[0], queue_ids[1:]
+        params.set_param('ke_amazon_sync.orders_import_marketplace_queue',
+                          ','.join(str(i) for i in rest))
+        params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', str(next_id))
+        params.set_param('ke_amazon_sync.orders_import_next_token', '')
+        params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
+        params.set_param('ke_amazon_sync.orders_import_offset', '0')
+        return self.env['ke.amazon.marketplace'].browse(next_id)
+
+    def _orders_import_finish_marketplace(self, log_rec, params, marketplace):
+        """
+        Chiude il segmento di import per 'marketplace'. Se ce ne sono altri in
+        coda, lascia lo stato 'running': il prossimo tick del cron passerà al
+        successivo (vedi _orders_import_pop_marketplace). Altrimenti chiude
+        l'intero import.
+        """
+        if marketplace:
+            msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+        params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
+        params.set_param('ke_amazon_sync.orders_import_next_token', '')
+
+        queue_s = params.get_param('ke_amazon_sync.orders_import_marketplace_queue', '')
+        if queue_s:
+            self.env.cr.commit()
+            return
+
+        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        params.set_param('ke_amazon_sync.orders_import_state', 'idle')
+        self.env.cr.commit()
+        self._disable_orders_import_cron()
 
     def _disable_orders_import_cron(self):
         cron = self.env.ref('ke_amazon_sync.cron_import_orders_chunk', raise_if_not_found=False)

@@ -373,6 +373,24 @@ class SyncEngine:
         self.env = env
         self.client = client
 
+    def _current_marketplace(self):
+        """
+        Risolve il ke.amazon.marketplace corrispondente al marketplace_id (codice
+        SP-API, es. APJ6JRA9NG5V4) del client di questa sync. Usato per taggare
+        gli ordini importati (fase 2 multi-marketplace) — non ancora usato dagli
+        altri flussi (full import, prezzi/quantità, ecc.), che restano mono-
+        marketplace finché non vengono riscritti (vedi TASK.md, fase 3).
+        Ritorna un recordset vuoto se il client non è configurato (es. chiamato
+        fuori da un contesto di sync) o se il marketplace_id non è tra quelli
+        censiti in ke.amazon.marketplace — non è un errore bloccante, il campo
+        sull'ordine resta semplicemente vuoto.
+        """
+        if not self.client:
+            return self.env['ke.amazon.marketplace']
+        return self.env['ke.amazon.marketplace'].search(
+            [('marketplace_id', '=', self.client.marketplace_id)], limit=1,
+        )
+
     # -----------------------------------------------------------------------
     # Funzione 1: Import completo (solo manuale)
     # -----------------------------------------------------------------------
@@ -2100,6 +2118,7 @@ class SyncEngine:
             'x_amazon_fulfillment_channel': fulfillment_channel,
             'x_amazon_purchase_date': purchase_date,
             'x_amazon_sales_channel': order_data.get('SalesChannel', ''),
+            'x_amazon_marketplace_id': self._current_marketplace().id,
         }
         if wh_id:
             order_vals['warehouse_id'] = wh_id

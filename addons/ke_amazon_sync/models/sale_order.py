@@ -20,6 +20,10 @@ class SaleOrder(models.Model):
         ('AFN', 'FBA (Amazon Logistics)'),
         ('MFN', 'FBM (Merchant)'),
     ], string='Fulfillment Amazon', copy=False, readonly=True)
+    x_amazon_marketplace_id = fields.Many2one(
+        'ke.amazon.marketplace', string='Marketplace Amazon', copy=False, readonly=True,
+        help='Marketplace da cui è stato importato questo ordine.',
+    )
     x_amazon_purchase_date = fields.Datetime(
         'Data acquisto Amazon', copy=False, readonly=True,
     )
