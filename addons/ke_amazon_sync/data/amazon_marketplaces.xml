@@ -2,16 +2,17 @@
 <odoo>
     <!-- noupdate="1": creati solo alla prima installazione. L'utente potrà attivare/
          disattivare marketplace dall'interfaccia, un aggiornamento del modulo non
-         deve sovrascrivere quella scelta. Solo IT attivo di default (non cambia
-         comportamento all'aggiornamento: la migrazione dati esistenti si aspetta
-         di trovarlo attivo). -->
+         deve sovrascrivere quella scelta. Nessuno attivo di default (nemmeno IT):
+         niente da "indovinare" quando esiste un modo per chiederlo direttamente ad
+         Amazon — vedi azione "Rileva marketplace attivi", va eseguita almeno una
+         volta prima di qualunque sync (import ordini incluso). -->
     <data noupdate="1">
     <record id="amazon_marketplace_it" model="ke.amazon.marketplace">
         <field name="name">Italia</field>
         <field name="code">IT</field>
         <field name="marketplace_id">APJ6JRA9NG5V4</field>
         <field name="currency_id" ref="base.EUR"/>
-        <field name="active">True</field>
+        <field name="active">False</field>
         <field name="sequence">10</field>
     </record>
     <record id="amazon_marketplace_de" model="ke.amazon.marketplace">

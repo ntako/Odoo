@@ -17,3 +17,6 @@ access_ke_amazon_marketplace_user,ke.amazon.marketplace user,model_ke_amazon_mar
 access_ke_amazon_marketplace_manager,ke.amazon.marketplace manager,model_ke_amazon_marketplace,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_listing_user,ke.amazon.listing user,model_ke_amazon_listing,stock.group_stock_user,1,0,0,0
 access_ke_amazon_listing_manager,ke.amazon.listing manager,model_ke_amazon_listing,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_fba_prep_wizard,ke.amazon.fba.prep.wizard,model_ke_amazon_fba_prep_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_fba_label_log_user,ke.amazon.fba.label.log user,model_ke_amazon_fba_label_log,stock.group_stock_user,1,0,0,0
+access_ke_amazon_fba_label_log_manager,ke.amazon.fba.label.log manager,model_ke_amazon_fba_label_log,stock.group_stock_manager,1,1,1,1

@@ -191,6 +191,11 @@ class ResConfigSettings(models.TransientModel):
     def action_run_sync_prices_quantities(self):
         """Avvia manualmente la funzione 3 in background e apre il log."""
         self._validate_credentials()
+        if not self.env['ke.amazon.marketplace'].search([('active', '=', True)]):
+            raise UserError(
+                'Nessun marketplace attivo. Usa "Rileva marketplace attivi" '
+                '(Impostazioni → Amazon) o attivane uno a mano.'
+            )
         log_rec = self.env['ke.amazon.sync.log'].create({
             'name': f'Sync prezzi/quantità (manuale) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'price_qty',
@@ -215,7 +220,10 @@ class ResConfigSettings(models.TransientModel):
             name_prefix='Riconciliazione store (manuale)'
         )
         if not log_rec:
-            raise UserError('Impossibile avviare la riconciliazione: verifica le credenziali SP-API.')
+            raise UserError(
+                'Impossibile avviare la riconciliazione: verifica le credenziali SP-API oppure '
+                'attiva almeno un marketplace (Impostazioni → Amazon → "Rileva marketplace attivi").'
+            )
         return {
             'type': 'ir.actions.act_window',
             'name': 'Log Riconciliazione Amazon',
@@ -329,6 +337,26 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_download_images', log_rec.id)
         return self._open_log_action()
 
+    def action_run_detect_marketplaces(self):
+        """
+        Chiede ad Amazon su quali marketplace il venditore è realmente attivo
+        (Sellers API) e aggiorna ke.amazon.marketplace di conseguenza — da
+        eseguire almeno una volta prima di affidarsi a qualunque sync
+        multi-marketplace (import ordini incluso). In background: la
+        chiamata può richiedere fino a ~60s (rate limit ufficiale
+        dell'endpoint), non deve bloccare il click del pulsante.
+        """
+        self._validate_credentials()
+        log_rec = self.env['ke.amazon.sync.log'].create({
+            'name': f'Rileva marketplace attivi — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'detect_marketplaces',
+            'state': 'running',
+            'start_date': datetime.now(),
+        })
+        self.env.cr.commit()
+        self._start_thread('_thread_detect_marketplaces', log_rec.id)
+        return self._open_log_action()
+
     # ------------------------------------------------------------------
     # Thread workers
     # ------------------------------------------------------------------
@@ -369,6 +397,29 @@ class ResConfigSettings(models.TransientModel):
                 cr.commit()
 
     @api.model
+    def _thread_detect_marketplaces(self, db, uid, ctx, log_id):
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from ..services.sp_api_client import SpApiClient
+        from ..services.sync_engine import SyncEngine
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            try:
+                engine = SyncEngine(env, SpApiClient(env))
+                activated, created, not_confirmed = engine.detect_active_marketplaces(log_rec)
+                _log.info(
+                    'Rileva marketplace: %d attivati, %d creati, %d non confermati',
+                    len(activated), len(created), len(not_confirmed),
+                )
+            except Exception as exc:
+                _log.error('Thread detect_marketplaces fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc),
+                               'end_date': datetime.now()})
+                cr.commit()
+
+    @api.model
     def _thread_check_new(self, db, uid, ctx, log_id):
         from odoo import api as odoo_api
         from odoo.modules.registry import Registry as odoo_registry
@@ -400,8 +451,24 @@ class ResConfigSettings(models.TransientModel):
             env = odoo_api.Environment(cr, uid, ctx)
             log_rec = env['ke.amazon.sync.log'].browse(log_id)
             try:
-                engine = SyncEngine(env, SpApiClient(env))
-                engine.sync_prices_and_quantities(log_rec)
+                # Fase 3 multi-marketplace: un giro per ogni marketplace attivo,
+                # ognuno con il proprio client SP-API (sync_prices_and_quantities
+                # capisce da solo se è il marketplace primario — vedi
+                # _is_primary_marketplace — e sceglie di conseguenza campi legacy
+                # o ke.amazon.listing). I contatori si sommano tra i marketplace.
+                marketplaces = env['ke.amazon.marketplace'].search([('active', '=', True)])
+                total_ok = total_errors = 0
+                for marketplace in marketplaces:
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+                    ok, errors = engine.sync_prices_and_quantities(log_rec)
+                    total_ok += ok
+                    total_errors += errors
+                log_rec.write({
+                    'state': 'error' if total_errors and not total_ok else 'done',
+                    'end_date': datetime.now(),
+                })
+                cr.commit()
             except Exception as exc:
                 _log.error('Thread sync_price_qty fallito: %s', exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc),

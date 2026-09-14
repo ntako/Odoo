@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_fba_prep_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.fba.prep.wizard.form</field>
+        <field name="model">ke.amazon.fba.prep.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Etichettatura FBA">
+                <field name="picking_id" invisible="1"/>
+                <group>
+                    <field name="ean_scan" placeholder="Scansiona o digita l'EAN..." autofocus="1"/>
+                    <field name="force_reprint"/>
+                </group>
+                <div class="alert alert-info" role="alert" invisible="not last_scan_message">
+                    <field name="last_scan_message" readonly="1" nolabel="1"/>
+                </div>
+                <field name="move_ids" nolabel="1">
+                    <list>
+                        <field name="product_id"/>
+                        <field name="product_uom_qty" string="Prevista"/>
+                        <field name="quantity" string="Etichettata"/>
+                    </list>
+                </field>
+                <footer>
+                    <button name="action_scan"
+                            string="Scansiona / stampa"
+                            type="object"
+                            class="btn btn-primary"/>
+                    <button name="action_validate_picking"
+                            string="Conferma spedizione"
+                            type="object"
+                            class="btn btn-secondary"
+                            confirm="Tutte le unità sono state etichettate? La spedizione verrà chiusa (stato 'Fatto')."/>
+                    <button string="Chiudi" class="btn btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_fba_prep_wizard" model="ir.actions.act_window">
+        <field name="name">Etichettatura FBA</field>
+        <field name="res_model">ke.amazon.fba.prep.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

@@ -142,11 +142,19 @@
 
                     <block title="Multi-marketplace (fase 1)" name="amazon_multimarketplace">
                         <setting string="Marketplace configurati"
-                                 help="Elenco marketplace disponibili (IT/DE/FR/ES/UK/US). Attiva quelli che usi da Magazzino → Amazon Sync → Marketplace.">
+                                 help="Elenco marketplace disponibili (IT/DE/FR/ES/UK/US). Nessuno attivo di default — usa 'Rileva marketplace attivi' qui sotto invece di attivarli a mano, se possibile.">
                             <button name="%(action_amazon_marketplace)d"
                                     string="Gestisci marketplace →"
                                     type="action"
                                     class="btn btn-secondary"/>
+                        </setting>
+                        <setting string="Rileva marketplace attivi"
+                                 help="Chiede direttamente ad Amazon (Sellers API) su quali marketplace sei realmente attivo, invece di doverlo sapere/impostare a mano. Attiva/crea i marketplace confermati; quelli già attivi ma non confermati da Amazon non vengono disattivati automaticamente, solo segnalati nel log. Da eseguire almeno una volta prima di usare l'import ordini o altre sync multi-marketplace.">
+                            <button name="action_run_detect_marketplaces"
+                                    string="Rileva ora"
+                                    type="object"
+                                    class="btn btn-primary"
+                                    confirm="Interroga Amazon per i marketplace realmente attivi e aggiorna l'elenco qui sopra. Continuare?"/>
                         </setting>
                         <setting string="Migra a modello multi-marketplace"
                                  help="Operazione una tantum: crea le inserzioni (ke.amazon.listing) sul marketplace oggi configurato qui sopra, a partire dai campi Amazon già presenti sui prodotti. Non tocca i campi originali, sicura da rilanciare più volte. Non ancora usata dalle sync (fase successiva) — serve solo a preparare i dati.">

@@ -27,6 +27,7 @@ class AmazonSyncLog(models.Model):
         ('seed_fbm_stock', 'Recupero Giacenza FBM da Amazon'),
         ('move_to_general', 'Spostamento Giacenza verso Magazzino Generale'),
         ('import_fnsku', 'Import FNSKU'),
+        ('detect_marketplaces', 'Rileva Marketplace Attivi'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),
@@ -95,13 +96,43 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.fba_sync_log_id', '')
         elif self.sync_type == 'returns':
             params.set_param('ke_amazon_sync.returns_state', 'idle')
+            params.set_param('ke_amazon_sync.returns_log_id', '')
+            params.set_param('ke_amazon_sync.returns_report_id', '')
+            params.set_param('ke_amazon_sync.returns_report_attach_id', '')
+            params.set_param('ke_amazon_sync.returns_marketplace_queue', '')
+            params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
             self._disable_returns_cron()
+        elif self.sync_type == 'full_import':
+            params.set_param('ke_amazon_sync.import_state', 'idle')
+            params.set_param('ke_amazon_sync.import_page_token', '')
+            params.set_param('ke_amazon_sync.import_report_id', '')
+            params.set_param('ke_amazon_sync.import_report_attach_id', '')
+            params.set_param('ke_amazon_sync.import_report_row_offset', '')
+            params.set_param('ke_amazon_sync.import_marketplace_queue', '')
+            params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
+            self._disable_import_cron()
         elif self.sync_type == 'download_images':
             # Come sync_fba: thread di background, qui liberiamo solo lo
             # stato per permettere un nuovo avvio, non fermiamo un thread
             # già in esecuzione (terminerà da solo, sovrascrivendo poi
             # questo stesso stato a 'idle' di nuovo alla sua fine).
             params.set_param('ke_amazon_sync.download_images_state', 'idle')
+        elif self.sync_type == 'reconcile':
+            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
+            params.set_param('ke_amazon_sync.reconcile_log_id', '')
+            params.set_param('ke_amazon_sync.reconcile_report_id', '')
+            params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
+            params.set_param('ke_amazon_sync.reconcile_marketplace_queue', '')
+            params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
+            self._disable_reconcile_cron()
+        elif self.sync_type == 'import_fnsku':
+            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
+            params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
+            params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
+            params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+            params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
+            params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
+            self._disable_fnsku_import_cron()
         self.write({'state': 'done', 'end_date': fields.Datetime.now()})
 
     def action_export_csv(self):
@@ -361,6 +392,14 @@ class AmazonSyncLog(models.Model):
         if params.get_param('ke_amazon_sync.import_state') == 'running':
             raise UserError('Un import è già in corso. Controlla il log sincronizzazioni.')
 
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            raise UserError(
+                'Nessun marketplace attivo. Usa "Rileva marketplace attivi" '
+                '(Impostazioni → Amazon) per attivarli automaticamente, oppure '
+                'attivali a mano da Magazzino → Amazon Sync → Marketplace.'
+            )
+
         max_products = int(params.get_param('ke_amazon_sync.max_products', '0') or 0)
         limit_label = f' (limite {max_products})' if max_products else ''
         log_rec = self.create({
@@ -368,6 +407,7 @@ class AmazonSyncLog(models.Model):
             'sync_type': 'full_import',
             'state': 'running',
             'start_date': fields.Datetime.now(),
+            'log_lines': f'Import su {len(marketplaces)} marketplace: {", ".join(marketplaces.mapped("code"))}.',
         })
         update_existing = params.get_param('ke_amazon_sync.import_update_existing_default', 'True') != 'False'
 
@@ -379,6 +419,9 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.import_report_id', '')
         params.set_param('ke_amazon_sync.import_report_attach_id', '')
         params.set_param('ke_amazon_sync.import_report_row_offset', '')
+        params.set_param('ke_amazon_sync.import_marketplace_queue',
+                          ','.join(str(i) for i in marketplaces.ids))
+        params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
 
         cron = self.env.ref('ke_amazon_sync.cron_full_import_chunk', raise_if_not_found=False)
         if cron:
@@ -433,12 +476,27 @@ class AmazonSyncLog(models.Model):
             self._disable_import_cron()
             return
 
+        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
+        # in coda (stesso pattern dell'import ordini). Coda vuota = import
+        # completo su tutti i marketplace attivi.
+        current_mp_id = int(
+            params.get_param('ke_amazon_sync.import_current_marketplace_id', '0') or 0
+        )
+        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
+        if not marketplace.exists():
+            marketplace = self._full_import_pop_marketplace(params)
+            if not marketplace:
+                self._finish_full_import(log_rec)
+                return
+            self.env.cr.commit()
+        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
+
         update_existing = params.get_param('ke_amazon_sync.import_update_existing', 'True') == 'True'
         max_products = int(params.get_param('ke_amazon_sync.import_max_products', '0') or 0)
 
         # Interrompi se abbiamo già raggiunto il limite
         if max_products and log_rec.products_total >= max_products:
-            self._finish_full_import(log_rec)
+            self._full_import_finish_marketplace(log_rec, params, marketplace)
             return
 
         # ---------------------------------------------------------------
@@ -462,7 +520,7 @@ class AmazonSyncLog(models.Model):
                 params.set_param('ke_amazon_sync.import_page_token', next_token)
             else:
                 params.set_param('ke_amazon_sync.import_page_token', '')
-                self._finish_full_import(log_rec)
+                self._full_import_finish_marketplace(log_rec, params, marketplace)
             return
 
         # ---------------------------------------------------------------
@@ -564,12 +622,52 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.import_report_row_offset', str(next_offset))
             _log.info('Report import: %d/%d righe elaborate', next_offset, len(rows))
         else:
-            # Tutte le righe elaborate: pulizia e chiusura
+            # Tutte le righe elaborate: pulizia e chiusura del marketplace corrente
             attachment.unlink()
             params.set_param('ke_amazon_sync.import_report_id', '')
             params.set_param('ke_amazon_sync.import_report_attach_id', '')
             params.set_param('ke_amazon_sync.import_report_row_offset', '')
-            self._finish_full_import(log_rec)
+            self._full_import_finish_marketplace(log_rec, params, marketplace)
+
+    def _full_import_pop_marketplace(self, params):
+        """
+        Estrae il prossimo marketplace dalla coda (import_marketplace_queue),
+        lo imposta come corrente e azzera lo stato di report/pagina per il
+        nuovo segmento (ogni marketplace ha il proprio report indipendente).
+        Ritorna il record ke.amazon.marketplace, o un recordset vuoto se la
+        coda è esaurita (import completo su tutti i marketplace).
+        """
+        queue_s = params.get_param('ke_amazon_sync.import_marketplace_queue', '')
+        queue_ids = [int(i) for i in queue_s.split(',') if i]
+        if not queue_ids:
+            return self.env['ke.amazon.marketplace']
+        next_id, rest = queue_ids[0], queue_ids[1:]
+        params.set_param('ke_amazon_sync.import_marketplace_queue',
+                          ','.join(str(i) for i in rest))
+        params.set_param('ke_amazon_sync.import_current_marketplace_id', str(next_id))
+        params.set_param('ke_amazon_sync.import_page_token', '')
+        params.set_param('ke_amazon_sync.import_report_id', '')
+        params.set_param('ke_amazon_sync.import_report_attach_id', '')
+        params.set_param('ke_amazon_sync.import_report_row_offset', '')
+        return self.env['ke.amazon.marketplace'].browse(next_id)
+
+    def _full_import_finish_marketplace(self, log_rec, params, marketplace):
+        """
+        Chiude il segmento di import per 'marketplace'. Se ce ne sono altri in
+        coda, lascia lo stato 'running': il prossimo tick del cron passerà al
+        successivo (vedi _full_import_pop_marketplace). Altrimenti chiude
+        l'intero import (vedi _finish_full_import).
+        """
+        if marketplace:
+            msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+        params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
+
+        queue_s = params.get_param('ke_amazon_sync.import_marketplace_queue', '')
+        if queue_s:
+            self.env.cr.commit()
+            return
+        self._finish_full_import(log_rec)
 
     def _finish_full_import(self, log_rec):
         """
@@ -631,7 +729,9 @@ class AmazonSyncLog(models.Model):
 
     def _cron_reconcile_store(self, name_prefix='Riconciliazione store'):
         """
-        Avvia una nuova riconciliazione via Reports API (nessun limite di prodotti).
+        Avvia una nuova riconciliazione via Reports API (nessun limite di prodotti),
+        una per ogni marketplace attivo (stessa coda del full import, vedi
+        _full_import_pop_marketplace / _reconcile_pop_marketplace).
         Crea il log, imposta i parametri di stato e abilita il cron di elaborazione chunk.
         Usata sia dal cron automatico sia dal trigger manuale (impostazioni).
         Ritorna il log creato, o None se non è stato possibile avviarla.
@@ -646,16 +746,30 @@ class AmazonSyncLog(models.Model):
         if params.get_param('ke_amazon_sync.reconcile_state') == 'running':
             _log.info('Riconciliazione già in corso, salto avvio.')
             return None
+
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            _log.warning(
+                'Cron reconcile_store saltato: nessun marketplace attivo. '
+                'Usa "Rileva marketplace attivi" (Impostazioni → Amazon) o attivane uno a mano.'
+            )
+            return None
+
         log_rec = self.create({
             'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'reconcile',
             'state': 'running',
             'start_date': fields.Datetime.now(),
+            'log_lines': f'Riconciliazione su {len(marketplaces)} marketplace: '
+                         f'{", ".join(marketplaces.mapped("code"))}.',
         })
         params.set_param('ke_amazon_sync.reconcile_state', 'running')
         params.set_param('ke_amazon_sync.reconcile_log_id', str(log_rec.id))
         params.set_param('ke_amazon_sync.reconcile_report_id', '')
         params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
+        params.set_param('ke_amazon_sync.reconcile_marketplace_queue',
+                          ','.join(str(i) for i in marketplaces.ids))
+        params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
         self.env.cr.commit()
         cron = self.env.ref('ke_amazon_sync.cron_reconcile_chunk', raise_if_not_found=False)
         if cron:
@@ -698,6 +812,20 @@ class AmazonSyncLog(models.Model):
             self.env.cr.commit()
             self._disable_reconcile_cron()
             return
+
+        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
+        # in coda (stesso pattern del full import).
+        current_mp_id = int(
+            params.get_param('ke_amazon_sync.reconcile_current_marketplace_id', '0') or 0
+        )
+        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
+        if not marketplace.exists():
+            marketplace = self._reconcile_pop_marketplace(params)
+            if not marketplace:
+                self._finish_reconcile(log_rec)
+                return
+            self.env.cr.commit()
+        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
 
         report_id = params.get_param('ke_amazon_sync.reconcile_report_id', '')
         attach_id_s = params.get_param('ke_amazon_sync.reconcile_report_attach_id', '')
@@ -792,6 +920,50 @@ class AmazonSyncLog(models.Model):
         attachment.unlink()
         params.set_param('ke_amazon_sync.reconcile_report_id', '')
         params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
+        self._reconcile_finish_marketplace(log_rec, params, marketplace)
+
+    def _reconcile_pop_marketplace(self, params):
+        """
+        Estrae il prossimo marketplace dalla coda (reconcile_marketplace_queue),
+        lo imposta come corrente e azzera lo stato di report per il nuovo
+        segmento (ogni marketplace ha il proprio report indipendente).
+        Ritorna il record ke.amazon.marketplace, o un recordset vuoto se la
+        coda è esaurita (riconciliazione completa su tutti i marketplace).
+        """
+        queue_s = params.get_param('ke_amazon_sync.reconcile_marketplace_queue', '')
+        queue_ids = [int(i) for i in queue_s.split(',') if i]
+        if not queue_ids:
+            return self.env['ke.amazon.marketplace']
+        next_id, rest = queue_ids[0], queue_ids[1:]
+        params.set_param('ke_amazon_sync.reconcile_marketplace_queue',
+                          ','.join(str(i) for i in rest))
+        params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', str(next_id))
+        params.set_param('ke_amazon_sync.reconcile_report_id', '')
+        params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
+        return self.env['ke.amazon.marketplace'].browse(next_id)
+
+    def _reconcile_finish_marketplace(self, log_rec, params, marketplace):
+        """
+        Chiude il segmento di riconciliazione per 'marketplace'. Se ce ne sono
+        altri in coda, lascia lo stato 'running': il prossimo tick del cron
+        passerà al successivo (vedi _reconcile_pop_marketplace). Altrimenti
+        chiude l'intera riconciliazione (vedi _finish_reconcile).
+        """
+        if marketplace:
+            msg = f'Riconciliazione completata per {marketplace.name} ({marketplace.code}).'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+        params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
+
+        queue_s = params.get_param('ke_amazon_sync.reconcile_marketplace_queue', '')
+        if queue_s:
+            self.env.cr.commit()
+            return
+        self._finish_reconcile(log_rec)
+
+    def _finish_reconcile(self, log_rec):
+        """Chiude la riconciliazione: coda marketplace esaurita."""
+        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.reconcile_state', 'idle')
         params.set_param('ke_amazon_sync.reconcile_log_id', '')
         self.env.cr.commit()
@@ -911,6 +1083,10 @@ class AmazonSyncLog(models.Model):
         except ValueError:
             _log.warning('Cron sync_prices_quantities saltato: credenziali SP-API non configurate.')
             return
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            _log.warning('Cron sync_prices_quantities saltato: nessun marketplace attivo.')
+            return
         log_rec = self.create({
             'name': f'Sync prezzi/quantità — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'price_qty',
@@ -918,12 +1094,23 @@ class AmazonSyncLog(models.Model):
             'start_date': fields.Datetime.now(),
         })
         try:
-            client = SpApiClient(self.env)
-            engine = SyncEngine(self.env, client)
-            ok, errors = engine.sync_prices_and_quantities(log_rec)
-            _log.info('Sync prezzi/quantità: %d ok, %d errori', ok, errors)
+            # Fase 3 multi-marketplace: un giro per ogni marketplace attivo, stesso
+            # schema del thread manuale (vedi _thread_sync_price_qty).
+            total_ok = total_errors = 0
+            for marketplace in marketplaces:
+                client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
+                engine = SyncEngine(self.env, client)
+                ok, errors = engine.sync_prices_and_quantities(log_rec)
+                total_ok += ok
+                total_errors += errors
+            log_rec.write({
+                'state': 'error' if total_errors and not total_ok else 'done',
+                'end_date': fields.Datetime.now(),
+            })
+            _log.info('Sync prezzi/quantità: %d ok, %d errori', total_ok, total_errors)
         except Exception as e:
             _log.error('Cron sync_prices_quantities fallito: %s', e, exc_info=True)
+            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
 
     # ------------------------------------------------------------------
     # Import Ordini Amazon
@@ -965,7 +1152,9 @@ class AmazonSyncLog(models.Model):
         marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
         if not marketplaces:
             raise UserError(
-                'Nessun marketplace attivo (Magazzino → Amazon Sync → Marketplace).'
+                'Nessun marketplace attivo. Usa "Rileva marketplace attivi" '
+                '(Impostazioni → Amazon) per attivarli automaticamente, oppure '
+                'attivali a mano da Magazzino → Amazon Sync → Marketplace.'
             )
 
         log_rec = self.create({
@@ -1213,6 +1402,8 @@ class AmazonSyncLog(models.Model):
         l'altra (a parte il rate-limit di ~0.5s), e non è soggetto al limite
         di tempo reale del cron perché non è un thread cron.
         """
+        from odoo.exceptions import UserError
+
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.fba_sync_state') == 'running':
             log_id = int(params.get_param('ke_amazon_sync.fba_sync_log_id', '0') or 0)
@@ -1225,12 +1416,21 @@ class AmazonSyncLog(models.Model):
                     'target': 'current',
                 }
 
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            raise UserError(
+                'Nessun marketplace attivo. Usa "Rileva marketplace attivi" '
+                '(Impostazioni → Amazon) o attivane uno a mano.'
+            )
+
         log_rec = self.create({
             'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'sync_fba',
             'state': 'running',
             'start_date': fields.Datetime.now(),
-            'log_lines': 'Avvio sync giacenze FBA...',
+            'log_lines': f'Avvio sync giacenze FBA su {len(marketplaces)} marketplace: '
+                         f'{", ".join(marketplaces.mapped("code"))} (inventario Pan-EU pooled, '
+                         f'stesso magazzino Odoo per tutti).',
         })
         params.set_param('ke_amazon_sync.fba_sync_state', 'running')
         params.set_param('ke_amazon_sync.fba_sync_log_id', str(log_rec.id))
@@ -1274,31 +1474,40 @@ class AmazonSyncLog(models.Model):
             env = odoo_api.Environment(cr, uid, ctx)
             log_rec = env['ke.amazon.sync.log'].browse(log_id)
             params = env['ir.config_parameter'].sudo()
-            client = SpApiClient(env)
-            engine = SyncEngine(env, client)
-            page_token = None
-            token_restarts = 0
+            marketplaces = env['ke.amazon.marketplace'].search([('active', '=', True)])
             try:
-                while True:
-                    try:
-                        new_page_token = engine.sync_fba_quantities_page(log_rec, page_token)
-                    except Exception as exc:
-                        msg = str(exc).lower()
-                        is_token_error = 'token' in msg and ('expired' in msg or 'invalid' in msg)
-                        if is_token_error and token_restarts < self._FBA_SYNC_MAX_TOKEN_RESTARTS:
-                            token_restarts += 1
-                            _log.warning(
-                                'sync_fba: nextToken scaduto/non valido, riparto dalla prima '
-                                'pagina (tentativo %d/%d): %s',
-                                token_restarts, self._FBA_SYNC_MAX_TOKEN_RESTARTS, exc,
-                            )
-                            page_token = None
-                            continue
-                        raise
-                    if not new_page_token:
-                        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-                        break
-                    page_token = new_page_token
+                # Fase 3 multi-marketplace (inventario FBA Pan-EU pooled, confermato
+                # dall'utente): un giro completo di pagine per ogni marketplace attivo,
+                # tutti riconciliati sullo stesso, unico magazzino FBA — vedi il
+                # commento in sync_fba_quantities_page. page_token/token_restarts
+                # sono resettati ad ogni marketplace (ognuno ha la propria paginazione
+                # SP-API indipendente).
+                for marketplace in marketplaces:
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+                    page_token = None
+                    token_restarts = 0
+                    while True:
+                        try:
+                            new_page_token = engine.sync_fba_quantities_page(log_rec, page_token)
+                        except Exception as exc:
+                            msg = str(exc).lower()
+                            is_token_error = 'token' in msg and ('expired' in msg or 'invalid' in msg)
+                            if is_token_error and token_restarts < self._FBA_SYNC_MAX_TOKEN_RESTARTS:
+                                token_restarts += 1
+                                _log.warning(
+                                    'sync_fba [%s]: nextToken scaduto/non valido, riparto dalla '
+                                    'prima pagina (tentativo %d/%d): %s',
+                                    marketplace.code, token_restarts,
+                                    self._FBA_SYNC_MAX_TOKEN_RESTARTS, exc,
+                                )
+                                page_token = None
+                                continue
+                            raise
+                        if not new_page_token:
+                            break
+                        page_token = new_page_token
+                log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
             except Exception as exc:
                 _log.error('Thread sync_fba_quantities fallito: %s', exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc),
@@ -1325,6 +1534,9 @@ class AmazonSyncLog(models.Model):
             client.validate_credentials()
         except ValueError:
             _log.warning('Cron sync_fba_store saltato: credenziali SP-API non configurate.')
+            return
+        if not self.env['ke.amazon.marketplace'].search([('active', '=', True)]):
+            _log.warning('Cron sync_fba_store saltato: nessun marketplace attivo.')
             return
         self.action_start_sync_fba_quantities(name_prefix='Sync Giacenze FBA (automatico)')
 
@@ -1369,8 +1581,12 @@ class AmazonSyncLog(models.Model):
     # ------------------------------------------------------------------
 
     def action_start_returns_report(self):
-        """Avvia l'import dei resi cliente FBA degli ultimi N giorni."""
+        """Avvia l'import dei resi cliente FBA degli ultimi N giorni, uno per
+        ogni marketplace attivo (stessa coda del full import/riconciliazione:
+        il report resi è per-marketplace su SP-API)."""
         from datetime import timedelta, timezone
+        from odoo.exceptions import UserError
+
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.returns_state') == 'running':
             log_id = int(params.get_param('ke_amazon_sync.returns_log_id', '0') or 0)
@@ -1382,6 +1598,14 @@ class AmazonSyncLog(models.Model):
                     'view_mode': 'form',
                     'target': 'current',
                 }
+
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            raise UserError(
+                'Nessun marketplace attivo. Usa "Rileva marketplace attivi" '
+                '(Impostazioni → Amazon) o attivane uno a mano.'
+            )
+
         days_back = int(params.get_param('ke_amazon_sync.returns_days_back', '30'))
         data_start_time = (
             fields.Datetime.now().replace(tzinfo=timezone.utc) - timedelta(days=days_back)
@@ -1392,13 +1616,17 @@ class AmazonSyncLog(models.Model):
             'sync_type': 'returns',
             'state': 'running',
             'start_date': fields.Datetime.now(),
-            'log_lines': f'Richiesta report resi degli ultimi {days_back} giorni (da {data_start_time[:10]}).',
+            'log_lines': f'Richiesta report resi degli ultimi {days_back} giorni (da {data_start_time[:10]}) '
+                         f'su {len(marketplaces)} marketplace: {", ".join(marketplaces.mapped("code"))}.',
         })
         params.set_param('ke_amazon_sync.returns_state', 'running')
         params.set_param('ke_amazon_sync.returns_log_id', str(log_rec.id))
         params.set_param('ke_amazon_sync.returns_report_id', '')
         params.set_param('ke_amazon_sync.returns_report_attach_id', '')
         params.set_param('ke_amazon_sync.returns_data_start_time', data_start_time)
+        params.set_param('ke_amazon_sync.returns_marketplace_queue',
+                          ','.join(str(i) for i in marketplaces.ids))
+        params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
         self.env.cr.commit()
 
         cron = self.env.ref('ke_amazon_sync.cron_returns_chunk', raise_if_not_found=False)
@@ -1449,6 +1677,20 @@ class AmazonSyncLog(models.Model):
             self.env.cr.commit()
             self._disable_returns_cron()
             return
+
+        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
+        # in coda (stesso pattern del full import/riconciliazione).
+        current_mp_id = int(
+            params.get_param('ke_amazon_sync.returns_current_marketplace_id', '0') or 0
+        )
+        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
+        if not marketplace.exists():
+            marketplace = self._returns_pop_marketplace(params)
+            if not marketplace:
+                self._finish_returns(log_rec)
+                return
+            self.env.cr.commit()
+        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
 
         report_id = params.get_param('ke_amazon_sync.returns_report_id', '')
         attach_id_s = params.get_param('ke_amazon_sync.returns_report_attach_id', '')
@@ -1544,6 +1786,50 @@ class AmazonSyncLog(models.Model):
         attachment.unlink()
         params.set_param('ke_amazon_sync.returns_report_id', '')
         params.set_param('ke_amazon_sync.returns_report_attach_id', '')
+        self._returns_finish_marketplace(log_rec, params, marketplace)
+
+    def _returns_pop_marketplace(self, params):
+        """
+        Estrae il prossimo marketplace dalla coda (returns_marketplace_queue),
+        lo imposta come corrente e azzera lo stato di report per il nuovo
+        segmento (ogni marketplace ha il proprio report resi indipendente).
+        Ritorna il record ke.amazon.marketplace, o un recordset vuoto se la
+        coda è esaurita (import resi completo su tutti i marketplace).
+        """
+        queue_s = params.get_param('ke_amazon_sync.returns_marketplace_queue', '')
+        queue_ids = [int(i) for i in queue_s.split(',') if i]
+        if not queue_ids:
+            return self.env['ke.amazon.marketplace']
+        next_id, rest = queue_ids[0], queue_ids[1:]
+        params.set_param('ke_amazon_sync.returns_marketplace_queue',
+                          ','.join(str(i) for i in rest))
+        params.set_param('ke_amazon_sync.returns_current_marketplace_id', str(next_id))
+        params.set_param('ke_amazon_sync.returns_report_id', '')
+        params.set_param('ke_amazon_sync.returns_report_attach_id', '')
+        return self.env['ke.amazon.marketplace'].browse(next_id)
+
+    def _returns_finish_marketplace(self, log_rec, params, marketplace):
+        """
+        Chiude il segmento di import resi per 'marketplace'. Se ce ne sono altri
+        in coda, lascia lo stato 'running': il prossimo tick del cron passerà al
+        successivo (vedi _returns_pop_marketplace). Altrimenti chiude l'intero
+        import (vedi _finish_returns).
+        """
+        if marketplace:
+            msg = f'Import resi completato per {marketplace.name} ({marketplace.code}).'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+        params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
+
+        queue_s = params.get_param('ke_amazon_sync.returns_marketplace_queue', '')
+        if queue_s:
+            self.env.cr.commit()
+            return
+        self._finish_returns(log_rec)
+
+    def _finish_returns(self, log_rec):
+        """Chiude l'import resi: coda marketplace esaurita."""
+        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.returns_state', 'idle')
         params.set_param('ke_amazon_sync.returns_log_id', '')
         self.env.cr.commit()
@@ -1563,13 +1849,22 @@ class AmazonSyncLog(models.Model):
 
     def action_start_fnsku_import(self, name_prefix='Import FNSKU'):
         """
-        Avvia l'import FNSKU (report GET_FBA_MYI_ALL_INVENTORY_DATA). L'FNSKU non è
-        un dato fisso: Amazon ne genera uno nuovo ogni volta che cambia lo SKU
-        venditore collegato — cosa che succede qui ad ogni riassegnazione SKU al
-        rifornimento (es. 'PFS-1234' → 'PFS-1234+', vedi reconcile_from_report_rows).
-        Per questo esiste anche _cron_fnsku_import_store, per tenerlo aggiornato da
-        solo invece di doverlo rilanciare a mano dopo ogni riconciliazione.
+        Avvia l'import FNSKU (report GET_FBA_MYI_ALL_INVENTORY_DATA), uno per
+        ogni marketplace attivo — stessa coda del full import/riconciliazione/
+        resi. L'FNSKU non è un dato fisso: Amazon ne genera uno nuovo ogni
+        volta che cambia lo SKU venditore collegato — cosa che succede qui ad
+        ogni riassegnazione SKU al rifornimento (es. 'PFS-1234' → 'PFS-1234+',
+        vedi reconcile_from_report_rows). Per questo esiste anche
+        _cron_fnsku_import_store, per tenerlo aggiornato da solo invece di
+        doverlo rilanciare a mano dopo ogni riconciliazione.
+        Come per la sync giacenze FBA (inventario Pan-EU pooled, confermato
+        dall'utente), l'FNSKU è legato alla stessa etichetta fisica pooled:
+        nessun gating primario/secondario, ogni marketplace attivo la
+        riconferma (vedi process_fnsku_report_rows). Stesso rischio noto per
+        UK/US non pooled, vedi TASK.md.
         """
+        from odoo.exceptions import UserError
+
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.fnsku_import_state') == 'running':
             log_id = int(params.get_param('ke_amazon_sync.fnsku_import_log_id', '0') or 0)
@@ -1582,17 +1877,28 @@ class AmazonSyncLog(models.Model):
                     'target': 'current',
                 }
 
+        marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
+        if not marketplaces:
+            raise UserError(
+                'Nessun marketplace attivo. Usa "Rileva marketplace attivi" '
+                '(Impostazioni → Amazon) o attivane uno a mano.'
+            )
+
         log_rec = self.create({
             'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'import_fnsku',
             'state': 'running',
             'start_date': fields.Datetime.now(),
-            'log_lines': 'Richiesta report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA)...',
+            'log_lines': f'Richiesta report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA) '
+                         f'su {len(marketplaces)} marketplace: {", ".join(marketplaces.mapped("code"))}.',
         })
         params.set_param('ke_amazon_sync.fnsku_import_state', 'running')
         params.set_param('ke_amazon_sync.fnsku_import_log_id', str(log_rec.id))
         params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
         params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+        params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue',
+                          ','.join(str(i) for i in marketplaces.ids))
+        params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
         self.env.cr.commit()
 
         cron = self.env.ref('ke_amazon_sync.cron_fnsku_import_chunk', raise_if_not_found=False)
@@ -1623,6 +1929,9 @@ class AmazonSyncLog(models.Model):
             client.validate_credentials()
         except ValueError:
             _log.warning('Cron fnsku_import_store saltato: credenziali SP-API non configurate.')
+            return
+        if not self.env['ke.amazon.marketplace'].search([('active', '=', True)]):
+            _log.warning('Cron fnsku_import_store saltato: nessun marketplace attivo.')
             return
         self.action_start_fnsku_import(name_prefix='Import FNSKU (automatico)')
 
@@ -1663,6 +1972,20 @@ class AmazonSyncLog(models.Model):
             self.env.cr.commit()
             self._disable_fnsku_import_cron()
             return
+
+        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
+        # in coda (stesso pattern del full import/riconciliazione/resi).
+        current_mp_id = int(
+            params.get_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '0') or 0
+        )
+        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
+        if not marketplace.exists():
+            marketplace = self._fnsku_import_pop_marketplace(params)
+            if not marketplace:
+                self._finish_fnsku_import(log_rec)
+                return
+            self.env.cr.commit()
+        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
 
         report_id = params.get_param('ke_amazon_sync.fnsku_import_report_id', '')
         attach_id_s = params.get_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
@@ -1757,6 +2080,49 @@ class AmazonSyncLog(models.Model):
         attachment.unlink()
         params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
         params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+        self._fnsku_import_finish_marketplace(log_rec, params, marketplace)
+
+    def _fnsku_import_pop_marketplace(self, params):
+        """
+        Estrae il prossimo marketplace dalla coda (fnsku_import_marketplace_queue),
+        lo imposta come corrente e azzera lo stato di report per il nuovo
+        segmento. Ritorna il record ke.amazon.marketplace, o un recordset
+        vuoto se la coda è esaurita (import FNSKU completo).
+        """
+        queue_s = params.get_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
+        queue_ids = [int(i) for i in queue_s.split(',') if i]
+        if not queue_ids:
+            return self.env['ke.amazon.marketplace']
+        next_id, rest = queue_ids[0], queue_ids[1:]
+        params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue',
+                          ','.join(str(i) for i in rest))
+        params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', str(next_id))
+        params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
+        params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
+        return self.env['ke.amazon.marketplace'].browse(next_id)
+
+    def _fnsku_import_finish_marketplace(self, log_rec, params, marketplace):
+        """
+        Chiude il segmento di import FNSKU per 'marketplace'. Se ce ne sono
+        altri in coda, lascia lo stato 'running': il prossimo tick del cron
+        passerà al successivo (vedi _fnsku_import_pop_marketplace). Altrimenti
+        chiude l'intero import (vedi _finish_fnsku_import).
+        """
+        if marketplace:
+            msg = f'Import FNSKU completato per {marketplace.name} ({marketplace.code}).'
+            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+        params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
+
+        queue_s = params.get_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
+        if queue_s:
+            self.env.cr.commit()
+            return
+        self._finish_fnsku_import(log_rec)
+
+    def _finish_fnsku_import(self, log_rec):
+        """Chiude l'import FNSKU: coda marketplace esaurita."""
+        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
         params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
         self.env.cr.commit()

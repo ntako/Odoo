@@ -26,6 +26,8 @@
         'wizard/amazon_receive_from_fba_wizard_views.xml',
         'wizard/amazon_allocate_fbm_wizard_views.xml',
         'wizard/amazon_move_to_general_wizard_views.xml',
+        'report/amazon_fba_label_report.xml',
+        'wizard/amazon_fba_prep_wizard_views.xml',
         'views/amazon_marketplace_views.xml',
         'views/res_config_settings_views.xml',
         'views/res_company_views.xml',
@@ -33,6 +35,8 @@
         'views/product_template_views.xml',
         'views/product_inventory_list_views.xml',
         'views/sale_order_views.xml',
+        'views/stock_picking_views.xml',
+        'views/amazon_fba_label_log_views.xml',
         'views/menu.xml',
     ],
     'assets': {

@@ -24,7 +24,7 @@ class AmazonMarketplace(models.Model):
 
     # Sintassi Odoo 19: _sql_constraints (lista di tuple) non è più supportato,
     # sostituito da models.Constraint come attributo di classe — verificato
-    # con un'installazione locale reale (docker-test/), non solo per sentito
+    # con un'installazione locale reale (Docker/odoo/), non solo per sentito
     # dire: il vecchio stile installava comunque ma con un warning esplicito
     # "no longer supported, please define models.Constraint".
     _marketplace_id_uniq = models.Constraint(

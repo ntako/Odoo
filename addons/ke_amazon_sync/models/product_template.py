@@ -130,6 +130,15 @@ class ProductTemplate(models.Model):
         help='Tipo prodotto Amazon (es. FISHING_PRODUCT). Necessario per le PATCH API.',
     )
 
+    # --- Multi-marketplace (fase 4, sola visualizzazione) ---
+    # I campi x_amazon_* sopra restano quelli del marketplace primario (vedi
+    # SyncEngine._is_primary_marketplace) — questo campo aggiunge solo la
+    # visibilità sulle inserzioni degli ALTRI marketplace attivi, senza
+    # sostituire né duplicare i campi esistenti.
+    x_amazon_listing_ids = fields.One2many(
+        'ke.amazon.listing', 'product_id', string='Inserzioni per marketplace',
+    )
+
     # --- Stato su Amazon ---
     x_amazon_status = fields.Selection([
         ('active', 'Attivo'),

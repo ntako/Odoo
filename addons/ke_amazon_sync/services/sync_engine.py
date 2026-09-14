@@ -377,9 +377,10 @@ class SyncEngine:
         """
         Risolve il ke.amazon.marketplace corrispondente al marketplace_id (codice
         SP-API, es. APJ6JRA9NG5V4) del client di questa sync. Usato per taggare
-        gli ordini importati (fase 2 multi-marketplace) — non ancora usato dagli
-        altri flussi (full import, prezzi/quantità, ecc.), che restano mono-
-        marketplace finché non vengono riscritti (vedi TASK.md, fase 3).
+        gli ordini importati (fase 2) e, da qui in poi, dal full import (fase 3)
+        per popolare ke.amazon.listing. Le altre sync (prezzi/quantità,
+        riconciliazione, ecc.) restano mono-marketplace finché non vengono
+        riscritte (vedi TASK.md).
         Ritorna un recordset vuoto se il client non è configurato (es. chiamato
         fuori da un contesto di sync) o se il marketplace_id non è tra quelli
         censiti in ke.amazon.marketplace — non è un errore bloccante, il campo
@@ -390,6 +391,55 @@ class SyncEngine:
         return self.env['ke.amazon.marketplace'].search(
             [('marketplace_id', '=', self.client.marketplace_id)], limit=1,
         )
+
+    def _is_primary_marketplace(self):
+        """
+        True se il client di questa sync è sul marketplace "primario" — quello
+        ancora configurato nel vecchio campo Impostazioni → Amazon → Marketplace
+        ID. Durante la transizione a multi-marketplace (fase 3), solo il
+        marketplace primario continua a scrivere sui vecchi campi x_amazon_*
+        del prodotto: riconciliazione, sync prezzi/quantità e le viste non sono
+        ancora stati convertiti a leggere/scrivere ke.amazon.listing, quindi
+        smettere di scrivere quei campi per QUALSIASI marketplace li romperebbe.
+        Senza client (contesto non multi-marketplace, es. wizard interni) si
+        comporta come "sempre primario", per non cambiare nulla lì.
+        """
+        if not self.client:
+            return True
+        primary_id = self.env['ir.config_parameter'].sudo().get_param('ke_amazon_sync.marketplace_id')
+        return not primary_id or self.client.marketplace_id == primary_id
+
+    def _upsert_listing(self, product_tmpl, data):
+        """
+        Crea o aggiorna la riga ke.amazon.listing per (product_tmpl, marketplace
+        corrente della sync). Non fa nulla se il marketplace corrente non è
+        censito in ke.amazon.marketplace (non dovrebbe succedere durante un
+        import in coda, ma non deve bloccare l'import se capita).
+        """
+        marketplace = self._current_marketplace()
+        if not marketplace:
+            return
+        Listing = self.env['ke.amazon.listing'].sudo()
+        vals = {
+            'sku': data.get('sku'),
+            'asin': data.get('asin'),
+            'fnsku': data.get('fnsku'),
+            'product_type': data.get('product_type', ''),
+            'status': 'active' if 'BUYABLE' in (data.get('status') or '') else 'inactive',
+            'fulfillment': data.get('fulfillment'),
+            'price': data.get('price') or 0.0,
+            'qty': data.get('qty_available') or 0,
+            'category': data.get('category', ''),
+            'browse_node_id': data.get('browse_node_id', ''),
+        }
+        listing = Listing.search([
+            ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+        ], limit=1)
+        if listing:
+            listing.write(vals)
+        else:
+            vals.update({'product_id': product_tmpl.id, 'marketplace_id': marketplace.id})
+            Listing.create(vals)
 
     # -----------------------------------------------------------------------
     # Funzione 1: Import completo (solo manuale)
@@ -600,6 +650,17 @@ class SyncEngine:
             self.env['product.template'].search([('default_code', '!=', False)])
             if p.default_code
         }
+        # Fase 3 multi-marketplace: un prodotto creato/aggiornato SOLO da un
+        # marketplace non primario non ha i campi legacy x_amazon_* popolati
+        # (vedi _is_primary_marketplace) — senza questo, un secondo marketplace
+        # per lo stesso prodotto non lo troverebbe nelle mappe sopra e ne
+        # creerebbe un duplicato. ke.amazon.listing copre tutti i marketplace,
+        # a prescindere da quale sia primario.
+        for listing in self.env['ke.amazon.listing'].sudo().search([]):
+            if listing.sku and listing.sku not in existing_by_sku:
+                existing_by_sku[listing.sku] = listing.product_id
+            if listing.asin and listing.asin not in existing_by_asin:
+                existing_by_asin[listing.asin] = listing.product_id
 
         # ASIN → SKU "buono" nel report: a parità di ASIN vince sempre la versione '+'
         # (rifornimento), indipendentemente dal pattern esatto del vecchio SKU
@@ -713,6 +774,21 @@ class SyncEngine:
             p.x_amazon_asin: p for p in
             self.env['product.template'].search([('x_amazon_asin', '!=', False)])
         }
+        # Fase 3 multi-marketplace (stesso fix già fatto in full_import_report_rows,
+        # mancava qui — vedi TASK.md): un prodotto creato/aggiornato SOLO da un
+        # marketplace non primario non ha i campi legacy x_amazon_* popolati
+        # (vedi _is_primary_marketplace), quindi non comparirebbe nelle mappe
+        # sopra e un secondo marketplace lo duplicherebbe invece di aggiornarlo.
+        # ke.amazon.listing copre tutti i marketplace, a prescindere da quale
+        # sia primario. Non serve estendere existing_by_parent_asin/
+        # existing_variant_by_asin: le famiglie con varianti non passano mai
+        # da _upsert_listing (vedi _process_variant_listing), quindi non hanno
+        # comunque righe ke.amazon.listing da cui attingere.
+        for mp_listing in self.env['ke.amazon.listing'].sudo().search([]):
+            if mp_listing.sku and mp_listing.sku not in existing_by_sku:
+                existing_by_sku[mp_listing.sku] = mp_listing.product_id
+            if mp_listing.asin and mp_listing.asin not in existing_by_asin:
+                existing_by_asin[mp_listing.asin] = mp_listing.product_id
         existing_by_barcode = self._build_barcode_map()
         existing_by_default_code = {
             p.default_code: p for p in
@@ -884,22 +960,29 @@ class SyncEngine:
             'categ_id': categ.id,
             'weight': data.get('weight_kg') or 0.0,
             'description_sale': description,
-            'x_amazon_sku': data['sku'],
-            'x_amazon_asin': data['asin'],
-            'x_amazon_status': 'active' if 'BUYABLE' in data.get('status', '') else 'inactive',
-            'x_amazon_fulfillment': data['fulfillment'],
-            'x_amazon_product_type': data.get('product_type', ''),
-            'x_amazon_price': data['price'],
-            'x_amazon_qty': data['qty_available'],
-            'x_amazon_last_sync': datetime.now(),
             'product_length': data.get('length_cm') or 0.0,
             'product_width': data.get('width_cm') or 0.0,
             'product_height': data.get('height_cm') or 0.0,
-            'x_amazon_category': data.get('category', ''),
-            'x_amazon_browse_node_id': data.get('browse_node_id', ''),
         }
-        if data.get('brand'):
-            vals['x_amazon_found_by_manufacturer'] = False
+        # Campi Amazon "legacy" (x_amazon_*): scritti solo se questa sync è sul
+        # marketplace primario (fase 3, transizione multi-marketplace — vedi
+        # _is_primary_marketplace). Il dato vero, per QUALSIASI marketplace,
+        # va comunque sempre su ke.amazon.listing (_upsert_listing sotto).
+        if self._is_primary_marketplace():
+            vals.update({
+                'x_amazon_sku': data['sku'],
+                'x_amazon_asin': data['asin'],
+                'x_amazon_status': 'active' if 'BUYABLE' in data.get('status', '') else 'inactive',
+                'x_amazon_fulfillment': data['fulfillment'],
+                'x_amazon_product_type': data.get('product_type', ''),
+                'x_amazon_price': data['price'],
+                'x_amazon_qty': data['qty_available'],
+                'x_amazon_last_sync': datetime.now(),
+                'x_amazon_category': data.get('category', ''),
+                'x_amazon_browse_node_id': data.get('browse_node_id', ''),
+            })
+            if data.get('brand'):
+                vals['x_amazon_found_by_manufacturer'] = False
         img = _fetch_image_b64(data.get('image_url'))
         if img:
             vals['image_1920'] = img
@@ -909,6 +992,7 @@ class SyncEngine:
         self._init_product_warehouse_quant(
             template.product_variant_id, data['fulfillment'], data.get('qty_available') or 0,
         )
+        self._upsert_listing(template, data)
         return template
 
     def _set_product_attributes(self, template, spec_attrs):
@@ -952,16 +1036,9 @@ class SyncEngine:
 
     def _update_product(self, product, data):
         new_sku = data['sku']
-        vals = {
-            'x_amazon_sku': new_sku,
-            'x_amazon_asin': data['asin'],
-            'x_amazon_status': 'active' if 'BUYABLE' in data.get('status', '') else 'inactive',
-            'x_amazon_fulfillment': data['fulfillment'],
-            'x_amazon_product_type': data.get('product_type', ''),
-            'x_amazon_price': data['price'],
-            'x_amazon_qty': data['qty_available'],
-            'x_amazon_last_sync': datetime.now(),
-        }
+        # Attributi fisici del prodotto: sempre aggiornati, indipendentemente
+        # dal marketplace (non sono dati di listing, sono lo stesso prodotto).
+        vals = {}
         if data.get('weight_kg') is not None:
             vals['weight'] = data['weight_kg']
         if data.get('length_cm') is not None:
@@ -970,16 +1047,33 @@ class SyncEngine:
             vals['product_width'] = data['width_cm']
         if data.get('height_cm') is not None:
             vals['product_height'] = data['height_cm']
-        if data.get('category'):
-            vals['x_amazon_category'] = data['category']
-        if data.get('browse_node_id'):
-            vals['x_amazon_browse_node_id'] = data['browse_node_id']
-        # Aggiorna default_code se era allineato al vecchio SKU Amazon o se non c'era SKU precedente
-        # (non sovrascrivere codici impostati manualmente dall'utente)
-        old_sku = product.x_amazon_sku or ''
-        if new_sku != old_sku and (not old_sku or product.default_code == old_sku):
-            vals['default_code'] = new_sku
-        product.write(vals)
+
+        # Campi Amazon "legacy": solo se questa sync è sul marketplace primario
+        # (fase 3, transizione — vedi _is_primary_marketplace). Il dato vero,
+        # per QUALSIASI marketplace, va comunque su ke.amazon.listing sotto.
+        if self._is_primary_marketplace():
+            vals.update({
+                'x_amazon_sku': new_sku,
+                'x_amazon_asin': data['asin'],
+                'x_amazon_status': 'active' if 'BUYABLE' in data.get('status', '') else 'inactive',
+                'x_amazon_fulfillment': data['fulfillment'],
+                'x_amazon_product_type': data.get('product_type', ''),
+                'x_amazon_price': data['price'],
+                'x_amazon_qty': data['qty_available'],
+                'x_amazon_last_sync': datetime.now(),
+            })
+            if data.get('category'):
+                vals['x_amazon_category'] = data['category']
+            if data.get('browse_node_id'):
+                vals['x_amazon_browse_node_id'] = data['browse_node_id']
+            # Aggiorna default_code se era allineato al vecchio SKU Amazon o se non c'era SKU precedente
+            # (non sovrascrivere codici impostati manualmente dall'utente)
+            old_sku = product.x_amazon_sku or ''
+            if new_sku != old_sku and (not old_sku or product.default_code == old_sku):
+                vals['default_code'] = new_sku
+
+        if vals:
+            product.write(vals)
         if not product.barcode and data.get('ean'):
             if self._barcode_free(data['ean'], exclude_product_ids=product.product_variant_ids.ids):
                 try:
@@ -987,6 +1081,7 @@ class SyncEngine:
                 except Exception as exc:
                     _log.warning('Impossibile assegnare barcode %s a %s: %s',
                                  data['ean'], data['sku'], exc)
+        self._upsert_listing(product, data)
 
     # -----------------------------------------------------------------------
     # Gestione prodotti con varianti (famiglia Amazon)
@@ -1344,11 +1439,22 @@ class SyncEngine:
 
     def sync_prices_and_quantities(self, log_rec):
         """
-        Per ogni prodotto con ASIN e sync_price/sync_qty attivo,
-        aggiorna prezzo e/o quantità su Amazon.
-        Gestisce sia prodotti semplici (SKU sul template) sia famiglie con varianti
-        (SKU sui product.product, template identificato da x_amazon_parent_asin).
+        Per ogni prodotto con ASIN e sync_price/sync_qty attivo, aggiorna prezzo
+        e/o quantità su Amazon SUL MARKETPLACE di questa sync (self.client).
+        Sul marketplace primario usa ancora i campi legacy x_amazon_sync_price/
+        x_amazon_sync_qty (comportamento storico, invariato). Sui marketplace
+        secondari (fase 3 multi-marketplace) usa invece ke.amazon.listing.sync_price/
+        sync_qty — non scrive MAI sui campi legacy in quel caso, solo sulla riga
+        listing del marketplace corrente.
+        Non chiude il log (log_rec.state) qui: chi chiama itera sui marketplace
+        attivi chiamando questo metodo una volta per marketplace e chiude il log
+        una volta sola alla fine (vedi _thread_sync_price_qty / _cron_sync_prices_quantities
+        in res_config_settings.py / amazon_sync_log.py) — i contatori si sommano
+        tra le chiamate (stesso pattern di _do_reconcile).
         """
+        if not self._is_primary_marketplace():
+            return self._sync_prices_and_quantities_secondary(log_rec)
+
         # Prodotti semplici: SKU e ASIN direttamente sul template
         simple_domain = [
             ('x_amazon_asin', '!=', False),
@@ -1526,12 +1632,91 @@ class SyncEngine:
                     'x_amazon_sync_error': '; '.join(tmpl_error_parts) if tmpl_error_parts else False,
                 })
 
+        existing_log = (log_rec.log_lines or '').rstrip('\n')
         log_rec.write({
-            'state': 'error' if errors and not ok else 'done',
-            'products_total': total,
-            'products_updated': ok,
-            'products_error': errors,
-            'log_lines': '\n'.join(lines),
+            'products_total': log_rec.products_total + total,
+            'products_updated': log_rec.products_updated + ok,
+            'products_error': log_rec.products_error + errors,
+            'log_lines': (existing_log + '\n' + '\n'.join(lines)).lstrip('\n') if lines else existing_log,
+            'end_date': datetime.now(),
+        })
+        self.env.cr.commit()
+        return ok, errors
+
+    def _sync_prices_and_quantities_secondary(self, log_rec):
+        """
+        Variante di sync_prices_and_quantities per un marketplace NON primario:
+        i prodotti/varianti da sincronizzare e i relativi flag sync_price/sync_qty
+        vengono da ke.amazon.listing (marketplace-scoped), non dai campi legacy
+        x_amazon_* del prodotto (che appartengono al marketplace primario). I
+        risultati si scrivono solo sulla riga listing, mai sui campi legacy.
+        """
+        marketplace = self._current_marketplace()
+        if not marketplace:
+            return 0, 0
+
+        fbm_warehouse = self.env.company.amazon_fbm_warehouse_id
+        listings = self.env['ke.amazon.listing'].sudo().search([
+            ('marketplace_id', '=', marketplace.id),
+            ('sku', '!=', False),
+            '|', ('sync_price', '=', True), ('sync_qty', '=', True),
+        ])
+        ok = errors = 0
+        lines = []
+
+        for listing in listings:
+            product = listing.product_id
+            sku = listing.sku
+            product_type = listing.product_type or 'PRODUCT'
+            ops_done = []
+            error_msg = ''
+
+            if listing.sync_price:
+                try:
+                    amazon_price = product.get_amazon_sale_price()
+                    self.client.patch_price(sku, product_type, amazon_price)
+                    ops_done.append(f'prezzo={amazon_price:.2f}€')
+                except Exception as exc:
+                    error_msg += f'prezzo: {exc}; '
+                    _log.error('Errore patch_price %s (%s): %s', sku, marketplace.code, exc)
+
+            if listing.sync_qty:
+                if listing.fulfillment == 'fbm':
+                    try:
+                        qty = int(self._qty_in_warehouse(product.product_variant_id, fbm_warehouse))
+                        self.client.patch_quantity(sku, product_type, qty)
+                        ops_done.append(f'qty={qty}')
+                    except Exception as exc:
+                        error_msg += f'qty: {exc}; '
+                        _log.error('Errore patch_quantity %s (%s): %s', sku, marketplace.code, exc)
+                else:
+                    ops_done.append('qty=skip(FBA)')
+
+            now = datetime.now()
+            if error_msg:
+                errors += 1
+                msg = f'ERRORE [{marketplace.code}] {sku}: {error_msg}'
+                if ops_done:
+                    msg += f' (riusciti: {", ".join(ops_done)})'
+                listing.write({'last_sync': now, 'sync_error': error_msg})
+            elif ops_done:
+                ok += 1
+                msg = f'OK [{marketplace.code}] {sku}: {", ".join(ops_done)}'
+                listing.write({'last_sync': now, 'sync_error': False})
+            else:
+                errors += 1
+                msg = f'ERRORE [{marketplace.code}] {sku}: nessuna operazione eseguita'
+                listing.write({'last_sync': now})
+
+            lines.append(msg)
+            _log.info(msg)
+
+        existing_log = (log_rec.log_lines or '').rstrip('\n')
+        log_rec.write({
+            'products_total': log_rec.products_total + len(listings),
+            'products_updated': log_rec.products_updated + ok,
+            'products_error': log_rec.products_error + errors,
+            'log_lines': (existing_log + '\n' + '\n'.join(lines)).lstrip('\n') if lines else existing_log,
             'end_date': datetime.now(),
         })
         self.env.cr.commit()
@@ -1796,10 +1981,15 @@ class SyncEngine:
         return location
 
     def _create_and_validate_internal_transfer(self, picking_type_warehouse, source_location,
-                                                dest_location, lines, origin):
+                                                dest_location, lines, origin, auto_validate=True):
         """
-        Crea e valida immediatamente un trasferimento interno source_location →
-        dest_location per 'lines' (iterabile di (product_variant, quantity)).
+        Crea un trasferimento interno source_location → dest_location per 'lines'
+        (iterabile di (product_variant, quantity)), confermato e riservato
+        (action_confirm/action_assign). Se auto_validate=True (default, comportamento
+        storico) lo valida anche subito (quantità = prevista, stato 'done').
+        Se auto_validate=False il picking resta 'assigned': usato dalla spedizione
+        verso FBA (vedi ship_to_fba), dove la validazione va rimandata a dopo la
+        scansione/etichettatura di ogni unità (wizard ke.amazon.fba.prep.wizard).
         picking_type_warehouse: magazzino di cui usare il tipo operazione 'internal'
         (determina solo la sequenza/numerazione del picking, le location dei
         movimenti sono quelle passate esplicitamente).
@@ -1820,8 +2010,11 @@ class SyncEngine:
             'location_dest_id': dest_location.id,
             'origin': origin,
         })
+        # Niente 'name': rimosso da stock.move in Odoo 19 (rec_name è ora
+        # 'reference', un campo calcolato, non scrivibile) — passarlo fa
+        # fallire la create() con "Invalid field 'name' in 'stock.move'".
+        # Trovato con un test reale su Odoo 19 in locale, non solo dedotto.
         move_vals = [{
-            'name': product_variant.display_name,
             'product_id': product_variant.id,
             'product_uom_qty': qty,
             'product_uom': product_variant.uom_id.id,
@@ -1832,9 +2025,15 @@ class SyncEngine:
         self.env['stock.move'].create(move_vals)
         picking.action_confirm()
         picking.action_assign()
-        for move in picking.move_ids:
-            move.quantity = move.product_uom_qty
-        picking.with_context(skip_immediate=True, skip_backorder=True)._action_done()
+        if auto_validate:
+            for move in picking.move_ids:
+                move.quantity = move.product_uom_qty
+                # Odoo 19: _action_done() scarta i movimenti con picked=False a
+                # prescindere dalla quantità impostata — senza questo il picking
+                # resta bloccato in stato 'assigned' invece di 'done'. Trovato con
+                # un test reale (ship_to_fba) su Odoo 19 in locale.
+                move.picked = True
+            picking.with_context(skip_immediate=True, skip_backorder=True)._action_done()
         return picking
 
     def ship_to_fba(self, source_warehouse, lines):
@@ -1844,7 +2043,14 @@ class SyncEngine:
         arriva sul magazzino FBA "reale" solo quando sync_fba_quantities rileva che
         Amazon ne ha confermato la ricezione (vedi _consume_transit_stock).
         lines: iterabile di (product_variant, quantity).
-        Ritorna il picking creato e validato.
+        Il picking viene creato confermato e riservato ma NON validato subito
+        (auto_validate=False): resta 'assigned' finché l'operatore non ha
+        scansionato/etichettato ogni unità (wizard ke.amazon.fba.prep.wizard,
+        vedi progetto-odoo-amazon-fba-etichettatura.md) — è quel wizard a
+        chiamare infine _action_done(). Comportamento diverso dagli altri
+        trasferimenti interni del modulo (receive/allocate/move-to-general),
+        che restano validati subito in un solo passaggio.
+        Ritorna il picking creato (stato 'assigned', non ancora 'done').
         """
         fba_location = self._get_warehouse_location('amazon_fba_warehouse_id')
         if not fba_location:
@@ -1852,7 +2058,7 @@ class SyncEngine:
         transit_location = self._get_or_create_transit_location(fba_location)
         return self._create_and_validate_internal_transfer(
             source_warehouse, source_warehouse.lot_stock_id, transit_location,
-            lines, 'Rifornimento Amazon FBA',
+            lines, 'Rifornimento Amazon FBA', auto_validate=False,
         )
 
     def receive_from_fba(self, dest_warehouse, lines):
@@ -1932,7 +2138,7 @@ class SyncEngine:
         if qty_to_move <= 0:
             return 0.0
         move = self.env['stock.move'].create({
-            'name': f'Ricezione Amazon FBA: {product_variant.display_name}',
+            # Niente 'name': vedi commento in _create_and_validate_internal_transfer.
             'product_id': product_variant.id,
             'product_uom_qty': qty_to_move,
             'product_uom': product_variant.uom_id.id,
@@ -1941,6 +2147,7 @@ class SyncEngine:
         })
         move._action_confirm()
         move.quantity = qty_to_move
+        move.picked = True  # vedi commento in _create_and_validate_internal_transfer
         move._action_done()
         return qty_to_move
 
@@ -1955,17 +2162,30 @@ class SyncEngine:
         Se la giacenza riportata da Amazon per uno SKU è aumentata rispetto
         all'ultima sync, la differenza viene "consumata" dalla location
         'In transito verso Amazon' (rifornimenti registrati con ship_to_fba).
+
+        Fase 3 multi-marketplace (inventario FBA Pan-Europeo, confermato
+        dall'utente): il magazzino FBA in Odoo è UNICO, non per marketplace —
+        a differenza di prezzo/quantità FBM e riconciliazione, qui non ha senso
+        gating primario/secondario sul campo legacy x_amazon_qty: rappresenta
+        lo stesso stock fisico pooled, riconfermato (redundante ma innocuo,
+        idempotente) da ognuno dei marketplace attivi che il chiamante itera
+        (vedi _thread_sync_fba_quantities). Se un marketplace attivo avesse
+        invece inventario davvero separato (es. UK/US fuori dal pool EU), il
+        valore dell'ultimo marketplace processato sovrascriverebbe gli altri —
+        rischio noto, accettato dall'utente per il caso Pan-EU.
         Ritorna il next_token per la pagina successiva, o None se era l'ultima.
         """
         fba_location = self._get_warehouse_location('amazon_fba_warehouse_id')
         if not fba_location:
             raise UserError('Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).')
         transit_location = self._get_or_create_transit_location(fba_location)
+        marketplace = self._current_marketplace()
+        mp_tag = f'[{marketplace.code}] ' if marketplace else ''
 
         items, new_page_token = self.client.fetch_inventory_page(page_token)
 
         updated = errors = skipped = 0
-        lines = [f'Pagina ricevuta: {len(items)} SKU.']
+        lines = [f'{mp_tag}Pagina ricevuta: {len(items)} SKU.']
 
         for entry in items:
             sku = entry['sku']
@@ -1983,7 +2203,7 @@ class SyncEngine:
                 )
                 if not variant:
                     skipped += 1
-                    lines.append(f'SALTATO {sku}: nessun prodotto Odoo con questo x_amazon_sku')
+                    lines.append(f'{mp_tag}SALTATO {sku}: nessun prodotto Odoo con questo x_amazon_sku')
                     continue
                 matched_on = 'variante'
                 product_variant = variant
@@ -2006,9 +2226,17 @@ class SyncEngine:
                     )
                 self._set_product_stock(product_variant, fba_location, fba_qty)
                 product_tmpl.write({'x_amazon_qty': int(fba_qty)})
+                # Riga listing del marketplace corrente, se esiste già (creata da
+                # full_import/reconcile): aggiornata per visibilità, mai creata qui.
+                if marketplace:
+                    listing = self.env['ke.amazon.listing'].sudo().search([
+                        ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+                    ], limit=1)
+                    if listing:
+                        listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
                 updated += 1
                 msg = (
-                    f'OK {sku} ({matched_on} #{product_tmpl.id}): '
+                    f'{mp_tag}OK {sku} ({matched_on} #{product_tmpl.id}): '
                     f'FBA qty {previous_qty:g} → {fba_qty:g}'
                 )
                 if moved > 0:
@@ -2016,12 +2244,12 @@ class SyncEngine:
                 lines.append(msg)
             except Exception as exc:
                 errors += 1
-                lines.append(f'ERRORE {sku}: {exc}')
+                lines.append(f'{mp_tag}ERRORE {sku}: {exc}')
                 _log.error('sync_fba: errore aggiornamento %s: %s', sku, exc)
 
         if not new_page_token:
             lines.append(
-                f'Riepilogo: {log_rec.products_updated + updated} aggiornati, '
+                f'{mp_tag}Riepilogo: {log_rec.products_updated + updated} aggiornati, '
                 f'{log_rec.products_skipped + skipped} saltati (nessun match), '
                 f'{log_rec.products_error + errors} errori, '
                 f'{log_rec.products_total + len(items)} SKU totali da Amazon.'
@@ -2386,6 +2614,14 @@ class SyncEngine:
         Per ogni riga abbina l'ordine Amazon in Odoo (x_amazon_order_id) e registra il
         reso come nota nel chatter dell'ordine — nessuna nota di credito automatica,
         solo visibilità: la valutazione contabile resta manuale.
+        Nessun gating primario/secondario necessario qui (a differenza di
+        reconcile/prezzi-quantità): l'abbinamento è per x_amazon_order_id, già
+        univoco e già taggato con il marketplace giusto fin dall'import ordini
+        (fase 2) — non tocca campi Amazon "legacy" del prodotto.
+        Non imposta qui log_rec.state='done': con più marketplace in coda
+        questo metodo gira una volta per marketplace, chiude il log solo
+        _finish_returns in amazon_sync_log.py a coda esaurita. I contatori si
+        sommano tra i marketplace (stesso pattern di _do_reconcile).
         Ritorna (matched, not_found, errors).
         """
         matched = not_found = errors = 0
@@ -2431,12 +2667,11 @@ class SyncEngine:
 
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
-            'products_total': len(rows),
-            'products_updated': matched,
-            'products_skipped': not_found,
-            'products_error': errors,
+            'products_total': log_rec.products_total + len(rows),
+            'products_updated': log_rec.products_updated + matched,
+            'products_skipped': log_rec.products_skipped + not_found,
+            'products_error': log_rec.products_error + errors,
             'log_lines': new_lines,
-            'state': 'done',
             'end_date': datetime.now(),
         })
         self.env.cr.commit()
@@ -2453,8 +2688,22 @@ class SyncEngine:
         PIÙ varianti, scriverlo lì sovrascriverebbe l'FNSKU (diverso) delle altre
         varianti — in quel caso la riga viene saltata con un messaggio esplicito
         invece di scrivere un dato sbagliato (limite noto, vedi TASK.md).
+
+        Fase 3 multi-marketplace (inventario FBA Pan-EU pooled, confermato
+        dall'utente): come sync_fba_quantities_page, nessun gating primario/
+        secondario — l'FNSKU è l'etichetta della stessa unità fisica pooled,
+        riconfermata (redundante ma innocua, idempotente) da ogni marketplace
+        attivo che il chiamante itera. Stesso rischio noto per UK/US non
+        pooled: da rivedere se/quando diventano marketplace attivi (vedi
+        TASK.md e il commento in sync_fba_quantities_page).
+        Non imposta qui log_rec.state='done': con più marketplace in coda
+        questo metodo gira una volta per marketplace, chiude il log solo
+        _finish_fnsku_import in amazon_sync_log.py a coda esaurita. I
+        contatori si sommano tra i marketplace (stesso pattern di _do_reconcile).
         Ritorna (matched, not_found, errors).
         """
+        marketplace = self._current_marketplace()
+        mp_tag = f'[{marketplace.code}] ' if marketplace else ''
         matched = not_found = errors = 0
         lines = []
 
@@ -2468,7 +2717,7 @@ class SyncEngine:
                 variant = self._find_amazon_product_variant(sku, '')
                 if not variant:
                     not_found += 1
-                    lines.append(f'SKU NON TROVATO (o ambiguo su più varianti): {sku} — FNSKU: {fnsku}')
+                    lines.append(f'{mp_tag}SKU NON TROVATO (o ambiguo su più varianti): {sku} — FNSKU: {fnsku}')
                     continue
 
                 product = variant.product_tmpl_id
@@ -2480,34 +2729,101 @@ class SyncEngine:
                     # gestire correttamente questo caso (non ancora implementato).
                     not_found += 1
                     lines.append(
-                        f'SALTATO {sku}: appartiene a una famiglia con più varianti, '
+                        f'{mp_tag}SALTATO {sku}: appartiene a una famiglia con più varianti, '
                         f"x_amazon_fnsku è condiviso per template — richiede un campo "
                         f'FNSKU per variante non ancora implementato'
                     )
                     continue
                 if product.x_amazon_fnsku != fnsku:
                     product.write({'x_amazon_fnsku': fnsku})
-                    lines.append(f'OK {sku} → {fnsku}')
+                    lines.append(f'{mp_tag}OK {sku} → {fnsku}')
                 else:
-                    lines.append(f'INVARIATO {sku}: {fnsku}')
+                    lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku}')
+                # Riga listing del marketplace corrente, se esiste già (creata da
+                # full_import/reconcile): aggiornata per visibilità, mai creata qui.
+                if marketplace:
+                    listing = self.env['ke.amazon.listing'].sudo().search([
+                        ('product_id', '=', product.id), ('marketplace_id', '=', marketplace.id),
+                    ], limit=1)
+                    if listing:
+                        listing.write({'fnsku': fnsku})
                 matched += 1
             except Exception as exc:
                 errors += 1
-                lines.append(f'ERRORE {sku}: {exc}')
+                lines.append(f'{mp_tag}ERRORE {sku}: {exc}')
                 _log.error('Errore elaborazione FNSKU %s: %s', sku, exc, exc_info=True)
 
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
-            'products_total': len(rows),
-            'products_updated': matched,
-            'products_skipped': not_found,
-            'products_error': errors,
+            'products_total': log_rec.products_total + len(rows),
+            'products_updated': log_rec.products_updated + matched,
+            'products_skipped': log_rec.products_skipped + not_found,
+            'products_error': log_rec.products_error + errors,
             'log_lines': new_lines,
-            'state': 'done',
             'end_date': datetime.now(),
         })
         self.env.cr.commit()
         return matched, not_found, errors
+
+    def detect_active_marketplaces(self, log_rec):
+        """
+        Chiede ad Amazon (Sellers API, getMarketplaceParticipations) su quali
+        marketplace il venditore è realmente attivo, e aggiorna ke.amazon.marketplace
+        di conseguenza — invece di fidarsi solo del toggle manuale. Attiva/crea solo
+        i marketplace CONFERMATI da Amazon; non disattiva mai automaticamente quelli
+        già attivi ma non confermati (troppo rischioso farlo da soli, es. durante un
+        onboarding in corso su un nuovo marketplace) — li segnala solo nel log,
+        decisione manuale dell'utente.
+        Ritorna (activated, created, not_confirmed): liste di codici marketplace.
+        """
+        Marketplace = self.env['ke.amazon.marketplace'].sudo()
+        participations = self.client.get_marketplace_participations()
+
+        activated = []
+        created = []
+        confirmed_ids = set()
+        lines = []
+
+        for p in participations:
+            if not p['is_participating']:
+                lines.append(f"NON PARTECIPA: {p['name'] or p['code']} ({p['marketplace_id']})")
+                continue
+            confirmed_ids.add(p['marketplace_id'])
+            mp = Marketplace.with_context(active_test=False).search(
+                [('marketplace_id', '=', p['marketplace_id'])], limit=1,
+            )
+            if not mp:
+                mp = Marketplace.create({
+                    'name': p['name'] or p['code'],
+                    'code': p['code'],
+                    'marketplace_id': p['marketplace_id'],
+                })
+                created.append(mp.code)
+                lines.append(f'CREATO E ATTIVATO: {mp.name} ({mp.code})')
+            elif not mp.active:
+                mp.write({'active': True})
+                activated.append(mp.code)
+                lines.append(f'ATTIVATO: {mp.name} ({mp.code})')
+            else:
+                lines.append(f'GIÀ ATTIVO (confermato): {mp.name} ({mp.code})')
+
+        currently_active = Marketplace.search([('active', '=', True)])
+        not_confirmed = [
+            mp.code for mp in currently_active if mp.marketplace_id not in confirmed_ids
+        ]
+        for code in not_confirmed:
+            lines.append(
+                f'ATTENZIONE: "{code}" è attivo in Odoo ma Amazon non lo conferma — '
+                f'non disattivato automaticamente, verifica e disattivalo a mano se necessario.'
+            )
+
+        log_rec.write({
+            'state': 'done',
+            'log_lines': '\n'.join(lines),
+            'end_date': datetime.now(),
+        })
+        self.env.cr.commit()
+        return activated, created, not_confirmed
 
     def reconcile_from_report_rows(self, log_rec, rows):
         """
@@ -2548,7 +2864,25 @@ class SyncEngine:
 
     def _do_reconcile(self, log_rec, amazon_by_sku, amazon_by_asin):
         """Logica di confronto tra Odoo e le mappe Amazon pre-costruite."""
-        simple_products = self.env['product.template'].search([('x_amazon_sku', '!=', False)])
+        is_primary = self._is_primary_marketplace()
+
+        # Fase 3 multi-marketplace: un template creato/aggiornato SOLO da un
+        # marketplace non primario non ha i campi legacy x_amazon_* popolati
+        # (vedi _is_primary_marketplace) e non comparirebbe nella ricerca sotto
+        # — verrebbe segnalato "solo Amazon" invece di essere riconciliato.
+        # Recuperiamo SKU/ASIN di quei template da ke.amazon.listing (lo SKU
+        # è tipicamente lo stesso su tutti i marketplace dello stesso venditore,
+        # stessa assunzione già usata da full_import_report_rows).
+        listing_sku_by_tmpl = {}
+        listing_asin_by_tmpl = {}
+        for listing in self.env['ke.amazon.listing'].sudo().search([('sku', '!=', False)]):
+            listing_sku_by_tmpl.setdefault(listing.product_id.id, listing.sku)
+            if listing.asin:
+                listing_asin_by_tmpl.setdefault(listing.product_id.id, listing.asin)
+
+        simple_products = self.env['product.template'].search([
+            '|', ('x_amazon_sku', '!=', False), ('id', 'in', list(listing_sku_by_tmpl.keys())),
+        ])
         variant_products = self.env['product.product'].search([('x_amazon_sku', '!=', False)])
 
         matched = updated = sku_updated = only_odoo = only_amazon = errors = 0
@@ -2556,7 +2890,9 @@ class SyncEngine:
         lines = []
 
         for product in simple_products:
-            sku = product.x_amazon_sku
+            sku = product.x_amazon_sku or listing_sku_by_tmpl.get(product.id)
+            if not sku:
+                continue
             odoo_skus_seen.add(sku)
             plus_sku = sku + '+'
             plus_data = amazon_by_sku.get(plus_sku)
@@ -2566,19 +2902,21 @@ class SyncEngine:
                     # Versione '+' disponibile su Amazon: aggiorna SKU (ha precedenza sul match diretto)
                     new_status = 'active' if 'BUYABLE' in plus_data.get('status', '') else 'inactive'
                     new_price = plus_data.get('price') or 0.0
-                    product.write({
-                        'x_amazon_sku': plus_sku,
-                        'default_code': plus_sku,
-                        'x_amazon_status': new_status,
-                        'x_amazon_price': new_price,
-                        'x_amazon_last_sync': datetime.now(),
-                        # L'FNSKU è legato alla coppia (SKU, venditore): quando lo
-                        # SKU cambia, Amazon ne genera uno nuovo — quello vecchio
-                        # non è più valido. Azzerarlo evita di stampare etichette
-                        # con un FNSKU sbagliato finché non arriva il prossimo
-                        # Import FNSKU (già incatenato al full import).
-                        'x_amazon_fnsku': False,
-                    })
+                    if is_primary:
+                        product.write({
+                            'x_amazon_sku': plus_sku,
+                            'default_code': plus_sku,
+                            'x_amazon_status': new_status,
+                            'x_amazon_price': new_price,
+                            'x_amazon_last_sync': datetime.now(),
+                            # L'FNSKU è legato alla coppia (SKU, venditore): quando lo
+                            # SKU cambia, Amazon ne genera uno nuovo — quello vecchio
+                            # non è più valido. Azzerarlo evita di stampare etichette
+                            # con un FNSKU sbagliato finché non arriva il prossimo
+                            # Import FNSKU (già incatenato al full import).
+                            'x_amazon_fnsku': False,
+                        })
+                    self._upsert_listing(product, plus_data)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -2588,28 +2926,34 @@ class SyncEngine:
                     matched += 1
                     new_status = 'active' if 'BUYABLE' in amazon_data.get('status', '') else 'inactive'
                     new_price = amazon_data.get('price') or 0.0
-                    vals = {'x_amazon_status': new_status, 'x_amazon_price': new_price}
-                    if product.x_amazon_status != new_status or product.x_amazon_price != new_price:
-                        product.write(vals)
+                    if is_primary and (
+                        product.x_amazon_status != new_status or product.x_amazon_price != new_price
+                    ):
+                        product.write({'x_amazon_status': new_status, 'x_amazon_price': new_price})
                         updated += 1
+                    elif not is_primary:
+                        updated += 1
+                    self._upsert_listing(product, amazon_data)
                     msg = (f'[OK] {product.default_code or product.name} SKU={sku} '
                            f'stato={new_status} prezzo={new_price:.2f}€')
                 else:
                     # Fallback: cerca per ASIN (SKU cambiato in modo non standard, es. non solo '+')
-                    product_asin = product.x_amazon_asin
+                    product_asin = product.x_amazon_asin or listing_asin_by_tmpl.get(product.id)
                     amazon_data_by_asin = amazon_by_asin.get(product_asin) if product_asin else None
                     if amazon_data_by_asin:
                         new_sku = amazon_data_by_asin['sku']
                         new_status = 'active' if 'BUYABLE' in amazon_data_by_asin.get('status', '') else 'inactive'
                         new_price = amazon_data_by_asin.get('price') or 0.0
-                        product.write({
-                            'x_amazon_sku': new_sku,
-                            'default_code': new_sku,
-                            'x_amazon_status': new_status,
-                            'x_amazon_price': new_price,
-                            'x_amazon_last_sync': datetime.now(),
-                            'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
-                        })
+                        if is_primary:
+                            product.write({
+                                'x_amazon_sku': new_sku,
+                                'default_code': new_sku,
+                                'x_amazon_status': new_status,
+                                'x_amazon_price': new_price,
+                                'x_amazon_last_sync': datetime.now(),
+                                'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
+                            })
+                        self._upsert_listing(product, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1
@@ -2618,8 +2962,9 @@ class SyncEngine:
                     else:
                         only_odoo += 1
                         old_status = product.x_amazon_status
-                        asin_label = f' ASIN={product.x_amazon_asin}' if product.x_amazon_asin else ''
-                        product.write({'x_amazon_status': 'inactive'})
+                        asin_label = f' ASIN={product_asin}' if product_asin else ''
+                        if is_primary:
+                            product.write({'x_amazon_status': 'inactive'})
                         note = f' (era: {old_status})' if old_status and old_status != 'inactive' else ''
                         msg = (f'[SOLO ODOO] {product.default_code or product.name} '
                                f'SKU={sku}{asin_label}{note}')
@@ -2644,18 +2989,20 @@ class SyncEngine:
                     # Versione '+' disponibile: aggiorna SKU variante
                     new_status = 'active' if 'BUYABLE' in plus_data.get('status', '') else 'inactive'
                     new_price = plus_data.get('price') or 0.0
-                    variant.write({'x_amazon_sku': plus_sku, 'default_code': plus_sku})
-                    tmpl_vals = {
-                        'x_amazon_status': new_status,
-                        'x_amazon_price': new_price,
-                        'x_amazon_last_sync': datetime.now(),
-                    }
-                    # x_amazon_fnsku è un campo di template condiviso: azzeralo solo
-                    # se il template ha un solo variante, altrimenti si perderebbe
-                    # l'FNSKU (diverso) delle varianti sorelle non cambiate.
-                    if len(tmpl.product_variant_ids) <= 1:
-                        tmpl_vals['x_amazon_fnsku'] = False
-                    tmpl.write(tmpl_vals)
+                    if is_primary:
+                        variant.write({'x_amazon_sku': plus_sku, 'default_code': plus_sku})
+                        tmpl_vals = {
+                            'x_amazon_status': new_status,
+                            'x_amazon_price': new_price,
+                            'x_amazon_last_sync': datetime.now(),
+                        }
+                        # x_amazon_fnsku è un campo di template condiviso: azzeralo solo
+                        # se il template ha un solo variante, altrimenti si perderebbe
+                        # l'FNSKU (diverso) delle varianti sorelle non cambiate.
+                        if len(tmpl.product_variant_ids) <= 1:
+                            tmpl_vals['x_amazon_fnsku'] = False
+                        tmpl.write(tmpl_vals)
+                    self._upsert_listing(tmpl, plus_data)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -2665,7 +3012,9 @@ class SyncEngine:
                     matched += 1
                     new_status = 'active' if 'BUYABLE' in amazon_data.get('status', '') else 'inactive'
                     new_price = amazon_data.get('price') or 0.0
-                    tmpl.write({'x_amazon_status': new_status, 'x_amazon_price': new_price})
+                    if is_primary:
+                        tmpl.write({'x_amazon_status': new_status, 'x_amazon_price': new_price})
+                    self._upsert_listing(tmpl, amazon_data)
                     updated += 1
                     msg = (f'[OK] variante {tmpl.default_code or tmpl.name} '
                            f'/ {variant.display_name} SKU={sku} stato={new_status}')
@@ -2677,15 +3026,17 @@ class SyncEngine:
                         new_sku = amazon_data_by_asin['sku']
                         new_status = 'active' if 'BUYABLE' in amazon_data_by_asin.get('status', '') else 'inactive'
                         new_price = amazon_data_by_asin.get('price') or 0.0
-                        variant.write({'x_amazon_sku': new_sku, 'default_code': new_sku})
-                        tmpl_vals_asin = {
-                            'x_amazon_status': new_status,
-                            'x_amazon_price': new_price,
-                            'x_amazon_last_sync': datetime.now(),
-                        }
-                        if len(tmpl.product_variant_ids) <= 1:
-                            tmpl_vals_asin['x_amazon_fnsku'] = False
-                        tmpl.write(tmpl_vals_asin)
+                        if is_primary:
+                            variant.write({'x_amazon_sku': new_sku, 'default_code': new_sku})
+                            tmpl_vals_asin = {
+                                'x_amazon_status': new_status,
+                                'x_amazon_price': new_price,
+                                'x_amazon_last_sync': datetime.now(),
+                            }
+                            if len(tmpl.product_variant_ids) <= 1:
+                                tmpl_vals_asin['x_amazon_fnsku'] = False
+                            tmpl.write(tmpl_vals_asin)
+                        self._upsert_listing(tmpl, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1
@@ -2730,14 +3081,18 @@ class SyncEngine:
         lines.append(summary)
         _log.info(summary)
 
+        # Non impostiamo qui state='done': con più marketplace in coda (fase 3
+        # multi-marketplace) questo metodo gira una volta per marketplace —
+        # è l'orchestrazione in amazon_sync_log.py (_finish_reconcile) a
+        # chiudere il log solo quando la coda è esaurita. I contatori si
+        # sommano tra i marketplace (stesso pattern di full_import_report_rows).
         existing_log = (log_rec.log_lines or '').rstrip('\n')
         log_rec.write({
-            'state': 'done',
-            'products_total': len(odoo_skus_seen),
-            'products_updated': updated + sku_updated,
-            'products_skipped': only_odoo,
-            'products_created': only_amazon,
-            'products_error': errors,
+            'products_total': log_rec.products_total + len(odoo_skus_seen),
+            'products_updated': log_rec.products_updated + updated + sku_updated,
+            'products_skipped': log_rec.products_skipped + only_odoo,
+            'products_created': log_rec.products_created + only_amazon,
+            'products_error': log_rec.products_error + errors,
             'log_lines': (existing_log + '\n' + '\n'.join(lines)).lstrip('\n'),
             'end_date': datetime.now(),
         })

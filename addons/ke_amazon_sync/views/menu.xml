@@ -154,8 +154,8 @@
               action="action_amazon_fnsku_import_server"
               sequence="23"/>
 
-    <!-- Fase 1 multi-marketplace: modelli di base, non ancora usati dalle sync
-         (vedi TASK.md). Menu utile per ispezionare/gestire i dati fin da ora. -->
+    <!-- Multi-marketplace: tutte le sync (fase 3, vedi TASK.md) leggono/scrivono
+         questi due modelli per ogni marketplace attivo. -->
     <menuitem id="menu_amazon_marketplace"
               name="Marketplace"
               parent="menu_amazon_sync_root"
@@ -163,8 +163,14 @@
               sequence="40"/>
 
     <menuitem id="menu_amazon_listing"
-              name="Inserzioni (multi-marketplace)"
+              name="Inserzioni per marketplace"
               parent="menu_amazon_sync_root"
               action="action_amazon_listing"
               sequence="41"/>
+
+    <menuitem id="menu_amazon_fba_label_log"
+              name="Etichette FBA stampate"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_fba_label_log"
+              sequence="42"/>
 </odoo>

@@ -97,6 +97,31 @@
                             <field name="x_amazon_sync_error" invisible="not x_amazon_sync_error"/>
                         </group>
                     </group>
+                    <separator string="Inserzioni per marketplace"/>
+                    <p class="text-muted">
+                        I campi sopra sono quelli del marketplace primario (Impostazioni → Amazon).
+                        Questa lista mostra l'inserzione su OGNI marketplace attivo, primario incluso.
+                    </p>
+                    <field name="x_amazon_listing_ids" nolabel="1">
+                        <list editable="bottom" create="0" delete="0">
+                            <field name="marketplace_id" readonly="1"/>
+                            <field name="sku" readonly="1"/>
+                            <field name="asin" readonly="1"/>
+                            <field name="fnsku" readonly="1"/>
+                            <field name="status" readonly="1" widget="badge"
+                                   decoration-success="status == 'active'"
+                                   decoration-danger="status == 'error'"
+                                   decoration-muted="status in ('inactive', 'not_listed')"/>
+                            <field name="fulfillment" readonly="1"/>
+                            <field name="price" readonly="1"/>
+                            <field name="qty" readonly="1"/>
+                            <!-- Sync flag: unici campi modificabili da qui, stesso significato
+                                 dei campi piatti x_amazon_sync_price/qty ma per QUESTO marketplace. -->
+                            <field name="sync_price" widget="boolean_toggle"/>
+                            <field name="sync_qty" widget="boolean_toggle"/>
+                            <field name="last_sync" readonly="1"/>
+                        </list>
+                    </field>
                 </page>
             </xpath>
         </field>

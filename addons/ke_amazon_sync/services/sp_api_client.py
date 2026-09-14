@@ -16,6 +16,7 @@ DELAY_SEARCH_S = 0.5
 DELAY_ORDERS_GET_S = 60.0   # getOrders (lista/pagina ordini): rate ufficiale sostenuto 0.0167 req/s (1 ogni 60s), burst 20
 DELAY_ORDERS_ITEMS_S = 2.0  # getOrderItems (righe ordine): rate ufficiale 0.5 req/s, burst 30
 DELAY_INVENTORY_S = 0.5   # getInventorySummaries: max 2 req/s (burst 2) → 0.5s tra ogni chiamata
+DELAY_SELLERS_S = 60.0    # getMarketplaceParticipations: rate ufficiale 0.016 req/s (~1 ogni 60s), burst 15
 RETRY_MAX = 5
 RETRY_BACKOFF_S = 60
 
@@ -351,6 +352,43 @@ class SpApiClient:
             for s in payload.get('inventorySummaries', [])
         ]
         return items, response.next_token
+
+    # ------------------------------------------------------------------
+    # Sellers API — marketplace su cui il venditore è realmente attivo
+    # ------------------------------------------------------------------
+
+    # retry_max=1 (nessun retry interno): stesso motivo di _get_orders_call —
+    # DELAY_SELLERS_S=60s è già una sleep dominante, un retry con backoff
+    # aggiuntivo rischierebbe di far durare l'invocazione troppo a lungo.
+    @_with_retry(DELAY_SELLERS_S, retry_max=1)
+    def _marketplace_participations_call(self):
+        from sp_api.api import Sellers
+        api = Sellers(marketplace=self._marketplace(), credentials=self.credentials)
+        return api.get_marketplace_participation()
+
+    def get_marketplace_participations(self):
+        """
+        Ritorna la lista dei marketplace su cui il venditore risulta
+        effettivamente attivo (getMarketplaceParticipations, Sellers API) —
+        non è scoped a un marketplace (add_marketplace=False internamente),
+        quindi ritorna sempre TUTTI i marketplace collegati all'account,
+        indipendentemente da quale marketplace_id è configurato sul client.
+        Ritorna [{'marketplace_id':..., 'code':..., 'name':...,
+        'currency':..., 'is_participating': bool}, ...].
+        """
+        response = self._marketplace_participations_call()
+        results = []
+        for entry in response.payload:
+            marketplace = entry.get('marketplace', {})
+            participation = entry.get('participation', {})
+            results.append({
+                'marketplace_id': marketplace.get('id', ''),
+                'code': marketplace.get('countryCode', ''),
+                'name': marketplace.get('name', ''),
+                'currency': marketplace.get('defaultCurrencyCode', ''),
+                'is_participating': bool(participation.get('isParticipating')),
+            })
+        return results
 
     # ------------------------------------------------------------------
     # Reports API (GET_MERCHANT_LISTINGS_ALL_DATA) — nessun limite di 1000

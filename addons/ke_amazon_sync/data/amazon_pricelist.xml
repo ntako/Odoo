@@ -9,6 +9,19 @@
         Percentuale di partenza 15% (commissione Amazon media) — modificabile
         liberamente dall'utente sulla riga del listino.
     -->
+    <!-- Attiva la funzionalità "Listini prezzi" (Impostazioni → Vendite) PRIMA
+         di creare il listino Amazon qui sotto — senza questo, il listino esiste
+         nel DB ma la funzionalità risulta "spenta" nella UI (checkbox
+         group_product_pricelist non selezionata): alla prima apertura di
+         Impostazioni, Odoo rileva l'incoerenza (listino attivo ma feature off)
+         e avvisa che salvando archivierebbe tutti i listini attivi. Stesso
+         identico pattern usato da Odoo stesso in website_sale/data/demo.xml
+         per lo stesso motivo. Verificato riproducendo l'avviso sull'ambiente
+         di test locale prima di questo fix, non solo per sentito dire. -->
+    <record id="base.group_user" model="res.groups">
+        <field name="implied_ids" eval="[(4, ref('product.group_product_pricelist'))]"/>
+    </record>
+
     <record id="pricelist_amazon" model="product.pricelist">
         <field name="name">Amazon</field>
     </record>

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Formato carta piccolo per etichette FNSKU: stampa dal browser via
+         driver Windows della Zebra (nessun agente/coda ZPL in questa fase,
+         vedi progetto-odoo-amazon-fba-etichettatura.md). Dimensioni indicative
+         50x25mm dal documento di progetto — da regolare quando si conosce la
+         dimensione esatta del rotolo montato sulla stampante. -->
+    <record id="paperformat_amazon_fba_label" model="report.paperformat">
+        <field name="name">Etichetta FNSKU Amazon (50x25mm)</field>
+        <field name="default" eval="False"/>
+        <field name="format">custom</field>
+        <field name="page_height">25</field>
+        <field name="page_width">50</field>
+        <field name="orientation">Landscape</field>
+        <field name="margin_top">1</field>
+        <field name="margin_bottom">1</field>
+        <field name="margin_left">1</field>
+        <field name="margin_right">1</field>
+        <field name="header_line" eval="False"/>
+        <field name="header_spacing">0</field>
+        <field name="dpi">203</field>
+    </record>
+
+    <template id="report_amazon_fba_label_document">
+        <t t-call="web.html_container">
+            <t t-foreach="docs" t-as="o">
+                <div class="page" style="width:50mm;height:25mm;padding:1mm;font-family:Arial,sans-serif;overflow:hidden;">
+                    <div style="text-align:center;">
+                        <img t-att-src="'/report/barcode/Code128/%s' % o.fnsku"
+                             style="max-width:48mm;max-height:12mm;"/>
+                    </div>
+                    <div style="text-align:center;font-size:9px;font-weight:bold;letter-spacing:1px;">
+                        <span t-esc="o.fnsku"/>
+                    </div>
+                    <div style="text-align:center;font-size:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                        <span t-esc="o.product_id.default_code or o.product_id.display_name"/>
+                        <t t-if="o.product_id.default_code"> | <span t-esc="o.product_id.name"/></t>
+                    </div>
+                </div>
+            </t>
+        </t>
+    </template>
+
+    <record id="action_report_amazon_fba_label" model="ir.actions.report">
+        <field name="name">Etichetta FNSKU Amazon</field>
+        <field name="model">ke.amazon.fba.label.log</field>
+        <field name="report_type">qweb-pdf</field>
+        <field name="report_name">ke_amazon_sync.report_amazon_fba_label_document</field>
+        <field name="report_file">amazon_fba_label</field>
+        <field name="paperformat_id" ref="paperformat_amazon_fba_label"/>
+        <field name="print_report_name">'Etichetta FNSKU - %s' % (object.fnsku)</field>
+    </record>
+</odoo>
