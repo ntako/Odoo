@@ -1319,6 +1319,25 @@ class SyncEngine:
         self.env.cr.commit()
         return found, not_found, errors
 
+    def _qty_in_warehouse(self, variant, warehouse):
+        """
+        Giacenza di una variante in un magazzino specifico, via query diretta a
+        stock.quant (child_of ubicazione di vista del magazzino, usage='internal')
+        — NON usare product.with_context(warehouse=...).qty_available: su questa
+        versione di Odoo non scorpora correttamente per product.template (bug
+        verificato più volte in questa sessione, stesso fix già applicato a
+        x_amazon_stock_*/x_amazon_odoo_fbm_qty e nel modulo ke_product_dimensions).
+        Senza un magazzino specificato ritorna il totale non filtrato.
+        """
+        if not warehouse:
+            return variant.qty_available
+        quants = self.env['stock.quant'].search([
+            ('product_id', '=', variant.id),
+            ('location_id', 'child_of', warehouse.view_location_id.id),
+            ('location_id.usage', '=', 'internal'),
+        ])
+        return sum(quants.mapped('quantity'))
+
     # -----------------------------------------------------------------------
     # Funzione 3: Sync prezzi e quantità (schedulata)
     # -----------------------------------------------------------------------
@@ -1358,7 +1377,6 @@ class SyncEngine:
 
         # Quantità FBM: usa il magazzino FBM configurato su res.company, altrimenti totale globale
         fbm_warehouse = self.env.company.amazon_fbm_warehouse_id
-        fbm_qty_ctx = {'warehouse': fbm_warehouse.id} if fbm_warehouse else {}
 
         # --- Prodotti semplici ---
         for product in simple_products:
@@ -1389,7 +1407,7 @@ class SyncEngine:
             if product.x_amazon_sync_qty:
                 if product.x_amazon_fulfillment == 'fbm':
                     try:
-                        qty = int(product.with_context(**fbm_qty_ctx).qty_available)
+                        qty = int(self._qty_in_warehouse(product.product_variant_id, fbm_warehouse))
                         self.client.patch_quantity(sku, product_type, qty)
                         ops_done.append(f'qty={qty}')
                     except Exception as exc:
@@ -1399,18 +1417,28 @@ class SyncEngine:
                     ops_done.append('qty=skip(FBA)')
 
             now = datetime.now()
-            if ops_done:
-                ok += 1
-                msg = f'OK {sku}: {", ".join(ops_done)}'
-                product.write({'x_amazon_last_sync': now, 'x_amazon_sync_error': False})
-            else:
+            # Un successo parziale (es. prezzo fallito ma quantità riuscita) va
+            # comunque segnalato come errore, non "OK": prima bastava un solo
+            # elemento in ops_done per classificare il prodotto come OK e
+            # azzerare x_amazon_sync_error, nascondendo silenziosamente l'errore.
+            if error_msg:
                 errors += 1
                 msg = f'ERRORE {sku}: {error_msg}'
+                if ops_done:
+                    msg += f' (riusciti: {", ".join(ops_done)})'
                 product.write({
                     'x_amazon_last_sync': now,
                     'x_amazon_sync_error': error_msg,
                     'x_amazon_status': 'error',
                 })
+            elif ops_done:
+                ok += 1
+                msg = f'OK {sku}: {", ".join(ops_done)}'
+                product.write({'x_amazon_last_sync': now, 'x_amazon_sync_error': False})
+            else:
+                errors += 1
+                msg = f'ERRORE {sku}: nessuna operazione eseguita'
+                product.write({'x_amazon_last_sync': now, 'x_amazon_status': 'error'})
 
             lines.append(msg)
             _log.info(msg)
@@ -1453,7 +1481,7 @@ class SyncEngine:
                 if tmpl.x_amazon_sync_qty:
                     if tmpl.x_amazon_fulfillment == 'fbm':
                         try:
-                            qty = int(variant.with_context(**fbm_qty_ctx).qty_available)
+                            qty = int(self._qty_in_warehouse(variant, fbm_warehouse))
                             self.client.patch_quantity(sku, product_type, qty)
                             ops_done.append(f'qty={qty}')
                         except Exception as exc:
@@ -1462,15 +1490,25 @@ class SyncEngine:
                     else:
                         ops_done.append('qty=skip(FBA)')
 
-                if ops_done:
+                # Stesso principio dei prodotti semplici: un successo parziale
+                # (es. prezzo fallito ma quantità riuscita) resta un errore, non
+                # va classificato come OK solo perché ops_done non è vuoto.
+                if variant_error:
+                    tmpl_errors += 1
+                    errors += 1
+                    tmpl_error_parts.append(f'{sku}: {variant_error}')
+                    msg = f'ERRORE variante {sku}: {variant_error}'
+                    if ops_done:
+                        msg += f' (riusciti: {", ".join(ops_done)})'
+                elif ops_done:
                     tmpl_ok += 1
                     ok += 1
                     msg = f'OK variante {sku}: {", ".join(ops_done)}'
                 else:
                     tmpl_errors += 1
                     errors += 1
-                    tmpl_error_parts.append(f'{sku}: {variant_error}')
-                    msg = f'ERRORE variante {sku}: {variant_error}'
+                    tmpl_error_parts.append(f'{sku}: nessuna operazione eseguita')
+                    msg = f'ERRORE variante {sku}: nessuna operazione eseguita'
 
                 lines.append(msg)
                 _log.info(msg)
@@ -1954,12 +1992,19 @@ class SyncEngine:
             try:
                 previous_qty = product_tmpl.x_amazon_qty or 0
                 increase = fba_qty - previous_qty
-                self._set_product_stock(product_variant, fba_location, fba_qty)
+                # Prima si sposta (se c'è un aumento) dal transito al magazzino FBA
+                # reale — un movimento fisico che incrementa già il quant FBA — e
+                # SOLO DOPO si riconcilia al valore assoluto dichiarato da Amazon.
+                # Nell'ordine inverso (riconciliazione assoluta, poi movimento in
+                # aggiunta) il quant FBA finiva doppiamente incrementato: prima
+                # impostato a fba_qty, poi il movimento del transito ci sommava
+                # sopra ancora la quantità spostata.
                 moved = 0.0
                 if increase > 0:
                     moved = self._consume_transit_stock(
                         product_variant, transit_location, fba_location, increase,
                     )
+                self._set_product_stock(product_variant, fba_location, fba_qty)
                 product_tmpl.write({'x_amazon_qty': int(fba_qty)})
                 updated += 1
                 msg = (
@@ -2050,6 +2095,15 @@ class SyncEngine:
                         write_vals['x_amazon_purchase_date'] = purchase_date
                         write_vals['date_order'] = purchase_date
                     existing.write(write_vals)
+                    if not existing.order_line:
+                        # Ordine creato ma senza righe — probabile: una sync
+                        # precedente ha fallito la richiesta righe DOPO aver già
+                        # creato l'ordine (un bug ora corretto con un savepoint
+                        # in _create_amazon_sale_order, ma un ordine "fantasma"
+                        # creato prima del fix resterebbe altrimenti orfano per
+                        # sempre, dato che questo ramo prima aggiornava solo
+                        # stato/data). Ritenta il recupero righe.
+                        self._fetch_and_create_order_lines(existing, amazon_id)
                     if (existing.x_amazon_fulfillment_channel == 'AFN'
                             and new_status == 'Shipped'
                             and existing.state == 'draft'):
@@ -2125,16 +2179,28 @@ class SyncEngine:
         if purchase_date:
             order_vals['date_order'] = purchase_date
 
-        order = self.env['sale.order'].create(order_vals)
+        # Savepoint: se il recupero righe (chiamata Amazon separata, può fallire
+        # per errori di rete/throttling) va in errore DOPO che l'ordine è già
+        # stato creato, senza questo la create() resterebbe comunque nella
+        # transazione e verrebbe commitata a fine chunk (import_orders_chunk fa
+        # un commit unico, non per ordine) — un ordine "fantasma" senza righe,
+        # che il ramo "ordine già esistente" nei run successivi aggiornava solo
+        # stato/data senza mai più ritentare le righe. Con il savepoint, un
+        # errore qui annulla la create() e il prossimo import lo ritratta come
+        # nuovo (self-healing anche senza il fallback in import_orders_chunk).
+        with self.env.cr.savepoint():
+            order = self.env['sale.order'].create(order_vals)
+            self._fetch_and_create_order_lines(order, amazon_id)
+            if fulfillment_channel == 'AFN' and order_data.get('OrderStatus') == 'Shipped':
+                self._confirm_and_validate_fba_order(order)
 
+        return order
+
+    def _fetch_and_create_order_lines(self, order, amazon_id):
+        """Recupera le righe ordine da Amazon e le crea su 'order' (già esistente)."""
         items = self.client.get_order_items(amazon_id)
         for item in items:
             self._create_amazon_order_line(order, item)
-
-        if fulfillment_channel == 'AFN' and order_data.get('OrderStatus') == 'Shipped':
-            self._confirm_and_validate_fba_order(order)
-
-        return order
 
     def _confirm_and_validate_fba_order(self, order):
         """
@@ -2228,6 +2294,53 @@ class SyncEngine:
             'comment': 'Importato da Amazon',
         })
 
+    def _find_amazon_product_variant(self, sku, asin):
+        """
+        Trova la variante Amazon (product.product) corrispondente a sku/asin.
+        Cerca prima sulla VARIANTE — dove vivono gli SKU dei child di una
+        famiglia (es. sync_fba_quantities_page, sync_prices_and_quantities) —
+        poi sul TEMPLATE (prodotti semplici, un solo variante).
+        Se un template fosse trovato ma avesse PIÙ varianti, non sceglie una a
+        caso: product_variant_id ritornerebbe un variante arbitrario, non
+        necessariamente quello dell'ordine/riga in questione — meglio restare
+        "non trovato" che abbinare silenziosamente al variante sbagliato.
+        Ritorna il product.product corretto, o un recordset vuoto.
+        """
+        Product = self.env['product.product']
+        Template = self.env['product.template']
+
+        variant = Product.browse()
+        if sku:
+            variant = Product.search([('x_amazon_sku', '=', sku)], limit=1)
+        if not variant and asin:
+            variant = Product.search([('x_amazon_asin', '=', asin)], limit=1)
+        if not variant and sku:
+            sku_alt = sku[:-1] if sku.endswith('+') else sku + '+'
+            variant = Product.search([('x_amazon_sku', '=', sku_alt)], limit=1)
+        if variant:
+            return variant
+
+        # Cerca prodotto per SKU, poi ASIN (copre i rifornimenti con '+' quando
+        # l'ASIN è già tracciato sul record), poi default_code, poi SKU con '+'
+        # aggiunto/rimosso come ultima risorsa se l'ASIN non è ancora salvato
+        # (prodotto non ancora passato dalla riconciliazione).
+        product_tmpl = None
+        if sku:
+            product_tmpl = Template.search([('x_amazon_sku', '=', sku)], limit=1)
+        if not product_tmpl and asin:
+            product_tmpl = Template.search([('x_amazon_asin', '=', asin)], limit=1)
+        if not product_tmpl and sku:
+            product_tmpl = Template.search([('default_code', '=', sku)], limit=1)
+        if not product_tmpl and sku:
+            sku_alt = sku[:-1] if sku.endswith('+') else sku + '+'
+            product_tmpl = Template.search(
+                ['|', ('x_amazon_sku', '=', sku_alt), ('default_code', '=', sku_alt)], limit=1,
+            )
+
+        if not product_tmpl or len(product_tmpl.product_variant_ids) > 1:
+            return Product.browse()
+        return product_tmpl.product_variant_id
+
     def _create_amazon_order_line(self, order, item):
         sku = item.get('SellerSKU', '')
         asin = item.get('ASIN', '')
@@ -2243,31 +2356,9 @@ class SyncEngine:
         unit_price = total_net / qty if qty else 0.0
         item_id = item.get('OrderItemId', '')
 
-        # Cerca prodotto per SKU, poi ASIN (copre i rifornimenti con '+' quando
-        # l'ASIN è già tracciato sul record), poi default_code, poi SKU con '+'
-        # aggiunto/rimosso come ultima risorsa se l'ASIN non è ancora salvato
-        # (prodotto non ancora passato dalla riconciliazione).
-        product_tmpl = None
-        if sku:
-            product_tmpl = self.env['product.template'].search(
-                [('x_amazon_sku', '=', sku)], limit=1,
-            )
-        if not product_tmpl and asin:
-            product_tmpl = self.env['product.template'].search(
-                [('x_amazon_asin', '=', asin)], limit=1,
-            )
-        if not product_tmpl and sku:
-            product_tmpl = self.env['product.template'].search(
-                [('default_code', '=', sku)], limit=1,
-            )
-        if not product_tmpl and sku:
-            sku_alt = sku[:-1] if sku.endswith('+') else sku + '+'
-            product_tmpl = self.env['product.template'].search(
-                ['|', ('x_amazon_sku', '=', sku_alt), ('default_code', '=', sku_alt)], limit=1,
-            )
+        variant = self._find_amazon_product_variant(sku, asin)
 
-        if product_tmpl:
-            variant = product_tmpl.product_variant_id
+        if variant:
             self.env['sale.order.line'].create({
                 'order_id': order.id,
                 'product_id': variant.id,
@@ -2354,9 +2445,14 @@ class SyncEngine:
     def process_fnsku_report_rows(self, log_rec, rows):
         """
         Elabora il report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA) per popolare
-        x_amazon_fnsku. Abbina per SKU (colonna 'sku' del report, corrisponde a
-        x_amazon_sku) — righe senza SKU riconosciuto in Odoo vengono segnalate come
-        saltate, non è un errore (es. inventario storico/archiviato non più in Odoo).
+        x_amazon_fnsku. Abbina per SKU usando _find_amazon_product_variant (variante
+        prima, poi template) — righe senza SKU riconosciuto in Odoo vengono segnalate
+        come saltate, non è un errore (es. inventario storico/archiviato non più in
+        Odoo). x_amazon_fnsku è oggi un campo di template, condiviso da tutte le
+        varianti di una famiglia: se il variante trovato appartiene a un template con
+        PIÙ varianti, scriverlo lì sovrascriverebbe l'FNSKU (diverso) delle altre
+        varianti — in quel caso la riga viene saltata con un messaggio esplicito
+        invece di scrivere un dato sbagliato (limite noto, vedi TASK.md).
         Ritorna (matched, not_found, errors).
         """
         matched = not_found = errors = 0
@@ -2369,14 +2465,26 @@ class SyncEngine:
                 continue
 
             try:
-                product = self.env['product.template'].search(
-                    [('x_amazon_sku', '=', sku)], limit=1,
-                )
-                if not product:
+                variant = self._find_amazon_product_variant(sku, '')
+                if not variant:
                     not_found += 1
-                    lines.append(f'SKU NON TROVATO: {sku} — FNSKU: {fnsku}')
+                    lines.append(f'SKU NON TROVATO (o ambiguo su più varianti): {sku} — FNSKU: {fnsku}')
                     continue
 
+                product = variant.product_tmpl_id
+                if len(product.product_variant_ids) > 1:
+                    # x_amazon_fnsku è un campo di template, condiviso da tutte le
+                    # varianti — anche se QUESTA variante è stata identificata con
+                    # precisione, scriverlo qui sovrascriverebbe l'FNSKU (diverso)
+                    # delle varianti sorelle. Serve un campo per-variante per
+                    # gestire correttamente questo caso (non ancora implementato).
+                    not_found += 1
+                    lines.append(
+                        f'SALTATO {sku}: appartiene a una famiglia con più varianti, '
+                        f"x_amazon_fnsku è condiviso per template — richiede un campo "
+                        f'FNSKU per variante non ancora implementato'
+                    )
+                    continue
                 if product.x_amazon_fnsku != fnsku:
                     product.write({'x_amazon_fnsku': fnsku})
                     lines.append(f'OK {sku} → {fnsku}')
@@ -2464,6 +2572,12 @@ class SyncEngine:
                         'x_amazon_status': new_status,
                         'x_amazon_price': new_price,
                         'x_amazon_last_sync': datetime.now(),
+                        # L'FNSKU è legato alla coppia (SKU, venditore): quando lo
+                        # SKU cambia, Amazon ne genera uno nuovo — quello vecchio
+                        # non è più valido. Azzerarlo evita di stampare etichette
+                        # con un FNSKU sbagliato finché non arriva il prossimo
+                        # Import FNSKU (già incatenato al full import).
+                        'x_amazon_fnsku': False,
                     })
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
@@ -2494,6 +2608,7 @@ class SyncEngine:
                             'x_amazon_status': new_status,
                             'x_amazon_price': new_price,
                             'x_amazon_last_sync': datetime.now(),
+                            'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
                         })
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
@@ -2530,11 +2645,17 @@ class SyncEngine:
                     new_status = 'active' if 'BUYABLE' in plus_data.get('status', '') else 'inactive'
                     new_price = plus_data.get('price') or 0.0
                     variant.write({'x_amazon_sku': plus_sku, 'default_code': plus_sku})
-                    tmpl.write({
+                    tmpl_vals = {
                         'x_amazon_status': new_status,
                         'x_amazon_price': new_price,
                         'x_amazon_last_sync': datetime.now(),
-                    })
+                    }
+                    # x_amazon_fnsku è un campo di template condiviso: azzeralo solo
+                    # se il template ha un solo variante, altrimenti si perderebbe
+                    # l'FNSKU (diverso) delle varianti sorelle non cambiate.
+                    if len(tmpl.product_variant_ids) <= 1:
+                        tmpl_vals['x_amazon_fnsku'] = False
+                    tmpl.write(tmpl_vals)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -2557,11 +2678,14 @@ class SyncEngine:
                         new_status = 'active' if 'BUYABLE' in amazon_data_by_asin.get('status', '') else 'inactive'
                         new_price = amazon_data_by_asin.get('price') or 0.0
                         variant.write({'x_amazon_sku': new_sku, 'default_code': new_sku})
-                        tmpl.write({
+                        tmpl_vals_asin = {
                             'x_amazon_status': new_status,
                             'x_amazon_price': new_price,
                             'x_amazon_last_sync': datetime.now(),
-                        })
+                        }
+                        if len(tmpl.product_variant_ids) <= 1:
+                            tmpl_vals_asin['x_amazon_fnsku'] = False
+                        tmpl.write(tmpl_vals_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1

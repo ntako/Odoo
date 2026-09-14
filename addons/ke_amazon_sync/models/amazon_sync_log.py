@@ -438,10 +438,7 @@ class AmazonSyncLog(models.Model):
 
         # Interrompi se abbiamo già raggiunto il limite
         if max_products and log_rec.products_total >= max_products:
-            log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_import_cron()
+            self._finish_full_import(log_rec)
             return
 
         # ---------------------------------------------------------------
@@ -464,11 +461,8 @@ class AmazonSyncLog(models.Model):
             if next_token:
                 params.set_param('ke_amazon_sync.import_page_token', next_token)
             else:
-                log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.import_state', 'idle')
                 params.set_param('ke_amazon_sync.import_page_token', '')
-                self.env.cr.commit()
-                self._disable_import_cron()
+                self._finish_full_import(log_rec)
             return
 
         # ---------------------------------------------------------------
@@ -575,10 +569,29 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.import_report_id', '')
             params.set_param('ke_amazon_sync.import_report_attach_id', '')
             params.set_param('ke_amazon_sync.import_report_row_offset', '')
-            log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_import_cron()
+            self._finish_full_import(log_rec)
+
+    def _finish_full_import(self, log_rec):
+        """
+        Chiude l'import completo e avvia automaticamente l'Import FNSKU subito
+        dopo. I due restano report Amazon separati (non si possono unire in
+        un'unica chiamata, vedi discussione precedente), ma ha senso
+        incatenarli: i prodotti appena creati/aggiornati hanno SKU freschi,
+        l'FNSKU va ri-abbinato di conseguenza — niente da ricordarsi di
+        lanciare a parte. Se l'avvio dell'import FNSKU fallisce (es. un altro
+        già in corso), non fa fallire il full import: resta comunque 'done',
+        l'FNSKU si può sempre lanciare a mano.
+        """
+        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        params = self.env['ir.config_parameter'].sudo()
+        params.set_param('ke_amazon_sync.import_state', 'idle')
+        self.env.cr.commit()
+        self._disable_import_cron()
+
+        try:
+            self.action_start_fnsku_import(name_prefix='Import FNSKU (dopo import completo)')
+        except Exception as exc:
+            _log.warning('Import FNSKU automatico non avviato dopo il full import: %s', exc)
 
     def _disable_import_cron(self):
         cron = self.env.ref('ke_amazon_sync.cron_full_import_chunk', raise_if_not_found=False)

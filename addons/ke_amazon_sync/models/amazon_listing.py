@@ -71,7 +71,8 @@ class AmazonListing(models.Model):
     last_sync = fields.Datetime('Ultima sync', readonly=True)
     sync_error = fields.Text('Errore sync', readonly=True)
 
-    _sql_constraints = [
-        ('product_marketplace_uniq', 'unique(product_id, marketplace_id)',
-         'Esiste già un\'inserzione per questo prodotto su questo marketplace.'),
-    ]
+    # Sintassi Odoo 19: vedi commento in amazon_marketplace.py.
+    _product_marketplace_uniq = models.Constraint(
+        'unique(product_id, marketplace_id)',
+        "Esiste già un'inserzione per questo prodotto su questo marketplace.",
+    )

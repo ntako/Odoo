@@ -3,6 +3,13 @@
     'version': '19.0.1.0.0',
     'category': 'Inventory/Configuration',
     'summary': 'Sincronizzazione prodotti con Amazon Seller Central',
+    # Esplicita per evitare che Odoo usi README.md come descrizione: senza
+    # 'description' qui, Odoo lo legge automaticamente E LO RENDERIZZA COME
+    # RST — il README è in Markdown (tabelle |---|---|, separatori ---),
+    # RST non le capisce e genera decine di errori di parsing sulla pagina
+    # descrizione dell'app (verificato con un'installazione locale reale).
+    'description': 'Sincronizzazione bidirezionale prodotti/ordini/giacenze con '
+                    'Amazon Seller Central (SP-API). Vedi README.md nel modulo per i dettagli.',
     'author': 'KE',
     # sale_management (non solo 'sale'): serve per avere l'app Vendite completa
     # con il menu Configurazione → Listini Prezzi, usato per il listino "Amazon".
@@ -34,7 +41,13 @@
         ],
     },
     'external_dependencies': {
-        'python': ['sp_api', 'requests'],
+        # Nome pacchetto PyPI (python-amazon-sp-api), non il nome di import
+        # (sp_api): da Odoo 19 la verifica cerca prima il nome PyPI via
+        # importlib.metadata, e con solo 'sp_api' emette un warning esplicito
+        # "does not appear to be a valid PyPI package" (funziona comunque via
+        # fallback sull'import, ma verificato con un'installazione locale
+        # reale che questa è la forma corretta/raccomandata).
+        'python': ['python-amazon-sp-api', 'requests'],
     },
     'installable': True,
     'application': True,

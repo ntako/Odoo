@@ -1,4 +1,4 @@
-from odoo import fields, models
+from odoo import api, fields, models
 
 
 class AmazonMarketplace(models.Model):
@@ -22,10 +22,20 @@ class AmazonMarketplace(models.Model):
     currency_id = fields.Many2one('res.currency', string='Valuta')
     sequence = fields.Integer('Sequenza', default=10)
 
-    _sql_constraints = [
-        ('marketplace_id_uniq', 'unique(marketplace_id)',
-         'Esiste già un marketplace con questo Marketplace ID.'),
-    ]
+    # Sintassi Odoo 19: _sql_constraints (lista di tuple) non è più supportato,
+    # sostituito da models.Constraint come attributo di classe — verificato
+    # con un'installazione locale reale (docker-test/), non solo per sentito
+    # dire: il vecchio stile installava comunque ma con un warning esplicito
+    # "no longer supported, please define models.Constraint".
+    _marketplace_id_uniq = models.Constraint(
+        'unique(marketplace_id)',
+        'Esiste già un marketplace con questo Marketplace ID.',
+    )
 
-    def name_get(self):
-        return [(rec.id, f'{rec.name} ({rec.code})') for rec in self]
+    @api.depends('name', 'code')
+    def _compute_display_name(self):
+        # Odoo 19: name_get() non esiste più (rimosso dall'ORM), il suo posto
+        # è preso da questo compute — un altro caso verificato con
+        # l'installazione locale, non solo dedotto dal changelog.
+        for rec in self:
+            rec.display_name = f'{rec.name} ({rec.code})' if rec.code else rec.name

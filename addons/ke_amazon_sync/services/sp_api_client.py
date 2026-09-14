@@ -464,7 +464,11 @@ class SpApiClient:
         payload = self._get_orders_call(**params)
         return payload.get('Orders', []), payload.get('NextToken')
 
-    @_with_retry(DELAY_ORDERS_ITEMS_S)
+    # retry_max/backoff_s ridotti (stesso motivo di _inventory_call/_catalog_call/
+    # _get_orders_call): i default (5 tentativi, backoff fino a 480s, ~900s
+    # totali nel caso peggiore) rischiano di far superare il limite di tempo
+    # reale del cron già su un solo ordine throttled dentro un chunk da 15.
+    @_with_retry(DELAY_ORDERS_ITEMS_S, retry_max=3, backoff_s=8)
     def _get_order_items_call(self, order_id):
         from sp_api.api import Orders
         api = Orders(marketplace=self._marketplace(), credentials=self.credentials)

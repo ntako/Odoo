@@ -77,7 +77,7 @@ class ResConfigSettings(models.TransientModel):
         help='Se attivo, controlla ogni N ore se i nuovi prodotti Odoo sono presenti su Amazon.',
     )
     amazon_sync_check_interval = fields.Integer(
-        string='Ogni (ore)',
+        string='Controllo ogni (ore)',
         config_parameter='ke_amazon_sync.check_interval_hours',
         default=24,
     )
@@ -103,7 +103,7 @@ class ResConfigSettings(models.TransientModel):
         help='Confronta periodicamente i prodotti Odoo con i listing attivi sul tuo store Amazon.',
     )
     amazon_sync_reconcile_interval = fields.Integer(
-        string='Ogni (ore)',
+        string='Riconciliazione ogni (ore)',
         config_parameter='ke_amazon_sync.reconcile_interval_hours',
         default=24,
     )
