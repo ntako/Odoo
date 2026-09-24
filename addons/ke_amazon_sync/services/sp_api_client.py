@@ -25,6 +25,14 @@ _D_MARKETPLACE_ID = 'APJ6JRA9NG5V4'
 
 RETRY_NET_BACKOFF_S = 15  # Attesa fissa per errori di rete/SSL (non throttling)
 
+# La libreria python-amazon-sp-api (httpx sotto il cofano) non imposta NESSUN
+# timeout di default: una connessione che si blocca (non un errore, una che
+# non risponde né chiude) resterebbe appesa indefinitamente, senza che nulla
+# la interrompa — verificato leggendo sp_api/base/_transport_httpx.py e
+# client.py, non solo ipotizzato. Passato esplicitamente ad ogni client SP-API
+# istanziato in questo file (vedi HTTP_TIMEOUT_S sotto).
+HTTP_TIMEOUT_S = 30
+
 
 def _with_retry(delay_s, retry_max=None, backoff_s=None):
     """
@@ -160,7 +168,7 @@ class SpApiClient:
         from sp_api.api import ListingsItems
         from sp_api.base import SellingApiException
 
-        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         kwargs = {
             'marketplaceIds': [self.marketplace_id],
             'includedData': ['summaries', 'attributes', 'offers', 'fulfillmentAvailability'],
@@ -184,7 +192,7 @@ class SpApiClient:
         from sp_api.api import ListingsItems
         from sp_api.base import SellingApiException
 
-        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         page_token = None
         count = 0
 
@@ -229,7 +237,7 @@ class SpApiClient:
     @_with_retry(DELAY_CATALOG_S, retry_max=3, backoff_s=8)
     def _catalog_call(self, asin):
         from sp_api.api.catalog_items.catalog_items_2022_04_01 import CatalogItemsV20220401
-        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials)
+        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         response = api.get_catalog_item(
             asin,
             marketplaceIds=[self.marketplace_id],
@@ -254,7 +262,7 @@ class SpApiClient:
     @_with_retry(DELAY_SEARCH_S)
     def _search_catalog_call(self, ean):
         from sp_api.api.catalog_items.catalog_items_2022_04_01 import CatalogItemsV20220401
-        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials)
+        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         response = api.search_catalog_items(
             identifiers=[ean],
             identifiersType='EAN',
@@ -300,7 +308,7 @@ class SpApiClient:
     @_with_retry(DELAY_INVENTORY_S, retry_max=3, backoff_s=8)
     def _inventory_call(self, page_token):
         from sp_api.api import Inventories
-        api = Inventories(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Inventories(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         params = {'details': True}
         if page_token:
             params['nextToken'] = page_token
@@ -363,7 +371,7 @@ class SpApiClient:
     @_with_retry(DELAY_SELLERS_S, retry_max=1)
     def _marketplace_participations_call(self):
         from sp_api.api import Sellers
-        api = Sellers(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Sellers(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         return api.get_marketplace_participation()
 
     def get_marketplace_participations(self):
@@ -397,7 +405,7 @@ class SpApiClient:
     def request_listings_report(self):
         """Crea un report listing completo. Ritorna il reportId."""
         from sp_api.api import Reports
-        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         resp = api.create_report(
             reportType='GET_MERCHANT_LISTINGS_ALL_DATA',
             marketplaceIds=[self.marketplace_id],
@@ -407,11 +415,42 @@ class SpApiClient:
     def request_returns_report(self, data_start_time):
         """Crea il report dei resi cliente FBA da data_start_time (ISO-8601) a oggi. Ritorna il reportId."""
         from sp_api.api import Reports
-        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         resp = api.create_report(
             reportType='GET_FBA_FULFILLMENT_CUSTOMER_RETURNS_DATA',
             marketplaceIds=[self.marketplace_id],
             dataStartTime=data_start_time,
+        )
+        return resp.payload['reportId']
+
+    def request_orders_report(self, data_start_time, data_end_time, marketplace_ids=None):
+        """
+        Crea il report ordini completo (GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL,
+        una riga per articolo ordine — SKU/ASIN/quantità/prezzo/stato già inclusi,
+        niente chiamata separata getOrderItems per ordine). Richiede sia
+        dataStartTime che dataEndTime (a differenza degli altri report qui, che
+        coprono "da X a oggi"). Ritorna il reportId.
+
+        'marketplace_ids', a differenza degli altri request_*_report di questo
+        file, accetta una LISTA esplicita invece di usare solo self.marketplace_id:
+        verificato con una chiamata reale (vedi progetto-sync-ordini-report.md
+        §2-3) che un account con più marketplace EU attivi (endpoint regionale
+        condiviso sellingpartnerapi-eu.amazon.com) restituisce ordini cross-
+        marketplace anche passando un solo ID — la raccomandazione Amazon resta
+        comunque di passare esplicitamente tutti i marketplace attivi in
+        un'unica richiesta invece di farne una per marketplace (che darebbe
+        dati sovrapposti/ridondanti, non complementari). self._marketplace()
+        (che sceglie l'endpoint regionale) resta basato su self.marketplace_id
+        del client instanziato — tutti i marketplace passati qui devono essere
+        nella stessa regione di quell'endpoint (oggi solo EU è attivo).
+        """
+        from sp_api.api import Reports
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
+        resp = api.create_report(
+            reportType='GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL',
+            marketplaceIds=marketplace_ids or [self.marketplace_id],
+            dataStartTime=data_start_time,
+            dataEndTime=data_end_time,
         )
         return resp.payload['reportId']
 
@@ -425,7 +464,7 @@ class SpApiClient:
         per stato invece del solo totale disponibile.
         """
         from sp_api.api import Reports
-        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         resp = api.create_report(
             reportType='GET_FBA_MYI_ALL_INVENTORY_DATA',
             marketplaceIds=[self.marketplace_id],
@@ -436,16 +475,29 @@ class SpApiClient:
         """
         Controlla lo stato del report.
         Ritorna reportDocumentId se DONE, None se ancora in elaborazione.
-        Lancia RuntimeError se CANCELLED/FATAL.
+        Lancia RuntimeError se CANCELLED/FATAL, o se Amazon risponde con un
+        errore permanente (4xx diverso dal throttling 429) — es. 403 quando
+        l'app SP-API non è autorizzata per quel marketplace. Prima QUALSIASI
+        SellingApiException veniva ingoiata e trattata come "ancora in
+        elaborazione": un errore permanente faceva ritentare il cron
+        all'infinito invece di segnalare il problema — trovato con un caso
+        reale (marketplace non autorizzato, import bloccato per ore senza
+        mai fallire visibilmente, nessun errore in log finché non fermato
+        a mano). Solo gli errori davvero transitori (429, 5xx) vengono
+        ancora ritentati silenziosamente.
         """
         from sp_api.api import Reports
         from sp_api.base import SellingApiException
-        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         try:
             resp = api.get_report(report_id)
         except SellingApiException as exc:
-            _log.warning('check_report_ready: errore SP-API %s', exc)
-            return None
+            code = getattr(exc, 'code', None)
+            if code == 429 or (isinstance(code, int) and code >= 500):
+                _log.warning('check_report_ready: errore transitorio (%s), ritento al prossimo giro: %s',
+                              code, exc)
+                return None
+            raise RuntimeError(f'Errore permanente controllando il report {report_id}: {exc}') from exc
         status = resp.payload.get('processingStatus', '')
         if status == 'DONE':
             return resp.payload.get('reportDocumentId')
@@ -458,7 +510,7 @@ class SpApiClient:
         import csv
         import io
         from sp_api.api import Reports
-        api = Reports(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         resp = api.get_report_document(document_id, download=True)
         content = resp.payload.get('document', '')
         if not content:
@@ -480,7 +532,7 @@ class SpApiClient:
     @_with_retry(DELAY_ORDERS_GET_S, retry_max=1)
     def _get_orders_call(self, **params):
         from sp_api.api import Orders
-        api = Orders(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Orders(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         resp = api.get_orders(**params)
         return resp.payload
 
@@ -509,7 +561,7 @@ class SpApiClient:
     @_with_retry(DELAY_ORDERS_ITEMS_S, retry_max=3, backoff_s=8)
     def _get_order_items_call(self, order_id):
         from sp_api.api import Orders
-        api = Orders(marketplace=self._marketplace(), credentials=self.credentials)
+        api = Orders(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         resp = api.get_order_items(order_id)
         return resp.payload.get('OrderItems', [])
 
@@ -530,7 +582,7 @@ class SpApiClient:
     def get_listing_item(self, sku):
         """Recupera un singolo listing (contiene productType e attributi attuali)."""
         from sp_api.api import ListingsItems
-        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         response = api.get_listings_item(
             self.seller_id, sku,
             marketplaceIds=[self.marketplace_id],
@@ -546,7 +598,7 @@ class SpApiClient:
     def patch_price(self, sku, product_type, price):
         """Aggiorna il prezzo di un listing via PATCH."""
         from sp_api.api import ListingsItems
-        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         body = {
             'productType': product_type,
             'patches': [{
@@ -574,7 +626,7 @@ class SpApiClient:
         Ritorna lista di {'name': 'SHOE', 'display_name': 'Shoes'}.
         """
         from sp_api.api import ProductTypeDefinitions
-        api = ProductTypeDefinitions(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ProductTypeDefinitions(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         kwargs = {'marketplaceIds': [self.marketplace_id], 'locale': self.locale}
         if keywords:
             kw_list = keywords if isinstance(keywords, list) else keywords.split()
@@ -599,7 +651,7 @@ class SpApiClient:
         Ritorna lista di {'classification_id': '...', 'display_name': '...'}.
         """
         from sp_api.api.catalog_items.catalog_items_2022_04_01 import CatalogItemsV20220401
-        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials)
+        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         time.sleep(DELAY_SEARCH_S)
         resp = api.search_catalog_items(
             keywords=[keyword],
@@ -632,7 +684,7 @@ class SpApiClient:
         Ritorna il payload della risposta {'status', 'issues', 'submissionId'}.
         """
         from sp_api.api import ListingsItems
-        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         body = {
             'productType': product_type,
             'requirements': requirements,
@@ -653,7 +705,7 @@ class SpApiClient:
     def patch_quantity(self, sku, product_type, qty):
         """Aggiorna la quantità FBM di un listing via PATCH."""
         from sp_api.api import ListingsItems
-        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials)
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         body = {
             'productType': product_type,
             'patches': [{

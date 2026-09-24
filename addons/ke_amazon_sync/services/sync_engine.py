@@ -2272,11 +2272,14 @@ class SyncEngine:
     _ORDER_STATUSES = [
         'Pending', 'Unshipped', 'PartiallyShipped', 'Shipped', 'InvoiceUnconfirmed',
     ]
-    # Ordini processati per invocazione del cron. Ogni ordine costa ~2s (rate-limit
-    # get_order_items): una pagina Amazon intera (fino a 100 ordini) può superare
-    # facilmente il --limit-time-real-cron del server e far uccidere/riavviare il
-    # thread a metà esecuzione. Elaborando pochi ordini a chunk si resta ben sotto
-    # qualunque limite ragionevole.
+    # Ordini committati a blocco durante l'elaborazione: da quando le righe ordine
+    # vengono lette dal report bulk pre-scaricato (items_by_order_id, vedi
+    # _thread_import_orders) invece che da una chiamata get_order_items per
+    # ordine, questo non serve più a stare sotto un limite di tempo per tick di
+    # cron (non esiste più un tick) — resta solo per non perdere lavoro già
+    # fatto se il thread venisse interrotto a metà (stesso principio di
+    # _ROW_COMMIT_BATCH in amazon_sync_log.py, valore più basso perché qui ogni
+    # riga costa di più: partner, ordine, righe, eventuale conferma FBA).
     _ORDERS_CHUNK_SIZE = 15
 
     def fetch_orders_page(self, created_after, next_token=None):
@@ -2290,11 +2293,17 @@ class SyncEngine:
             order_statuses=self._ORDER_STATUSES,
         )
 
-    def import_orders_chunk(self, log_rec, orders, offset=0, chunk_size=None):
+    def import_orders_chunk(self, log_rec, orders, offset=0, chunk_size=None, items_by_order_id=None):
         """
         Crea/aggiorna i sale.order per un sotto-blocco di 'orders' (già scaricati
         con fetch_orders_page), a partire da 'offset'.
         Ritorna il nuovo offset per il prossimo chunk, o None se il blocco è esaurito.
+
+        'items_by_order_id', se dato, è il dict {amazon_order_id: [righe report]}
+        pre-scaricato una volta sola dal report bulk articoli-ordine (vedi
+        _thread_import_orders) — passato giù a _create_amazon_sale_order/
+        _fetch_and_create_order_lines per evitare una chiamata get_order_items
+        per ordine (vedi progetto-sync-ordini-report.md).
         """
         chunk_size = chunk_size or self._ORDERS_CHUNK_SIZE
         chunk = orders[offset:offset + chunk_size]
@@ -2331,7 +2340,7 @@ class SyncEngine:
                         # creato prima del fix resterebbe altrimenti orfano per
                         # sempre, dato che questo ramo prima aggiornava solo
                         # stato/data). Ritenta il recupero righe.
-                        self._fetch_and_create_order_lines(existing, amazon_id)
+                        self._fetch_and_create_order_lines(existing, amazon_id, items_by_order_id)
                     if (existing.x_amazon_fulfillment_channel == 'AFN'
                             and new_status == 'Shipped'
                             and existing.state == 'draft'):
@@ -2339,7 +2348,7 @@ class SyncEngine:
                     updated += 1
                     lines.append(f'AGGIORNATO: {amazon_id}')
                 else:
-                    order = self._create_amazon_sale_order(order_data)
+                    order = self._create_amazon_sale_order(order_data, items_by_order_id)
                     created += 1
                     lines.append(f'CREATO: {amazon_id} → {order.name}')
             except Exception as exc:
@@ -2376,7 +2385,7 @@ class SyncEngine:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    def _create_amazon_sale_order(self, order_data):
+    def _create_amazon_sale_order(self, order_data, items_by_order_id=None):
         amazon_id = order_data.get('AmazonOrderId', '')
         partner = self._find_or_create_amazon_partner(order_data)
 
@@ -2418,17 +2427,51 @@ class SyncEngine:
         # nuovo (self-healing anche senza il fallback in import_orders_chunk).
         with self.env.cr.savepoint():
             order = self.env['sale.order'].create(order_vals)
-            self._fetch_and_create_order_lines(order, amazon_id)
+            self._fetch_and_create_order_lines(order, amazon_id, items_by_order_id)
             if fulfillment_channel == 'AFN' and order_data.get('OrderStatus') == 'Shipped':
                 self._confirm_and_validate_fba_order(order)
 
         return order
 
-    def _fetch_and_create_order_lines(self, order, amazon_id):
-        """Recupera le righe ordine da Amazon e le crea su 'order' (già esistente)."""
+    def _fetch_and_create_order_lines(self, order, amazon_id, items_by_order_id=None):
+        """
+        Crea le righe ordine su 'order' (già esistente). Se 'items_by_order_id'
+        (dict amazon_order_id -> righe del report bulk articoli-ordine,
+        pre-scaricato una volta sola per l'intero giro di sync — vedi
+        _thread_import_orders) contiene questo ordine, le righe vengono lette
+        da lì: zero chiamate Amazon, elimina il pavimento di 2s/ordine di
+        get_order_items (vedi progetto-sync-ordini-report.md). Se l'ordine non
+        è nel dict (report generato poco prima che questo ordine esistesse —
+        raro, il report copre "fino a poco fa") o se items_by_order_id non è
+        stato passato affatto, ricade sulla chiamata diretta get_order_items,
+        più lenta ma sempre corretta — mai un ordine senza righe per questo.
+        """
+        if items_by_order_id is not None and amazon_id in items_by_order_id:
+            for row in items_by_order_id[amazon_id]:
+                self._create_amazon_order_line(order, self._order_report_row_to_item(row))
+            return
         items = self.client.get_order_items(amazon_id)
         for item in items:
             self._create_amazon_order_line(order, item)
+
+    @staticmethod
+    def _order_report_row_to_item(row):
+        """
+        Converte una riga del report GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL
+        (colonne piatte 'sku'/'item-price'/...) nel formato annidato della
+        risposta get_order_items ('SellerSKU'/'ItemPrice.Amount'/...) già
+        atteso da _create_amazon_order_line — così quel metodo non deve sapere
+        da dove viene la riga.
+        """
+        return {
+            'SellerSKU': row.get('sku', ''),
+            'ASIN': row.get('asin', ''),
+            'Title': row.get('product-name', ''),
+            'QuantityOrdered': row.get('quantity') or 1,
+            'ItemPrice': {'Amount': row.get('item-price') or 0},
+            'ItemTax': {'Amount': row.get('item-tax') or 0},
+            'OrderItemId': row.get('order-item-id', ''),
+        }
 
     def _confirm_and_validate_fba_order(self, order):
         """

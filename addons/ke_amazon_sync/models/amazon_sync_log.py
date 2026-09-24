@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta
 
 from odoo import api, fields, models
 from odoo.addons.ke_amazon_sync.services.sp_api_client import SpApiClient
@@ -74,20 +75,28 @@ class AmazonSyncLog(models.Model):
             'target': 'current',
         }
 
-    def action_mark_done(self):
-        """Segna il log come terminato e ferma il processo associato se in corso."""
+    def action_mark_done(self, state='done', error_summary=None):
+        """
+        Segna il log come terminato e ripulisce lo stato/i parametri del
+        processo associato (coda marketplace, cron, ecc.) — stessa pulizia
+        sia per una chiusura normale (pulsante "Segna come completato",
+        state='done') sia per una rilevata da _cron_watchdog_stale_syncs
+        (state='error', log rimasto 'running' troppo a lungo senza
+        aggiornamenti: probabile thread interrotto da un riavvio o un cron
+        bloccato — vedi quel metodo).
+        """
         self.ensure_one()
         params = self.env['ir.config_parameter'].sudo()
         if self.sync_type == 'import_orders':
+            # Come full_import/reconcile/resi/import_fnsku: thread di
+            # background, qui liberiamo solo lo stato per permettere un nuovo
+            # avvio, non fermiamo un thread già in esecuzione (vedi
+            # _thread_import_orders). Niente più ir.attachment da ripulire:
+            # il report bulk articoli-ordine (vedi progetto-sync-ordini-report.md)
+            # vive solo in memoria dentro il thread, non viene mai persistito.
             params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            attach_id = int(params.get_param('ke_amazon_sync.orders_import_page_attach_id', '0') or 0)
-            if attach_id:
-                self.env['ir.attachment'].browse(attach_id).unlink()
-            params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
-            params.set_param('ke_amazon_sync.orders_import_offset', '0')
             params.set_param('ke_amazon_sync.orders_import_marketplace_queue', '')
             params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
-            self._disable_orders_import_cron()
         elif self.sync_type == 'sync_fba':
             # La sync gira in un thread di background (non un cron a pagine):
             # qui possiamo solo liberare lo stato per permettere un nuovo avvio,
@@ -95,22 +104,20 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.fba_sync_state', 'idle')
             params.set_param('ke_amazon_sync.fba_sync_log_id', '')
         elif self.sync_type == 'returns':
+            # Come full_import/reconcile: thread di background, qui liberiamo
+            # solo lo stato per permettere un nuovo avvio, non fermiamo un
+            # thread già in esecuzione (vedi _thread_returns).
             params.set_param('ke_amazon_sync.returns_state', 'idle')
             params.set_param('ke_amazon_sync.returns_log_id', '')
-            params.set_param('ke_amazon_sync.returns_report_id', '')
-            params.set_param('ke_amazon_sync.returns_report_attach_id', '')
             params.set_param('ke_amazon_sync.returns_marketplace_queue', '')
             params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
-            self._disable_returns_cron()
         elif self.sync_type == 'full_import':
+            # Come sync_fba/download_images: thread di background, qui
+            # liberiamo solo lo stato per permettere un nuovo avvio, non
+            # fermiamo un thread già in esecuzione (vedi action_stop_import).
             params.set_param('ke_amazon_sync.import_state', 'idle')
-            params.set_param('ke_amazon_sync.import_page_token', '')
-            params.set_param('ke_amazon_sync.import_report_id', '')
-            params.set_param('ke_amazon_sync.import_report_attach_id', '')
-            params.set_param('ke_amazon_sync.import_report_row_offset', '')
             params.set_param('ke_amazon_sync.import_marketplace_queue', '')
             params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
-            self._disable_import_cron()
         elif self.sync_type == 'download_images':
             # Come sync_fba: thread di background, qui liberiamo solo lo
             # stato per permettere un nuovo avvio, non fermiamo un thread
@@ -118,22 +125,62 @@ class AmazonSyncLog(models.Model):
             # questo stesso stato a 'idle' di nuovo alla sua fine).
             params.set_param('ke_amazon_sync.download_images_state', 'idle')
         elif self.sync_type == 'reconcile':
+            # Come full_import: thread di background, qui liberiamo solo lo
+            # stato per permettere un nuovo avvio, non fermiamo un thread già
+            # in esecuzione (vedi _thread_reconcile).
             params.set_param('ke_amazon_sync.reconcile_state', 'idle')
             params.set_param('ke_amazon_sync.reconcile_log_id', '')
-            params.set_param('ke_amazon_sync.reconcile_report_id', '')
-            params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
             params.set_param('ke_amazon_sync.reconcile_marketplace_queue', '')
             params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
-            self._disable_reconcile_cron()
         elif self.sync_type == 'import_fnsku':
+            # Come full_import/reconcile/resi: thread di background, qui
+            # liberiamo solo lo stato per permettere un nuovo avvio, non
+            # fermiamo un thread già in esecuzione (vedi _thread_fnsku_import).
             params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
             params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
-            params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
-            params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
             params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
             params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
-            self._disable_fnsku_import_cron()
-        self.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        vals = {'state': state, 'end_date': fields.Datetime.now()}
+        if error_summary:
+            vals['error_summary'] = error_summary
+        self.write(vals)
+
+    # Soglia oltre la quale un log 'running' senza nessun aggiornamento è
+    # quasi certamente interrotto (thread ucciso da un riavvio, cron rimasto
+    # bloccato, ecc.) e non una sync semplicemente lenta — scelta prudente,
+    # non un limite stretto: anche il full import più lento visto finora
+    # (report-based, più marketplace in sequenza) resta ben sotto le 3 ore.
+    _STALE_RUNNING_HOURS = 3
+
+    @api.model
+    def _cron_watchdog_stale_syncs(self):
+        """
+        Cron di igiene (indipendente da tutte le altre sync, non chiama mai
+        Amazon): cerca log rimasti 'running' senza nessun aggiornamento da
+        più di _STALE_RUNNING_HOURS ore e li chiude in errore, ripulendo
+        anche lo stato/i parametri associati (stessa logica di
+        action_mark_done, per non lasciare un cron disattivato o una coda
+        marketplace a metà che blocca il prossimo avvio).
+        Trovato il problema reale in una sessione di sviluppo: un log
+        rimasto 'running' per una settimana intera senza che nulla lo
+        segnalasse, scoperto solo controllando a mano.
+        """
+        threshold = fields.Datetime.now() - timedelta(hours=self._STALE_RUNNING_HOURS)
+        stale_logs = self.search([
+            ('state', '=', 'running'),
+            ('write_date', '<', threshold),
+        ])
+        for log in stale_logs:
+            age = fields.Datetime.now() - log.write_date
+            msg = (
+                f'Nessun aggiornamento da {age.total_seconds() / 3600:.1f} ore — '
+                f'probabile interruzione (riavvio server, thread bloccato, o simile). '
+                f'Segnato come errore automaticamente dal controllo di igiene.'
+            )
+            _log.warning('Watchdog: log #%d (%s, %s) rimasto "running" da troppo tempo: %s',
+                          log.id, log.name, log.sync_type, msg)
+            log.action_mark_done(state='error', error_summary=msg)
+            self.env.cr.commit()
 
     def action_export_csv(self):
         self.ensure_one()
@@ -372,10 +419,17 @@ class AmazonSyncLog(models.Model):
         }
 
     def action_stop_import(self):
+        """
+        Come sync_fba/download_images: l'import gira in un thread di
+        background, qui possiamo solo liberare lo stato per permettere un
+        nuovo avvio, non fermare un thread già in esecuzione — il thread
+        controlla import_state ad ogni cambio di marketplace e si ferma da
+        solo appena può (vedi _thread_full_import), ma non a metà di un
+        report/chunk già in corso.
+        """
         self.ensure_one()
         params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.import_state', 'idle')
-        self._disable_import_cron()
         self.write({'state': 'done', 'end_date': fields.Datetime.now()})
 
     def action_start_full_import(self):
@@ -413,19 +467,14 @@ class AmazonSyncLog(models.Model):
 
         params.set_param('ke_amazon_sync.import_state', 'running')
         params.set_param('ke_amazon_sync.import_log_id', str(log_rec.id))
-        params.set_param('ke_amazon_sync.import_page_token', '')
         params.set_param('ke_amazon_sync.import_update_existing', str(update_existing))
         params.set_param('ke_amazon_sync.import_max_products', str(max_products))
-        params.set_param('ke_amazon_sync.import_report_id', '')
-        params.set_param('ke_amazon_sync.import_report_attach_id', '')
-        params.set_param('ke_amazon_sync.import_report_row_offset', '')
         params.set_param('ke_amazon_sync.import_marketplace_queue',
                           ','.join(str(i) for i in marketplaces.ids))
         params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
+        self.env.cr.commit()
 
-        cron = self.env.ref('ke_amazon_sync.cron_full_import_chunk', raise_if_not_found=False)
-        if cron:
-            cron.sudo().active = True
+        self._start_thread('_thread_full_import', log_rec.id)
 
         return {
             'type': 'ir.actions.act_window',
@@ -436,206 +485,177 @@ class AmazonSyncLog(models.Model):
             'target': 'current',
         }
 
-    # Numero di righe del report elaborate per ogni invocazione del cron.
-    _REPORT_CHUNK_SIZE = 200
-
-    def _cron_full_import_chunk(self):
+    def _start_thread(self, method_name, log_id):
         """
-        Cron che gestisce l'import completo con una state machine a tre fasi:
-          Fase 0 – import limitato (max_products ≤ 1000): paginazione classica con page_token
-          Fase 1 – nessun page_token e nessun report_id: crea il report Amazon
-          Fase 2 – report_id presente ma nessun allegato: controlla se il report è pronto e lo scarica
-          Fase 3 – allegato presente: elabora chunk di righe finché non sono esaurite
+        Avvia 'method_name' (uno dei metodi _thread_* di questo modello) in un
+        thread daemon separato, stesso pattern già usato altrove nel modulo
+        (vedi res_config_settings.py). NB: un thread daemon viene interrotto
+        di colpo se il processo Odoo termina (riavvio/crash) — non esegue il
+        proprio blocco finally, quindi il log resta 'running' finché il
+        watchdog (_cron_watchdog_stale_syncs) non lo intercetta.
         """
-        import base64
-        import json
-
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.import_state') != 'running':
-            self._disable_import_cron()
-            return
-
-        client = SpApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except ValueError:
-            _log.warning('Cron full_import_chunk saltato: credenziali SP-API non configurate.')
-            return
-
-        log_id = int(params.get_param('ke_amazon_sync.import_log_id', '0') or 0)
-        if not log_id:
-            params.set_param('ke_amazon_sync.import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_import_cron()
-            return
-
-        log_rec = self.browse(log_id)
-        if not log_rec.exists():
-            params.set_param('ke_amazon_sync.import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_import_cron()
-            return
-
-        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
-        # in coda (stesso pattern dell'import ordini). Coda vuota = import
-        # completo su tutti i marketplace attivi.
-        current_mp_id = int(
-            params.get_param('ke_amazon_sync.import_current_marketplace_id', '0') or 0
+        import threading
+        db = self.env.cr.dbname
+        uid = self.env.uid
+        ctx = dict(self.env.context)
+        t = threading.Thread(
+            target=getattr(self, method_name),
+            args=(db, uid, ctx, log_id),
+            daemon=True,
         )
-        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
-        if not marketplace.exists():
-            marketplace = self._full_import_pop_marketplace(params)
-            if not marketplace:
-                self._finish_full_import(log_rec)
-                return
-            self.env.cr.commit()
-        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
+        t.start()
 
-        update_existing = params.get_param('ke_amazon_sync.import_update_existing', 'True') == 'True'
-        max_products = int(params.get_param('ke_amazon_sync.import_max_products', '0') or 0)
-
-        # Interrompi se abbiamo già raggiunto il limite
-        if max_products and log_rec.products_total >= max_products:
-            self._full_import_finish_marketplace(log_rec, params, marketplace)
-            return
-
-        # ---------------------------------------------------------------
-        # Fase 0: import limitato (≤ 1000) → usa paginazione classica
-        # ---------------------------------------------------------------
-        if max_products and max_products <= 1000:
-            page_token = params.get_param('ke_amazon_sync.import_page_token') or None
+    def _append_log_line(self, log_rec, msg):
+        """
+        Aggiunge una riga a log_lines e fa commit, ritentando se Postgres
+        segnala un conflitto di scrittura concorrente sulla stessa riga —
+        successo davvero durante lo sviluppo: il form del log si auto-
+        ricarica ogni 10s mentre lo stato è 'running' (vedi
+        amazon_sync_log_form.js), e un thread che scrive molto più spesso
+        del vecchio tick di cron da 2 minuti allarga la finestra di
+        collisione con quella lettura concorrente. Ricalcola log_lines da
+        capo ad ogni tentativo, non solo il commit: dopo un rollback il
+        valore va rinfrescato dal DB (flush=False: non ritentare a scrivere
+        il valore fallito, solo scartare la cache locale).
+        """
+        import time
+        from psycopg2 import errors as pg_errors
+        env = log_rec.env
+        for attempt in range(3):
             try:
-                next_token = SyncEngine(self.env, client).full_import_chunk(
-                    log_rec, page_token=page_token, update_existing=update_existing,
-                )
-            except Exception as e:
-                _log.error('Cron full_import_chunk (Fase 0) fallito: %s', e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.import_state', 'idle')
-                params.set_param('ke_amazon_sync.import_page_token', '')
-                self.env.cr.commit()
-                self._disable_import_cron()
+                log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
+                env.cr.commit()
+                _log.info(msg)
                 return
-            if next_token:
-                params.set_param('ke_amazon_sync.import_page_token', next_token)
-            else:
-                params.set_param('ke_amazon_sync.import_page_token', '')
-                self._full_import_finish_marketplace(log_rec, params, marketplace)
-            return
+            except pg_errors.SerializationFailure:
+                env.cr.rollback()
+                log_rec.invalidate_recordset(['log_lines'], flush=False)
+                if attempt == 2:
+                    raise
+                time.sleep(0.3 * (attempt + 1))
 
-        # ---------------------------------------------------------------
-        # Fasi 1-3: import completo via Reports API (nessun limite)
-        # ---------------------------------------------------------------
-        report_id = params.get_param('ke_amazon_sync.import_report_id', '')
-        attach_id_s = params.get_param('ke_amazon_sync.import_report_attach_id', '')
-        row_offset_s = params.get_param('ke_amazon_sync.import_report_row_offset', '')
+    # Tempo tra un poll e l'altro dello stato di un report Amazon durante
+    # l'attesa: get_report permette 2 richieste/secondo (burst 15) —
+    # verificato prima di scegliere questo numero, non indovinato — quindi
+    # molto più stretto dei 2 minuti del vecchio tick di cron, senza alcun
+    # rischio di throttling anche con più sync di questo tipo attive insieme.
+    _REPORT_POLL_INTERVAL_S = 20
+    # Tetto di sicurezza: oltre questa attesa un report non ancora pronto è
+    # anomalo — meglio segnalarlo come errore (il watchdog lo intercetterebbe
+    # comunque, ma prima è meglio) che restare in poll indefinitamente.
+    _REPORT_POLL_MAX_MINUTES = 30
+    # Righe elaborate tra un commit e l'altro durante l'elaborazione del
+    # report: non serve a rispettare un rate limit (full_import_report_rows
+    # non chiama mai Amazon, verificato nel codice), solo a non perdere tutto
+    # il lavoro fatto se il thread venisse interrotto a metà (vedi
+    # _start_thread). 10x il vecchio _REPORT_CHUNK_SIZE (200, dimensionato
+    # per il tick di cron, non per un limite reale) — valore di partenza,
+    # non ancora misurato a fondo su un catalogo molto grande.
+    _ROW_COMMIT_BATCH = 2000
 
-        # Fase 1: crea il report
-        if not report_id:
+    @api.model
+    def _thread_full_import(self, db, uid, ctx, log_id):
+        """
+        Sostituisce la vecchia state machine a cron-a-tick (_cron_full_import_chunk,
+        rimossa): un unico thread continuo che scorre tutti i marketplace in
+        coda, per ciascuno crea il report, aspetta che sia pronto con poll
+        stretti (non più il tick da 2 minuti), lo scarica e elabora tutte le
+        righe senza aspettare nulla tra un chunk e l'altro — vedi
+        progetto-sync-thread-invece-di-cron.md per il ragionamento completo.
+        Controlla ad ogni marketplace se il log è stato fermato dall'esterno
+        (action_stop_import/action_mark_done impostano import_state≠'running')
+        prima di proseguire — non può interrompere un report/chunk già in
+        corso, ma può fermarsi tra un marketplace e il successivo.
+        """
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from odoo.addons.ke_amazon_sync.services.sp_api_client import SpApiClient
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        import time
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            SyncLog = env['ke.amazon.sync.log']
+            log_rec = SyncLog.browse(log_id)
+            params = env['ir.config_parameter'].sudo()
             try:
-                report_id = client.request_listings_report()
-            except Exception as e:
-                _log.error('Creazione report Amazon fallita: %s', e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                update_existing = params.get_param('ke_amazon_sync.import_update_existing', 'True') == 'True'
+                max_products = int(params.get_param('ke_amazon_sync.import_max_products', '0') or 0)
+
+                while True:
+                    if params.get_param('ke_amazon_sync.import_state') != 'running':
+                        _log.info('Thread full_import: fermato dall\'esterno, esco senza completare.')
+                        return
+
+                    marketplace = SyncLog._full_import_pop_marketplace(params)
+                    if not marketplace:
+                        break
+                    env.cr.commit()
+
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+
+                    if max_products and max_products <= 1000:
+                        # Fase 0: catalogo piccolo (solo per test), paginazione
+                        # classica — nessuna attesa artificiale tra una pagina
+                        # e l'altra, a differenza del vecchio tick di cron.
+                        page_token = None
+                        while not (max_products and log_rec.products_total >= max_products):
+                            next_token = engine.full_import_chunk(
+                                log_rec, page_token=page_token, update_existing=update_existing,
+                            )
+                            env.cr.commit()
+                            if not next_token:
+                                break
+                            page_token = next_token
+                    else:
+                        # Fasi 1-3: import completo via Reports API (nessun limite).
+                        report_id = client.request_listings_report()
+                        msg = f'[{marketplace.code}] Report Amazon richiesto (ID: {report_id}). In attesa...'
+                        SyncLog._append_log_line(log_rec, msg)
+
+                        document_id = None
+                        deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
+                        while time.monotonic() < deadline:
+                            time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
+                            document_id = client.check_report_ready(report_id)
+                            if document_id:
+                                break
+                        if not document_id:
+                            raise RuntimeError(
+                                f'Report {report_id} ({marketplace.code}) non pronto dopo '
+                                f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                            )
+
+                        rows = client.download_report_rows(document_id)
+                        msg = f'[{marketplace.code}] Report scaricato: {len(rows)} prodotti totali. Elaborazione...'
+                        SyncLog._append_log_line(log_rec, msg)
+
+                        row_offset = 0
+                        while row_offset is not None:
+                            row_offset = engine.full_import_report_rows(
+                                log_rec, rows, row_offset, SyncLog._ROW_COMMIT_BATCH, update_existing,
+                            )
+                            env.cr.commit()
+
+                    msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
+                    SyncLog._append_log_line(log_rec, msg)
+                    params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
+                    env.cr.commit()
+
+                SyncLog._finish_full_import(log_rec)
+            except Exception as exc:
+                _log.error('Thread full_import fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_import_cron()
-                return
-            params.set_param('ke_amazon_sync.import_report_id', report_id)
-            msg = f'Report Amazon richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
-            log_rec.write({'log_lines': msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 2: scarica il report quando è pronto
-        if not attach_id_s:
-            try:
-                document_id = client.check_report_ready(report_id)
-            except Exception as e:
-                _log.error('Errore controllo stato report %s: %s', report_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_import_cron()
-                return
-
-            if document_id is None:
-                current_log = log_rec.log_lines or ''
-                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
-                self.env.cr.commit()
-                return
-
-            try:
-                rows = client.download_report_rows(document_id)
-            except Exception as e:
-                _log.error('Download report %s fallito: %s', document_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_import_cron()
-                return
-
-            rows_json = json.dumps(rows, ensure_ascii=False)
-            attachment = self.env['ir.attachment'].create({
-                'name': f'amazon_report_{log_rec.id}.json',
-                'type': 'binary',
-                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
-                'res_model': 'ke.amazon.sync.log',
-                'res_id': log_rec.id,
-            })
-            params.set_param('ke_amazon_sync.import_report_attach_id', str(attachment.id))
-            params.set_param('ke_amazon_sync.import_report_row_offset', '0')
-            msg = f'Report scaricato: {len(rows)} prodotti totali. Avvio elaborazione...'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 3: elabora righe a chunk
-        try:
-            attach_id = int(attach_id_s)
-            row_offset = int(row_offset_s or '0')
-            attachment = self.env['ir.attachment'].browse(attach_id)
-            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
-        except Exception as e:
-            _log.error('Errore lettura allegato report: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_import_cron()
-            return
-
-        try:
-            next_offset = SyncEngine(self.env, client).full_import_report_rows(
-                log_rec, rows, row_offset, self._REPORT_CHUNK_SIZE, update_existing,
-            )
-        except Exception as e:
-            _log.error('Elaborazione report rows fallita: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_import_cron()
-            return
-
-        if next_offset is not None:
-            params.set_param('ke_amazon_sync.import_report_row_offset', str(next_offset))
-            _log.info('Report import: %d/%d righe elaborate', next_offset, len(rows))
-        else:
-            # Tutte le righe elaborate: pulizia e chiusura del marketplace corrente
-            attachment.unlink()
-            params.set_param('ke_amazon_sync.import_report_id', '')
-            params.set_param('ke_amazon_sync.import_report_attach_id', '')
-            params.set_param('ke_amazon_sync.import_report_row_offset', '')
-            self._full_import_finish_marketplace(log_rec, params, marketplace)
+                env.cr.commit()
 
     def _full_import_pop_marketplace(self, params):
         """
-        Estrae il prossimo marketplace dalla coda (import_marketplace_queue),
-        lo imposta come corrente e azzera lo stato di report/pagina per il
-        nuovo segmento (ogni marketplace ha il proprio report indipendente).
-        Ritorna il record ke.amazon.marketplace, o un recordset vuoto se la
-        coda è esaurita (import completo su tutti i marketplace).
+        Estrae il prossimo marketplace dalla coda (import_marketplace_queue)
+        e lo imposta come corrente. Ritorna il record ke.amazon.marketplace,
+        o un recordset vuoto se la coda è esaurita (import completo su tutti
+        i marketplace attivi).
         """
         queue_s = params.get_param('ke_amazon_sync.import_marketplace_queue', '')
         queue_ids = [int(i) for i in queue_s.split(',') if i]
@@ -645,29 +665,7 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.import_marketplace_queue',
                           ','.join(str(i) for i in rest))
         params.set_param('ke_amazon_sync.import_current_marketplace_id', str(next_id))
-        params.set_param('ke_amazon_sync.import_page_token', '')
-        params.set_param('ke_amazon_sync.import_report_id', '')
-        params.set_param('ke_amazon_sync.import_report_attach_id', '')
-        params.set_param('ke_amazon_sync.import_report_row_offset', '')
         return self.env['ke.amazon.marketplace'].browse(next_id)
-
-    def _full_import_finish_marketplace(self, log_rec, params, marketplace):
-        """
-        Chiude il segmento di import per 'marketplace'. Se ce ne sono altri in
-        coda, lascia lo stato 'running': il prossimo tick del cron passerà al
-        successivo (vedi _full_import_pop_marketplace). Altrimenti chiude
-        l'intero import (vedi _finish_full_import).
-        """
-        if marketplace:
-            msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-        params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
-
-        queue_s = params.get_param('ke_amazon_sync.import_marketplace_queue', '')
-        if queue_s:
-            self.env.cr.commit()
-            return
-        self._finish_full_import(log_rec)
 
     def _finish_full_import(self, log_rec):
         """
@@ -684,23 +682,11 @@ class AmazonSyncLog(models.Model):
         params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.import_state', 'idle')
         self.env.cr.commit()
-        self._disable_import_cron()
 
         try:
             self.action_start_fnsku_import(name_prefix='Import FNSKU (dopo import completo)')
         except Exception as exc:
             _log.warning('Import FNSKU automatico non avviato dopo il full import: %s', exc)
-
-    def _disable_import_cron(self):
-        cron = self.env.ref('ke_amazon_sync.cron_full_import_chunk', raise_if_not_found=False)
-        if cron:
-            try:
-                cron.sudo().active = False
-            except Exception:
-                # Non è possibile disabilitare il cron mentre è in esecuzione;
-                # al prossimo ciclo troverà import_state='idle' e uscirà subito.
-                _log.warning('_disable_import_cron: impossibile disabilitare da dentro il cron, '
-                             'sarà idle al prossimo ciclo.')
 
     def _cron_check_new_products(self):
         client = SpApiClient(self.env)
@@ -727,20 +713,20 @@ class AmazonSyncLog(models.Model):
             _log.error('Cron check_new_products fallito: %s', e, exc_info=True)
             log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
 
-    def _cron_reconcile_store(self, name_prefix='Riconciliazione store'):
+    def action_start_reconcile(self, name_prefix='Riconciliazione store'):
         """
         Avvia una nuova riconciliazione via Reports API (nessun limite di prodotti),
-        una per ogni marketplace attivo (stessa coda del full import, vedi
-        _full_import_pop_marketplace / _reconcile_pop_marketplace).
-        Crea il log, imposta i parametri di stato e abilita il cron di elaborazione chunk.
-        Usata sia dal cron automatico sia dal trigger manuale (impostazioni).
-        Ritorna il log creato, o None se non è stato possibile avviarla.
+        una per ogni marketplace attivo — stesso pattern di action_start_full_import
+        (coda marketplace nei parametri, un thread di background continuo invece
+        del vecchio cron a tick, vedi _thread_reconcile).
+        Usata sia dal cron automatico (avvio periodico) sia dal trigger manuale
+        (impostazioni). Ritorna il log creato, o None se non è stato possibile avviarla.
         """
         client = SpApiClient(self.env)
         try:
             client.validate_credentials()
         except ValueError:
-            _log.warning('Cron reconcile_store saltato: credenziali SP-API non configurate.')
+            _log.warning('Avvio riconciliazione saltato: credenziali SP-API non configurate.')
             return None
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.reconcile_state') == 'running':
@@ -750,7 +736,7 @@ class AmazonSyncLog(models.Model):
         marketplaces = self.env['ke.amazon.marketplace'].search([('active', '=', True)])
         if not marketplaces:
             _log.warning(
-                'Cron reconcile_store saltato: nessun marketplace attivo. '
+                'Avvio riconciliazione saltato: nessun marketplace attivo. '
                 'Usa "Rileva marketplace attivi" (Impostazioni → Amazon) o attivane uno a mano.'
             )
             return None
@@ -765,170 +751,94 @@ class AmazonSyncLog(models.Model):
         })
         params.set_param('ke_amazon_sync.reconcile_state', 'running')
         params.set_param('ke_amazon_sync.reconcile_log_id', str(log_rec.id))
-        params.set_param('ke_amazon_sync.reconcile_report_id', '')
-        params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
         params.set_param('ke_amazon_sync.reconcile_marketplace_queue',
                           ','.join(str(i) for i in marketplaces.ids))
         params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
         self.env.cr.commit()
-        cron = self.env.ref('ke_amazon_sync.cron_reconcile_chunk', raise_if_not_found=False)
-        if cron:
-            cron.sudo().active = True
+
+        self._start_thread('_thread_reconcile', log_rec.id)
         return log_rec
 
-    def _cron_reconcile_chunk(self):
+    @api.model
+    def _thread_reconcile(self, db, uid, ctx, log_id):
         """
-        Cron di elaborazione riconciliazione (ogni 2 min, abilitato da _cron_reconcile_store).
-        State machine a tre fasi:
-          Fase 1 – nessun report_id: richiede il report Amazon
-          Fase 2 – report_id presente ma nessun allegato: controlla/scarica il report
-          Fase 3 – allegato presente: esegue la riconciliazione e chiude
+        Sostituisce il vecchio cron a tick (_cron_reconcile_chunk, rimosso):
+        un unico thread continuo che scorre tutti i marketplace in coda,
+        stesso schema di _thread_full_import (crea report → poll stretto →
+        scarica → elabora, senza attendere nulla tra un marketplace e
+        l'altro). A differenza del vecchio schema, le righe scaricate restano
+        in memoria tra la fase di download e quella di riconciliazione
+        (nello stesso thread, senza attese) — non serve più salvarle in un
+        allegato temporaneo per sopravvivere a un tick di cron successivo.
         """
-        import base64
-        import json
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from odoo.addons.ke_amazon_sync.services.sp_api_client import SpApiClient
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        import time
 
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.reconcile_state') != 'running':
-            self._disable_reconcile_cron()
-            return
-
-        client = SpApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except ValueError:
-            _log.warning('Cron reconcile_chunk saltato: credenziali SP-API non configurate.')
-            return
-
-        log_id = int(params.get_param('ke_amazon_sync.reconcile_log_id', '0') or 0)
-        if not log_id:
-            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-            self.env.cr.commit()
-            self._disable_reconcile_cron()
-            return
-
-        log_rec = self.browse(log_id)
-        if not log_rec.exists():
-            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-            self.env.cr.commit()
-            self._disable_reconcile_cron()
-            return
-
-        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
-        # in coda (stesso pattern del full import).
-        current_mp_id = int(
-            params.get_param('ke_amazon_sync.reconcile_current_marketplace_id', '0') or 0
-        )
-        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
-        if not marketplace.exists():
-            marketplace = self._reconcile_pop_marketplace(params)
-            if not marketplace:
-                self._finish_reconcile(log_rec)
-                return
-            self.env.cr.commit()
-        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
-
-        report_id = params.get_param('ke_amazon_sync.reconcile_report_id', '')
-        attach_id_s = params.get_param('ke_amazon_sync.reconcile_report_attach_id', '')
-
-        # Fase 1: crea il report
-        if not report_id:
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            SyncLog = env['ke.amazon.sync.log']
+            log_rec = SyncLog.browse(log_id)
+            params = env['ir.config_parameter'].sudo()
             try:
-                report_id = client.request_listings_report()
-            except Exception as e:
-                _log.error('Creazione report per riconciliazione fallita: %s', e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                while True:
+                    if params.get_param('ke_amazon_sync.reconcile_state') != 'running':
+                        _log.info('Thread reconcile: fermato dall\'esterno, esco senza completare.')
+                        return
+
+                    marketplace = SyncLog._reconcile_pop_marketplace(params)
+                    if not marketplace:
+                        break
+                    env.cr.commit()
+
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+
+                    report_id = client.request_listings_report()
+                    msg = f'[{marketplace.code}] Report Amazon richiesto (ID: {report_id}). In attesa...'
+                    SyncLog._append_log_line(log_rec, msg)
+
+                    document_id = None
+                    deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
+                    while time.monotonic() < deadline:
+                        time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
+                        document_id = client.check_report_ready(report_id)
+                        if document_id:
+                            break
+                    if not document_id:
+                        raise RuntimeError(
+                            f'Report {report_id} ({marketplace.code}) non pronto dopo '
+                            f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                        )
+
+                    rows = client.download_report_rows(document_id)
+                    msg = f'[{marketplace.code}] Report scaricato: {len(rows)} listing totali. Riconciliazione...'
+                    SyncLog._append_log_line(log_rec, msg)
+
+                    matched, only_odoo, only_amazon, errors = engine.reconcile_from_report_rows(log_rec, rows)
+                    _log.info('[%s] Riconciliazione: %d trovati, %d solo Odoo, %d solo Amazon, %d errori',
+                              marketplace.code, matched, only_odoo, only_amazon, errors)
+
+                    msg = f'Riconciliazione completata per {marketplace.name} ({marketplace.code}).'
+                    SyncLog._append_log_line(log_rec, msg)
+                    params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
+                    env.cr.commit()
+
+                SyncLog._finish_reconcile(log_rec)
+            except Exception as exc:
+                _log.error('Thread reconcile fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-                self.env.cr.commit()
-                self._disable_reconcile_cron()
-                return
-            params.set_param('ke_amazon_sync.reconcile_report_id', report_id)
-            msg = f'Report Amazon richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
-            log_rec.write({'log_lines': msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 2: scarica il report quando è pronto
-        if not attach_id_s:
-            try:
-                document_id = client.check_report_ready(report_id)
-            except Exception as e:
-                _log.error('Errore controllo stato report %s: %s', report_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-                self.env.cr.commit()
-                self._disable_reconcile_cron()
-                return
-
-            if document_id is None:
-                current_log = log_rec.log_lines or ''
-                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
-                self.env.cr.commit()
-                return
-
-            try:
-                rows = client.download_report_rows(document_id)
-            except Exception as e:
-                _log.error('Download report riconciliazione %s fallito: %s', document_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-                self.env.cr.commit()
-                self._disable_reconcile_cron()
-                return
-
-            rows_json = json.dumps(rows, ensure_ascii=False)
-            attachment = self.env['ir.attachment'].create({
-                'name': f'amazon_reconcile_report_{log_rec.id}.json',
-                'type': 'binary',
-                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
-                'res_model': 'ke.amazon.sync.log',
-                'res_id': log_rec.id,
-            })
-            params.set_param('ke_amazon_sync.reconcile_report_attach_id', str(attachment.id))
-            msg = f'Report scaricato: {len(rows)} listing totali. Avvio riconciliazione...'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 3: esegui la riconciliazione
-        try:
-            attach_id = int(attach_id_s)
-            attachment = self.env['ir.attachment'].browse(attach_id)
-            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
-        except Exception as e:
-            _log.error('Errore lettura allegato report riconciliazione: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-            self.env.cr.commit()
-            self._disable_reconcile_cron()
-            return
-
-        try:
-            engine = SyncEngine(self.env, client)
-            matched, only_odoo, only_amazon, errors = engine.reconcile_from_report_rows(log_rec, rows)
-            _log.info('Riconciliazione: %d trovati, %d solo Odoo, %d solo Amazon, %d errori',
-                      matched, only_odoo, only_amazon, errors)
-        except Exception as e:
-            _log.error('Cron reconcile_chunk fallito: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.reconcile_state', 'idle')
-            self.env.cr.commit()
-            self._disable_reconcile_cron()
-            return
-
-        attachment.unlink()
-        params.set_param('ke_amazon_sync.reconcile_report_id', '')
-        params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
-        self._reconcile_finish_marketplace(log_rec, params, marketplace)
+                env.cr.commit()
 
     def _reconcile_pop_marketplace(self, params):
         """
-        Estrae il prossimo marketplace dalla coda (reconcile_marketplace_queue),
-        lo imposta come corrente e azzera lo stato di report per il nuovo
-        segmento (ogni marketplace ha il proprio report indipendente).
-        Ritorna il record ke.amazon.marketplace, o un recordset vuoto se la
-        coda è esaurita (riconciliazione completa su tutti i marketplace).
+        Estrae il prossimo marketplace dalla coda (reconcile_marketplace_queue)
+        e lo imposta come corrente. Ritorna il record ke.amazon.marketplace,
+        o un recordset vuoto se la coda è esaurita (riconciliazione completa
+        su tutti i marketplace attivi).
         """
         queue_s = params.get_param('ke_amazon_sync.reconcile_marketplace_queue', '')
         queue_ids = [int(i) for i in queue_s.split(',') if i]
@@ -938,27 +848,7 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.reconcile_marketplace_queue',
                           ','.join(str(i) for i in rest))
         params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', str(next_id))
-        params.set_param('ke_amazon_sync.reconcile_report_id', '')
-        params.set_param('ke_amazon_sync.reconcile_report_attach_id', '')
         return self.env['ke.amazon.marketplace'].browse(next_id)
-
-    def _reconcile_finish_marketplace(self, log_rec, params, marketplace):
-        """
-        Chiude il segmento di riconciliazione per 'marketplace'. Se ce ne sono
-        altri in coda, lascia lo stato 'running': il prossimo tick del cron
-        passerà al successivo (vedi _reconcile_pop_marketplace). Altrimenti
-        chiude l'intera riconciliazione (vedi _finish_reconcile).
-        """
-        if marketplace:
-            msg = f'Riconciliazione completata per {marketplace.name} ({marketplace.code}).'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-        params.set_param('ke_amazon_sync.reconcile_current_marketplace_id', '')
-
-        queue_s = params.get_param('ke_amazon_sync.reconcile_marketplace_queue', '')
-        if queue_s:
-            self.env.cr.commit()
-            return
-        self._finish_reconcile(log_rec)
 
     def _finish_reconcile(self, log_rec):
         """Chiude la riconciliazione: coda marketplace esaurita."""
@@ -967,16 +857,6 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.reconcile_state', 'idle')
         params.set_param('ke_amazon_sync.reconcile_log_id', '')
         self.env.cr.commit()
-        self._disable_reconcile_cron()
-
-    def _disable_reconcile_cron(self):
-        cron = self.env.ref('ke_amazon_sync.cron_reconcile_chunk', raise_if_not_found=False)
-        if cron:
-            try:
-                cron.sudo().active = False
-            except Exception:
-                _log.warning('_disable_reconcile_cron: impossibile disabilitare da dentro il cron, '
-                             'sarà idle al prossimo ciclo.')
 
     _CAT_MAP_CHUNK_SIZE = 50
 
@@ -1121,7 +1001,7 @@ class AmazonSyncLog(models.Model):
         Avvia automaticamente un nuovo import ordini, se non ce n'è già uno in
         corso. Schedulato periodicamente per tenere sincronizzati gli ordini senza
         bisogno di avviarlo manualmente ogni volta (stesso pattern di
-        _cron_reconcile_store per i prodotti).
+        action_start_reconcile per i prodotti).
         """
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.orders_import_state') == 'running':
@@ -1139,7 +1019,7 @@ class AmazonSyncLog(models.Model):
         """
         Avvia l'import degli ordini Amazon degli ultimi N giorni, su tutti i
         marketplace attivi (Magazzino → Amazon Sync → Marketplace) — un
-        marketplace alla volta, in coda (vedi _cron_import_orders_chunk).
+        marketplace alla volta, in coda (vedi _thread_import_orders).
         """
         from datetime import timedelta, timezone
         from odoo.exceptions import UserError
@@ -1169,18 +1049,13 @@ class AmazonSyncLog(models.Model):
         })
         params.set_param('ke_amazon_sync.orders_import_state', 'running')
         params.set_param('ke_amazon_sync.orders_import_log_id', str(log_rec.id))
-        params.set_param('ke_amazon_sync.orders_import_next_token', '')
         params.set_param('ke_amazon_sync.orders_import_created_after', created_after)
-        params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
-        params.set_param('ke_amazon_sync.orders_import_offset', '0')
         params.set_param('ke_amazon_sync.orders_import_marketplace_queue',
                           ','.join(str(i) for i in marketplaces.ids))
         params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
         self.env.cr.commit()
 
-        cron = self.env.ref('ke_amazon_sync.cron_import_orders_chunk', raise_if_not_found=False)
-        if cron:
-            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+        self._start_thread('_thread_import_orders', log_rec.id)
 
         return {
             'type': 'ir.actions.act_window',
@@ -1190,157 +1065,113 @@ class AmazonSyncLog(models.Model):
             'target': 'current',
         }
 
-    def _cron_import_orders_chunk(self):
+    @api.model
+    def _thread_import_orders(self, db, uid, ctx, log_id):
         """
-        State machine a due fasi, per evitare che una singola invocazione superi
-        il --limit-time-real-cron del server (il rate-limit Amazon di 2s per ordine
-        può far durare una pagina intera diversi minuti):
-          Fase 1 – nessuna pagina in cache: scarica una pagina di ordini Amazon
-                   (fino a 100) e la mette in cache in un ir.attachment
-          Fase 2 – pagina in cache: elabora un blocco di _ORDERS_CHUNK_SIZE ordini
-                   per invocazione, finché la pagina non è esaurita
-        Multi-marketplace: un marketplace alla volta, in coda (vedi
-        orders_import_marketplace_queue/orders_import_current_marketplace_id,
-        popolati da action_start_import_orders). Quando un marketplace è
-        esaurito si passa al successivo in coda invece di chiudere subito
-        l'intero import — vedi _orders_import_finish_marketplace.
+        Sostituisce il vecchio cron a tick (_cron_import_orders_chunk, rimosso).
+        A differenza delle altre quattro sync a thread, qui non tutto passa da
+        un report: getOrders (header/buyer/indirizzo) resta per-marketplace,
+        invariato, non è mai stato il collo di bottiglia. Il vero collo di
+        bottiglia era getOrderItems (2s/ordine, un ordine alla volta) — questo
+        thread lo elimina scaricando UNA volta sola, prima del loop
+        marketplace, il report bulk articoli-ordine (GET_FLAT_FILE_ALL_ORDERS
+        _DATA_BY_ORDER_DATE_GENERAL, marketplaceIds = tutti gli attivi in
+        un'unica richiesta — non uno a testa, vedi progetto-sync-ordini-report.md
+        §3) e lo tiene in memoria (items_by_order_id) per tutta la durata del
+        thread: mai persistito, non serve sopravvivere a un tick successivo
+        perché non c'è più un tick.
         """
-        import base64
-        import json
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from odoo.addons.ke_amazon_sync.services.sp_api_client import SpApiClient
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        from datetime import timezone
+        import time
 
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.orders_import_state') != 'running':
-            self._disable_orders_import_cron()
-            return
-
-        client = SpApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except ValueError as e:
-            _log.warning('Cron import_orders saltato: %s', e)
-            log_id = int(params.get_param('ke_amazon_sync.orders_import_log_id', '0') or 0)
-            if log_id:
-                log_rec = self.browse(log_id)
-                if log_rec.exists():
-                    log_rec.write({'state': 'error', 'error_summary': str(e),
-                                   'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_orders_import_cron()
-            return
-
-        log_id = int(params.get_param('ke_amazon_sync.orders_import_log_id', '0') or 0)
-        if not log_id:
-            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_orders_import_cron()
-            return
-
-        log_rec = self.browse(log_id)
-        if not log_rec.exists():
-            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_orders_import_cron()
-            return
-
-        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
-        # in coda. Coda vuota = import completo su tutti i marketplace attivi.
-        current_mp_id = int(
-            params.get_param('ke_amazon_sync.orders_import_current_marketplace_id', '0') or 0
-        )
-        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
-        if not marketplace.exists():
-            marketplace = self._orders_import_pop_marketplace(params)
-            if not marketplace:
-                log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_orders_import_cron()
-                return
-            self.env.cr.commit()
-
-        created_after = params.get_param('ke_amazon_sync.orders_import_created_after', '')
-        page_attach_id_s = params.get_param('ke_amazon_sync.orders_import_page_attach_id', '')
-        mp_client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
-        engine = SyncEngine(self.env, mp_client)
-
-        # Fase 1: nessuna pagina in cache → scaricane una nuova
-        if not page_attach_id_s:
-            next_token = params.get_param('ke_amazon_sync.orders_import_next_token') or None
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            SyncLog = env['ke.amazon.sync.log']
+            log_rec = SyncLog.browse(log_id)
+            params = env['ir.config_parameter'].sudo()
             try:
-                orders, new_next_token = engine.fetch_orders_page(created_after, next_token)
-            except Exception as e:
-                _log.error('Download pagina ordini fallito: %s', e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                created_after = params.get_param('ke_amazon_sync.orders_import_created_after', '')
+                all_marketplaces = env['ke.amazon.marketplace'].search([('active', '=', True)])
+                data_end_time = fields.Datetime.now().replace(tzinfo=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+                report_client = SpApiClient(env, marketplace_id=all_marketplaces[0].marketplace_id)
+                report_id = report_client.request_orders_report(
+                    created_after, data_end_time,
+                    marketplace_ids=all_marketplaces.mapped('marketplace_id'),
+                )
+                msg = f'Report articoli-ordine richiesto (ID: {report_id}). In attesa...'
+                SyncLog._append_log_line(log_rec, msg)
+
+                document_id = None
+                deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
+                while time.monotonic() < deadline:
+                    time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
+                    document_id = report_client.check_report_ready(report_id)
+                    if document_id:
+                        break
+                if not document_id:
+                    raise RuntimeError(
+                        f'Report articoli-ordine {report_id} non pronto dopo '
+                        f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                    )
+
+                rows = report_client.download_report_rows(document_id)
+                items_by_order_id = {}
+                for row in rows:
+                    order_id = row.get('amazon-order-id', '')
+                    if order_id:
+                        items_by_order_id.setdefault(order_id, []).append(row)
+                msg = (f'Report scaricato: {len(rows)} righe articolo per '
+                       f'{len(items_by_order_id)} ordini distinti.')
+                SyncLog._append_log_line(log_rec, msg)
+
+                while True:
+                    if params.get_param('ke_amazon_sync.orders_import_state') != 'running':
+                        _log.info('Thread import_orders: fermato dall\'esterno, esco senza completare.')
+                        return
+
+                    marketplace = SyncLog._orders_import_pop_marketplace(params)
+                    if not marketplace:
+                        break
+                    env.cr.commit()
+
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+
+                    next_token = None
+                    while True:
+                        orders, next_token = engine.fetch_orders_page(created_after, next_token)
+                        offset = 0
+                        while offset is not None and orders:
+                            offset = engine.import_orders_chunk(
+                                log_rec, orders, offset, items_by_order_id=items_by_order_id,
+                            )
+                            env.cr.commit()
+                        if not next_token:
+                            break
+
+                    msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
+                    SyncLog._append_log_line(log_rec, msg)
+                    params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
+                    env.cr.commit()
+
+                SyncLog._finish_import_orders(log_rec)
+            except Exception as exc:
+                _log.error('Thread import_orders fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_orders_import_cron()
-                return
-
-            if not orders:
-                self._orders_import_finish_marketplace(log_rec, params, marketplace)
-                return
-
-            orders_json = json.dumps(orders, ensure_ascii=False)
-            attachment = self.env['ir.attachment'].create({
-                'name': f'amazon_orders_page_{log_rec.id}.json',
-                'type': 'binary',
-                'datas': base64.b64encode(orders_json.encode('utf-8')).decode(),
-                'res_model': 'ke.amazon.sync.log',
-                'res_id': log_rec.id,
-            })
-            params.set_param('ke_amazon_sync.orders_import_page_attach_id', str(attachment.id))
-            params.set_param('ke_amazon_sync.orders_import_offset', '0')
-            params.set_param('ke_amazon_sync.orders_import_next_token', new_next_token or '')
-            self.env.cr.commit()
-            return
-
-        # Fase 2: pagina in cache → elabora un blocco
-        try:
-            attach_id = int(page_attach_id_s)
-            attachment = self.env['ir.attachment'].browse(attach_id)
-            orders = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
-        except Exception as e:
-            _log.error('Errore lettura pagina ordini in cache: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_orders_import_cron()
-            return
-
-        offset = int(params.get_param('ke_amazon_sync.orders_import_offset', '0') or 0)
-
-        try:
-            new_offset = engine.import_orders_chunk(log_rec, orders, offset)
-        except Exception as e:
-            _log.error('Cron import_orders_chunk fallito: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.orders_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_orders_import_cron()
-            return
-
-        if new_offset is not None:
-            params.set_param('ke_amazon_sync.orders_import_offset', str(new_offset))
-            return
-
-        # Pagina esaurita: pulizia; se non c'è un'altra pagina per questo
-        # marketplace, passa al successivo in coda (o chiudi se era l'ultimo)
-        attachment.unlink()
-        params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
-        params.set_param('ke_amazon_sync.orders_import_offset', '0')
-        next_token = params.get_param('ke_amazon_sync.orders_import_next_token', '')
-        if not next_token:
-            self._orders_import_finish_marketplace(log_rec, params, marketplace)
-        else:
-            self.env.cr.commit()
+                env.cr.commit()
 
     def _orders_import_pop_marketplace(self, params):
         """
-        Estrae il prossimo marketplace dalla coda (orders_import_marketplace_queue),
-        lo imposta come corrente e azzera lo stato di paginazione per il nuovo
-        segmento. Ritorna il record ke.amazon.marketplace, o un recordset vuoto
-        se la coda è esaurita (import completo su tutti i marketplace).
+        Estrae il prossimo marketplace dalla coda (orders_import_marketplace_queue)
+        e lo imposta come corrente. Ritorna il record ke.amazon.marketplace, o
+        un recordset vuoto se la coda è esaurita (import completo su tutti i
+        marketplace attivi).
         """
         queue_s = params.get_param('ke_amazon_sync.orders_import_marketplace_queue', '')
         queue_ids = [int(i) for i in queue_s.split(',') if i]
@@ -1350,41 +1181,14 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.orders_import_marketplace_queue',
                           ','.join(str(i) for i in rest))
         params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', str(next_id))
-        params.set_param('ke_amazon_sync.orders_import_next_token', '')
-        params.set_param('ke_amazon_sync.orders_import_page_attach_id', '')
-        params.set_param('ke_amazon_sync.orders_import_offset', '0')
         return self.env['ke.amazon.marketplace'].browse(next_id)
 
-    def _orders_import_finish_marketplace(self, log_rec, params, marketplace):
-        """
-        Chiude il segmento di import per 'marketplace'. Se ce ne sono altri in
-        coda, lascia lo stato 'running': il prossimo tick del cron passerà al
-        successivo (vedi _orders_import_pop_marketplace). Altrimenti chiude
-        l'intero import.
-        """
-        if marketplace:
-            msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-        params.set_param('ke_amazon_sync.orders_import_current_marketplace_id', '')
-        params.set_param('ke_amazon_sync.orders_import_next_token', '')
-
-        queue_s = params.get_param('ke_amazon_sync.orders_import_marketplace_queue', '')
-        if queue_s:
-            self.env.cr.commit()
-            return
-
+    def _finish_import_orders(self, log_rec):
+        """Chiude l'import ordini: coda marketplace esaurita."""
         log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_amazon_sync.orders_import_state', 'idle')
         self.env.cr.commit()
-        self._disable_orders_import_cron()
-
-    def _disable_orders_import_cron(self):
-        cron = self.env.ref('ke_amazon_sync.cron_import_orders_chunk', raise_if_not_found=False)
-        if cron:
-            try:
-                cron.sudo().active = False
-            except Exception:
-                _log.warning('_disable_orders_import_cron: impossibile disabilitare il cron.')
 
     # ------------------------------------------------------------------
     # Sync Giacenze FBA
@@ -1521,7 +1325,7 @@ class AmazonSyncLog(models.Model):
         """
         Avvia automaticamente una nuova sync giacenze FBA, se non ce n'è già una
         in corso. Schedulata periodicamente (ogni N ore) — stesso pattern di
-        _cron_reconcile_store/_cron_import_orders_store, ma qui la sync vera e
+        action_start_reconcile/_cron_import_orders_store, ma qui la sync vera e
         propria gira in un thread di background (vedi action_start_sync_fba_quantities),
         non in ulteriori cron a pagine.
         """
@@ -1621,17 +1425,13 @@ class AmazonSyncLog(models.Model):
         })
         params.set_param('ke_amazon_sync.returns_state', 'running')
         params.set_param('ke_amazon_sync.returns_log_id', str(log_rec.id))
-        params.set_param('ke_amazon_sync.returns_report_id', '')
-        params.set_param('ke_amazon_sync.returns_report_attach_id', '')
         params.set_param('ke_amazon_sync.returns_data_start_time', data_start_time)
         params.set_param('ke_amazon_sync.returns_marketplace_queue',
                           ','.join(str(i) for i in marketplaces.ids))
         params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
         self.env.cr.commit()
 
-        cron = self.env.ref('ke_amazon_sync.cron_returns_chunk', raise_if_not_found=False)
-        if cron:
-            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+        self._start_thread('_thread_returns', log_rec.id)
 
         return {
             'type': 'ir.actions.act_window',
@@ -1641,160 +1441,87 @@ class AmazonSyncLog(models.Model):
             'target': 'current',
         }
 
-    def _cron_returns_chunk(self):
+    @api.model
+    def _thread_returns(self, db, uid, ctx, log_id):
         """
-        Cron di elaborazione resi (ogni 2 min, abilitato da action_start_returns_report).
-        State machine a tre fasi, stesso schema di _cron_reconcile_chunk:
-          Fase 1 – nessun report_id: richiede il report resi ad Amazon
-          Fase 2 – report_id presente ma nessun allegato: controlla/scarica il report
-          Fase 3 – allegato presente: abbina i resi agli ordini e chiude
+        Sostituisce il vecchio cron a tick (_cron_returns_chunk, rimosso):
+        un unico thread continuo che scorre tutti i marketplace in coda,
+        stesso schema di _thread_full_import/_thread_reconcile (crea report
+        → poll stretto → scarica → elabora, senza attendere nulla tra un
+        marketplace e l'altro). 'data_start_time' è calcolato una volta sola
+        da action_start_returns_report (relativo a "adesso", non a un
+        marketplace specifico) e riletto qui dal parametro.
         """
-        import base64
-        import json
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from odoo.addons.ke_amazon_sync.services.sp_api_client import SpApiClient
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        import time
 
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.returns_state') != 'running':
-            self._disable_returns_cron()
-            return
-
-        client = SpApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except ValueError:
-            _log.warning('Cron returns_chunk saltato: credenziali SP-API non configurate.')
-            return
-
-        log_id = int(params.get_param('ke_amazon_sync.returns_log_id', '0') or 0)
-        if not log_id:
-            params.set_param('ke_amazon_sync.returns_state', 'idle')
-            self.env.cr.commit()
-            self._disable_returns_cron()
-            return
-
-        log_rec = self.browse(log_id)
-        if not log_rec.exists():
-            params.set_param('ke_amazon_sync.returns_state', 'idle')
-            self.env.cr.commit()
-            self._disable_returns_cron()
-            return
-
-        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
-        # in coda (stesso pattern del full import/riconciliazione).
-        current_mp_id = int(
-            params.get_param('ke_amazon_sync.returns_current_marketplace_id', '0') or 0
-        )
-        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
-        if not marketplace.exists():
-            marketplace = self._returns_pop_marketplace(params)
-            if not marketplace:
-                self._finish_returns(log_rec)
-                return
-            self.env.cr.commit()
-        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
-
-        report_id = params.get_param('ke_amazon_sync.returns_report_id', '')
-        attach_id_s = params.get_param('ke_amazon_sync.returns_report_attach_id', '')
-
-        # Fase 1: crea il report
-        if not report_id:
-            data_start_time = params.get_param('ke_amazon_sync.returns_data_start_time', '')
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            SyncLog = env['ke.amazon.sync.log']
+            log_rec = SyncLog.browse(log_id)
+            params = env['ir.config_parameter'].sudo()
             try:
-                report_id = client.request_returns_report(data_start_time)
-            except Exception as e:
-                _log.error('Creazione report resi fallita: %s', e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                data_start_time = params.get_param('ke_amazon_sync.returns_data_start_time', '')
+
+                while True:
+                    if params.get_param('ke_amazon_sync.returns_state') != 'running':
+                        _log.info('Thread returns: fermato dall\'esterno, esco senza completare.')
+                        return
+
+                    marketplace = SyncLog._returns_pop_marketplace(params)
+                    if not marketplace:
+                        break
+                    env.cr.commit()
+
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+
+                    report_id = client.request_returns_report(data_start_time)
+                    msg = f'[{marketplace.code}] Report resi richiesto (ID: {report_id}). In attesa...'
+                    SyncLog._append_log_line(log_rec, msg)
+
+                    document_id = None
+                    deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
+                    while time.monotonic() < deadline:
+                        time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
+                        document_id = client.check_report_ready(report_id)
+                        if document_id:
+                            break
+                    if not document_id:
+                        raise RuntimeError(
+                            f'Report resi {report_id} ({marketplace.code}) non pronto dopo '
+                            f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                        )
+
+                    rows = client.download_report_rows(document_id)
+                    msg = f'[{marketplace.code}] Report scaricato: {len(rows)} resi totali. Abbinamento...'
+                    SyncLog._append_log_line(log_rec, msg)
+
+                    matched, not_found, errors = engine.process_returns_report_rows(log_rec, rows)
+                    _log.info('[%s] Import resi: %d abbinati, %d ordini non trovati, %d errori',
+                              marketplace.code, matched, not_found, errors)
+
+                    msg = f'Import resi completato per {marketplace.name} ({marketplace.code}).'
+                    SyncLog._append_log_line(log_rec, msg)
+                    params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
+                    env.cr.commit()
+
+                SyncLog._finish_returns(log_rec)
+            except Exception as exc:
+                _log.error('Thread returns fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.returns_state', 'idle')
-                self.env.cr.commit()
-                self._disable_returns_cron()
-                return
-            params.set_param('ke_amazon_sync.returns_report_id', report_id)
-            msg = f'Report resi richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 2: scarica il report quando è pronto
-        if not attach_id_s:
-            try:
-                document_id = client.check_report_ready(report_id)
-            except Exception as e:
-                _log.error('Errore controllo stato report resi %s: %s', report_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.returns_state', 'idle')
-                self.env.cr.commit()
-                self._disable_returns_cron()
-                return
-
-            if document_id is None:
-                current_log = log_rec.log_lines or ''
-                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
-                self.env.cr.commit()
-                return
-
-            try:
-                rows = client.download_report_rows(document_id)
-            except Exception as e:
-                _log.error('Download report resi %s fallito: %s', document_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.returns_state', 'idle')
-                self.env.cr.commit()
-                self._disable_returns_cron()
-                return
-
-            rows_json = json.dumps(rows, ensure_ascii=False)
-            attachment = self.env['ir.attachment'].create({
-                'name': f'amazon_returns_report_{log_rec.id}.json',
-                'type': 'binary',
-                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
-                'res_model': 'ke.amazon.sync.log',
-                'res_id': log_rec.id,
-            })
-            params.set_param('ke_amazon_sync.returns_report_attach_id', str(attachment.id))
-            msg = f'Report scaricato: {len(rows)} resi totali. Abbinamento agli ordini...'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 3: abbina i resi agli ordini
-        try:
-            attach_id = int(attach_id_s)
-            attachment = self.env['ir.attachment'].browse(attach_id)
-            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
-        except Exception as e:
-            _log.error('Errore lettura allegato report resi: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.returns_state', 'idle')
-            self.env.cr.commit()
-            self._disable_returns_cron()
-            return
-
-        try:
-            engine = SyncEngine(self.env, client)
-            matched, not_found, errors = engine.process_returns_report_rows(log_rec, rows)
-            _log.info('Import resi: %d abbinati, %d ordini non trovati, %d errori',
-                      matched, not_found, errors)
-        except Exception as e:
-            _log.error('Cron returns_chunk fallito: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.returns_state', 'idle')
-            self.env.cr.commit()
-            self._disable_returns_cron()
-            return
-
-        attachment.unlink()
-        params.set_param('ke_amazon_sync.returns_report_id', '')
-        params.set_param('ke_amazon_sync.returns_report_attach_id', '')
-        self._returns_finish_marketplace(log_rec, params, marketplace)
+                env.cr.commit()
 
     def _returns_pop_marketplace(self, params):
         """
-        Estrae il prossimo marketplace dalla coda (returns_marketplace_queue),
-        lo imposta come corrente e azzera lo stato di report per il nuovo
-        segmento (ogni marketplace ha il proprio report resi indipendente).
-        Ritorna il record ke.amazon.marketplace, o un recordset vuoto se la
-        coda è esaurita (import resi completo su tutti i marketplace).
+        Estrae il prossimo marketplace dalla coda (returns_marketplace_queue)
+        e lo imposta come corrente. Ritorna il record ke.amazon.marketplace,
+        o un recordset vuoto se la coda è esaurita (import resi completo su
+        tutti i marketplace attivi).
         """
         queue_s = params.get_param('ke_amazon_sync.returns_marketplace_queue', '')
         queue_ids = [int(i) for i in queue_s.split(',') if i]
@@ -1804,27 +1531,7 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.returns_marketplace_queue',
                           ','.join(str(i) for i in rest))
         params.set_param('ke_amazon_sync.returns_current_marketplace_id', str(next_id))
-        params.set_param('ke_amazon_sync.returns_report_id', '')
-        params.set_param('ke_amazon_sync.returns_report_attach_id', '')
         return self.env['ke.amazon.marketplace'].browse(next_id)
-
-    def _returns_finish_marketplace(self, log_rec, params, marketplace):
-        """
-        Chiude il segmento di import resi per 'marketplace'. Se ce ne sono altri
-        in coda, lascia lo stato 'running': il prossimo tick del cron passerà al
-        successivo (vedi _returns_pop_marketplace). Altrimenti chiude l'intero
-        import (vedi _finish_returns).
-        """
-        if marketplace:
-            msg = f'Import resi completato per {marketplace.name} ({marketplace.code}).'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-        params.set_param('ke_amazon_sync.returns_current_marketplace_id', '')
-
-        queue_s = params.get_param('ke_amazon_sync.returns_marketplace_queue', '')
-        if queue_s:
-            self.env.cr.commit()
-            return
-        self._finish_returns(log_rec)
 
     def _finish_returns(self, log_rec):
         """Chiude l'import resi: coda marketplace esaurita."""
@@ -1833,15 +1540,6 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.returns_state', 'idle')
         params.set_param('ke_amazon_sync.returns_log_id', '')
         self.env.cr.commit()
-        self._disable_returns_cron()
-
-    def _disable_returns_cron(self):
-        cron = self.env.ref('ke_amazon_sync.cron_returns_chunk', raise_if_not_found=False)
-        if cron:
-            try:
-                cron.sudo().active = False
-            except Exception:
-                _log.warning('_disable_returns_cron: impossibile disabilitare il cron.')
 
     # ------------------------------------------------------------------
     # Import FNSKU
@@ -1894,16 +1592,12 @@ class AmazonSyncLog(models.Model):
         })
         params.set_param('ke_amazon_sync.fnsku_import_state', 'running')
         params.set_param('ke_amazon_sync.fnsku_import_log_id', str(log_rec.id))
-        params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
-        params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
         params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue',
                           ','.join(str(i) for i in marketplaces.ids))
         params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
         self.env.cr.commit()
 
-        cron = self.env.ref('ke_amazon_sync.cron_fnsku_import_chunk', raise_if_not_found=False)
-        if cron:
-            cron.sudo().write({'active': True, 'nextcall': fields.Datetime.now()})
+        self._start_thread('_thread_fnsku_import', log_rec.id)
 
         return {
             'type': 'ir.actions.act_window',
@@ -1935,159 +1629,81 @@ class AmazonSyncLog(models.Model):
             return
         self.action_start_fnsku_import(name_prefix='Import FNSKU (automatico)')
 
-    def _cron_fnsku_import_chunk(self):
+    @api.model
+    def _thread_fnsku_import(self, db, uid, ctx, log_id):
         """
-        Cron di elaborazione import FNSKU (ogni 2 min, abilitato da
-        action_start_fnsku_import). State machine a tre fasi, stesso schema di
-        _cron_returns_chunk:
-          Fase 1 – nessun report_id: richiede il report ad Amazon
-          Fase 2 – report_id presente ma nessun allegato: controlla/scarica il report
-          Fase 3 – allegato presente: abbina le righe per SKU e chiude
+        Sostituisce il vecchio cron a tick (_cron_fnsku_import_chunk, rimosso):
+        un unico thread continuo che scorre tutti i marketplace in coda,
+        stesso schema di _thread_full_import/_thread_reconcile/_thread_returns.
         """
-        import base64
-        import json
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from odoo.addons.ke_amazon_sync.services.sp_api_client import SpApiClient
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        import time
 
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.fnsku_import_state') != 'running':
-            self._disable_fnsku_import_cron()
-            return
-
-        client = SpApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except ValueError:
-            _log.warning('Cron fnsku_import_chunk saltato: credenziali SP-API non configurate.')
-            return
-
-        log_id = int(params.get_param('ke_amazon_sync.fnsku_import_log_id', '0') or 0)
-        if not log_id:
-            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fnsku_import_cron()
-            return
-
-        log_rec = self.browse(log_id)
-        if not log_rec.exists():
-            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fnsku_import_cron()
-            return
-
-        # Marketplace corrente: se non ce n'è uno in corso, prendi il prossimo
-        # in coda (stesso pattern del full import/riconciliazione/resi).
-        current_mp_id = int(
-            params.get_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '0') or 0
-        )
-        marketplace = self.env['ke.amazon.marketplace'].browse(current_mp_id)
-        if not marketplace.exists():
-            marketplace = self._fnsku_import_pop_marketplace(params)
-            if not marketplace:
-                self._finish_fnsku_import(log_rec)
-                return
-            self.env.cr.commit()
-        client = SpApiClient(self.env, marketplace_id=marketplace.marketplace_id)
-
-        report_id = params.get_param('ke_amazon_sync.fnsku_import_report_id', '')
-        attach_id_s = params.get_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
-
-        # Fase 1: crea il report
-        if not report_id:
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            SyncLog = env['ke.amazon.sync.log']
+            log_rec = SyncLog.browse(log_id)
+            params = env['ir.config_parameter'].sudo()
             try:
-                report_id = client.request_fnsku_report()
-            except Exception as e:
-                _log.error('Creazione report FNSKU fallita: %s', e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
+                while True:
+                    if params.get_param('ke_amazon_sync.fnsku_import_state') != 'running':
+                        _log.info('Thread fnsku_import: fermato dall\'esterno, esco senza completare.')
+                        return
+
+                    marketplace = SyncLog._fnsku_import_pop_marketplace(params)
+                    if not marketplace:
+                        break
+                    env.cr.commit()
+
+                    client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                    engine = SyncEngine(env, client)
+
+                    report_id = client.request_fnsku_report()
+                    msg = f'[{marketplace.code}] Report FNSKU richiesto (ID: {report_id}). In attesa...'
+                    SyncLog._append_log_line(log_rec, msg)
+
+                    document_id = None
+                    deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
+                    while time.monotonic() < deadline:
+                        time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
+                        document_id = client.check_report_ready(report_id)
+                        if document_id:
+                            break
+                    if not document_id:
+                        raise RuntimeError(
+                            f'Report FNSKU {report_id} ({marketplace.code}) non pronto dopo '
+                            f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                        )
+
+                    rows = client.download_report_rows(document_id)
+                    msg = f'[{marketplace.code}] Report scaricato: {len(rows)} righe totali. Abbinamento per SKU...'
+                    SyncLog._append_log_line(log_rec, msg)
+
+                    matched, not_found, errors = engine.process_fnsku_report_rows(log_rec, rows)
+                    _log.info('[%s] Import FNSKU: %d abbinati, %d SKU non trovati, %d errori',
+                              marketplace.code, matched, not_found, errors)
+
+                    msg = f'Import FNSKU completato per {marketplace.name} ({marketplace.code}).'
+                    SyncLog._append_log_line(log_rec, msg)
+                    params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
+                    env.cr.commit()
+
+                SyncLog._finish_fnsku_import(log_rec)
+            except Exception as exc:
+                _log.error('Thread fnsku_import fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_fnsku_import_cron()
-                return
-            params.set_param('ke_amazon_sync.fnsku_import_report_id', report_id)
-            msg = f'Report FNSKU richiesto (ID: {report_id}). In attesa di elaborazione (1-10 minuti)...'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 2: scarica il report quando è pronto
-        if not attach_id_s:
-            try:
-                document_id = client.check_report_ready(report_id)
-            except Exception as e:
-                _log.error('Errore controllo stato report FNSKU %s: %s', report_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_fnsku_import_cron()
-                return
-
-            if document_id is None:
-                current_log = log_rec.log_lines or ''
-                log_rec.write({'log_lines': current_log + '\nReport ancora in elaborazione, attendo...'})
-                self.env.cr.commit()
-                return
-
-            try:
-                rows = client.download_report_rows(document_id)
-            except Exception as e:
-                _log.error('Download report FNSKU %s fallito: %s', document_id, e, exc_info=True)
-                log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-                params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-                self.env.cr.commit()
-                self._disable_fnsku_import_cron()
-                return
-
-            rows_json = json.dumps(rows, ensure_ascii=False)
-            attachment = self.env['ir.attachment'].create({
-                'name': f'amazon_fnsku_report_{log_rec.id}.json',
-                'type': 'binary',
-                'datas': base64.b64encode(rows_json.encode('utf-8')).decode(),
-                'res_model': 'ke.amazon.sync.log',
-                'res_id': log_rec.id,
-            })
-            params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', str(attachment.id))
-            msg = f'Report scaricato: {len(rows)} righe totali. Abbinamento per SKU...'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-            _log.info(msg)
-            self.env.cr.commit()
-            return
-
-        # Fase 3: abbina le righe per SKU
-        try:
-            attach_id = int(attach_id_s)
-            attachment = self.env['ir.attachment'].browse(attach_id)
-            rows = json.loads(base64.b64decode(attachment.datas).decode('utf-8'))
-        except Exception as e:
-            _log.error('Errore lettura allegato report FNSKU: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fnsku_import_cron()
-            return
-
-        try:
-            engine = SyncEngine(self.env, client)
-            matched, not_found, errors = engine.process_fnsku_report_rows(log_rec, rows)
-            _log.info('Import FNSKU: %d abbinati, %d SKU non trovati, %d errori',
-                      matched, not_found, errors)
-        except Exception as e:
-            _log.error('Cron fnsku_import_chunk fallito: %s', e, exc_info=True)
-            log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
-            params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
-            self.env.cr.commit()
-            self._disable_fnsku_import_cron()
-            return
-
-        attachment.unlink()
-        params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
-        params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
-        self._fnsku_import_finish_marketplace(log_rec, params, marketplace)
+                env.cr.commit()
 
     def _fnsku_import_pop_marketplace(self, params):
         """
-        Estrae il prossimo marketplace dalla coda (fnsku_import_marketplace_queue),
-        lo imposta come corrente e azzera lo stato di report per il nuovo
-        segmento. Ritorna il record ke.amazon.marketplace, o un recordset
-        vuoto se la coda è esaurita (import FNSKU completo).
+        Estrae il prossimo marketplace dalla coda (fnsku_import_marketplace_queue)
+        e lo imposta come corrente. Ritorna il record ke.amazon.marketplace, o
+        un recordset vuoto se la coda è esaurita (import FNSKU completo su
+        tutti i marketplace attivi).
         """
         queue_s = params.get_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
         queue_ids = [int(i) for i in queue_s.split(',') if i]
@@ -2097,27 +1713,7 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue',
                           ','.join(str(i) for i in rest))
         params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', str(next_id))
-        params.set_param('ke_amazon_sync.fnsku_import_report_id', '')
-        params.set_param('ke_amazon_sync.fnsku_import_report_attach_id', '')
         return self.env['ke.amazon.marketplace'].browse(next_id)
-
-    def _fnsku_import_finish_marketplace(self, log_rec, params, marketplace):
-        """
-        Chiude il segmento di import FNSKU per 'marketplace'. Se ce ne sono
-        altri in coda, lascia lo stato 'running': il prossimo tick del cron
-        passerà al successivo (vedi _fnsku_import_pop_marketplace). Altrimenti
-        chiude l'intero import (vedi _finish_fnsku_import).
-        """
-        if marketplace:
-            msg = f'Import FNSKU completato per {marketplace.name} ({marketplace.code}).'
-            log_rec.write({'log_lines': (log_rec.log_lines or '') + '\n' + msg})
-        params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
-
-        queue_s = params.get_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
-        if queue_s:
-            self.env.cr.commit()
-            return
-        self._finish_fnsku_import(log_rec)
 
     def _finish_fnsku_import(self, log_rec):
         """Chiude l'import FNSKU: coda marketplace esaurita."""
@@ -2126,12 +1722,3 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
         params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
         self.env.cr.commit()
-        self._disable_fnsku_import_cron()
-
-    def _disable_fnsku_import_cron(self):
-        cron = self.env.ref('ke_amazon_sync.cron_fnsku_import_chunk', raise_if_not_found=False)
-        if cron:
-            try:
-                cron.sudo().active = False
-            except Exception:
-                _log.warning('_disable_fnsku_import_cron: impossibile disabilitare il cron.')

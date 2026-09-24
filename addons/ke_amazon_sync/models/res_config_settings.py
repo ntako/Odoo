@@ -216,7 +216,7 @@ class ResConfigSettings(models.TransientModel):
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.reconcile_state') == 'running':
             raise UserError('Una riconciliazione è già in corso. Controlla il log sincronizzazioni.')
-        log_rec = self.env['ke.amazon.sync.log']._cron_reconcile_store(
+        log_rec = self.env['ke.amazon.sync.log'].action_start_reconcile(
             name_prefix='Riconciliazione store (manuale)'
         )
         if not log_rec:

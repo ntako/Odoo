@@ -18,13 +18,7 @@ Scarica l'intero catalogo dallo store Amazon e crea o aggiorna i prodotti in Odo
 
 #### Come funziona l'import per cataloghi grandi (> 1.000 prodotti)
 
-L'import usa una state machine a 3 fasi, orchestrata dal cron `cron_full_import_chunk`:
-
-| Fase | Cosa succede |
-|------|-------------|
-| **1 – Creazione report** | Amazon genera il report (in background). Il cron salva il `reportId` e termina. |
-| **2 – Attesa report** | Il cron verifica ogni invocazione se il report è pronto (di solito 30s–5min). |
-| **3 – Elaborazione** | Il report TSV viene scaricato, salvato come allegato Odoo e processato in chunk da 200 righe per ogni invocazione del cron. |
+L'import gira in un thread di background continuo (`_thread_full_import`), non più su un cron a tick: crea il report, aspetta che sia pronto con un poll stretto (ogni 20s, non più il tick da 2 minuti), lo scarica ed elabora tutte le righe in batch da 2000, senza attese artificiali tra un batch e l'altro. Un marketplace alla volta, in coda; un watchdog orario (`cron_sync_log_watchdog`) chiude come errore un import rimasto bloccato per un riavvio del server (un thread non sopravvive a un riavvio, a differenza di un vecchio cron a stati).
 
 Per cataloghi con limite ≤ 1.000 prodotti (campo *Limite prodotti* > 0 e ≤ 1.000) viene usata la paginazione diretta della Listings API (avvio più rapido).
 
@@ -101,7 +95,8 @@ Importa gli ordini Amazon in `sale.order` di Odoo.
 - I prodotti non trovati vengono registrati come nota testuale con tutti i dettagli
 - **Prezzi corretti**: usa `ItemTax` restituito da Amazon per calcolare il netto esatto (nessuna IVA doppia)
 - Crea automaticamente il partner se non esiste (deduplicazione per email poi nome+città)
-- Elaborazione a chunk via cron, avviabile da **Magazzino → Amazon Sync → Import Ordini Amazon**
+- Righe ordine (SKU/quantità/prezzo) lette da un report bulk (`GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL`, un'unica richiesta per tutti i marketplace attivi) invece di una chiamata `getOrderItems` per ordine — elimina il pavimento di 2s/ordine imposto da quell'endpoint. Header ordine/buyer/indirizzo restano da Orders API (`getOrders`, per-marketplace, mai stato il collo di bottiglia)
+- Gira su thread di background continuo, avviabile da **Magazzino → Amazon Sync → Import Ordini Amazon**
 - Gli ordini importati sono visibili in **Magazzino → Amazon Sync → Ordini Amazon**
 
 ---
