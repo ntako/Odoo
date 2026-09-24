@@ -28,6 +28,7 @@
                         <field name="currency_id"/>
                         <field name="active"/>
                         <field name="sequence"/>
+                        <field name="fba_warehouse_id"/>
                     </group>
                 </sheet>
             </form>

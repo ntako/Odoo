@@ -10,6 +10,13 @@ class AmazonShipToFbaWizard(models.TransientModel):
         'stock.warehouse', string='Magazzino di partenza', required=True,
         default=lambda self: self.env.company.amazon_default_warehouse_id,
     )
+    marketplace_id = fields.Many2one(
+        'ke.amazon.marketplace', string='Marketplace di destinazione',
+        domain="[('active', '=', True)]",
+        help="Lascia vuoto per il pool FBA Pan-EU condiviso (IT/DE/ES/FR oggi). "
+             "Seleziona un marketplace solo se ha un magazzino FBA dedicato "
+             "impostato (inventario non pooled, es. UK/US).",
+    )
     line_ids = fields.One2many(
         'ke.amazon.ship.wizard.line', 'wizard_id', string='Prodotti',
     )
@@ -22,7 +29,7 @@ class AmazonShipToFbaWizard(models.TransientModel):
         from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
         engine = SyncEngine(self.env, None)
         lines = [(line.product_id, line.quantity) for line in self.line_ids]
-        picking = engine.ship_to_fba(self.source_warehouse_id, lines)
+        picking = engine.ship_to_fba(self.source_warehouse_id, lines, marketplace=self.marketplace_id)
 
         return {
             'type': 'ir.actions.act_window',

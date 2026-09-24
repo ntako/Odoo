@@ -7,6 +7,7 @@
             <form string="Spedisci rifornimento ad Amazon FBA">
                 <group>
                     <field name="source_warehouse_id"/>
+                    <field name="marketplace_id"/>
                 </group>
                 <field name="line_ids">
                     <list editable="bottom">

@@ -138,6 +138,14 @@
                                     class="btn btn-secondary"
                                     confirm="Imposta la giacenza di tutti i prodotti FBM nel magazzino FBM configurato usando la quantità dichiarata su Amazon. Operazione da fare una sola volta, solo se la sync automatica quantità non è mai stata attiva su questi prodotti. Continuare?"/>
                         </setting>
+                        <setting string="Magazzino FBA esplicito per marketplace pooled"
+                                 help="Operazione una tantum: imposta il Magazzino FBA qui sopra come Magazzino FBA esplicito su ogni marketplace attivo che ne è ancora privo (Magazzino → Amazon Sync → Marketplace). Non cambia il comportamento attuale (i marketplace vuoti già ricadevano su questo stesso magazzino) — rende solo esplicito chi appartiene al pool, cosa che decide se un marketplace entra/esce in futuro (basta cambiargli il magazzino, senza toccare codice). Salta i marketplace che hanno già un magazzino proprio, sicura da rilanciare più volte.">
+                            <button name="action_set_pooled_fba_warehouse_on_marketplaces"
+                                    string="Imposta magazzino pooled ora"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Imposta il Magazzino FBA aziendale come magazzino esplicito su ogni marketplace attivo che ne è ancora privo. Continuare?"/>
+                        </setting>
                     </block>
 
                     <block title="Multi-marketplace (fase 1)" name="amazon_multimarketplace">

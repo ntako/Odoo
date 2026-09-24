@@ -56,6 +56,7 @@ Legge le giacenze reali da Amazon (Inventory API) e aggiorna lo stock Odoo nel m
 - Aggiorna anche il campo informativo `x_amazon_qty` sul prodotto
 - Avviabile da **Magazzino → Amazon Sync → Sync Giacenze FBA**
 - Il cron può essere schedulato ogni N ore dalle impostazioni
+- **Marketplace Pan-EU pooled** (IT/DE/ES/FR): tutti condividono lo stesso magazzino FBA Odoo, stesso stock fisico. Un marketplace con **magazzino FBA dedicato** impostato (`ke.amazon.marketplace.fba_warehouse_id` — pensato per UK/US, inventario non pooled) usa invece quel magazzino e traccia la quantità su `ke.amazon.listing.qty` invece che su `x_amazon_qty` (che resta il valore del pool EU)
 
 ### 6. Pubblicazione su Amazon (dal form prodotto)
 Crea o aggiorna un listing su Amazon direttamente dal form del prodotto Odoo.
@@ -152,7 +153,8 @@ Vai in **Impostazioni → Amazon Seller Central** e compila:
 
 | Campo | Descrizione |
 |---|---|
-| Magazzino FBA | Magazzino Odoo per lo stock Amazon FBA. Le giacenze vengono aggiornate dalla "Sync Giacenze FBA". Gli ordini AFN vengono assegnati a questo magazzino. |
+| Magazzino FBA | Magazzino Odoo per lo stock Amazon FBA **pooled Pan-EU** (IT/DE/ES/FR). Le giacenze vengono aggiornate dalla "Sync Giacenze FBA". Gli ordini AFN vengono assegnati a questo magazzino, a meno che il marketplace dell'ordine non abbia un magazzino FBA dedicato (vedi sotto). |
+| Magazzino FBA dedicato (per marketplace) | Campo su **Magazzino → Amazon Sync → Marketplace**, non in Impostazioni: opzionale, da impostare solo per un marketplace con inventario FBA realmente separato dal pool EU (es. UK/US). Se impostato, quel marketplace usa questo magazzino invece del Magazzino FBA condiviso, sia per la sync giacenze sia per gli ordini AFN sia per i wizard di rifornimento/rientro (selezionabile lì). |
 | Magazzino FBM (Locale) | Magazzino Odoo locale per gli ordini FBM. Le quantità di questo magazzino vengono spinte su Amazon durante la sync prezzi/qty. Gli ordini MFN vengono assegnati a questo magazzino. |
 
 ### Sincronizzazioni automatiche

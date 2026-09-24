@@ -1836,6 +1836,22 @@ class SyncEngine:
         warehouse = getattr(self.env.company, company_field, False)
         return warehouse.lot_stock_id if warehouse else None
 
+    def _get_fba_warehouse_location(self, marketplace=None):
+        """
+        Ritorna la stock.location FBA da usare: quella del magazzino dedicato del
+        marketplace se impostato (inventario non pooled, es. UK/US), altrimenti
+        quella del magazzino FBA condiviso Pan-EU configurato in azienda — stesso
+        comportamento di _get_warehouse_location('amazon_fba_warehouse_id') di
+        sempre quando nessun marketplace ha un magazzino dedicato (nessuna
+        modifica per il caso EU pooled oggi in uso).
+        'marketplace' esplicito per i chiamanti che non passano da un client
+        SP-API scoped (es. i wizard di spedizione/rientro, client=None); se
+        omesso viene risolto da self._current_marketplace() come al solito.
+        """
+        marketplace = marketplace if marketplace is not None else self._current_marketplace()
+        warehouse = marketplace.get_fba_warehouse() if marketplace else self.env.company.amazon_fba_warehouse_id
+        return warehouse.lot_stock_id if warehouse else None
+
     def _init_product_warehouse_quant(self, variant, fulfillment, qty=0):
         """
         Alla creazione di un prodotto (o di una variante), crea un quant nel
@@ -2042,7 +2058,7 @@ class SyncEngine:
             picking.with_context(skip_immediate=True, skip_backorder=True)._action_done()
         return picking
 
-    def ship_to_fba(self, source_warehouse, lines):
+    def ship_to_fba(self, source_warehouse, lines, marketplace=None):
         """
         Registra una spedizione di rifornimento verso Amazon: trasferimento interno
         dal magazzino sorgente alla location 'In transito verso Amazon'. La merce
@@ -2056,9 +2072,13 @@ class SyncEngine:
         chiamare infine _action_done(). Comportamento diverso dagli altri
         trasferimenti interni del modulo (receive/allocate/move-to-general),
         che restano validati subito in un solo passaggio.
+        'marketplace' (opzionale): se dato, spedisce verso IL SUO magazzino FBA
+        dedicato (inventario non pooled, es. UK/US); altrimenti (default, caso
+        EU pooled) verso il magazzino FBA condiviso configurato in azienda —
+        stesso comportamento di sempre quando non specificato.
         Ritorna il picking creato (stato 'assigned', non ancora 'done').
         """
-        fba_location = self._get_warehouse_location('amazon_fba_warehouse_id')
+        fba_location = self._get_fba_warehouse_location(marketplace)
         if not fba_location:
             raise UserError('Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).')
         transit_location = self._get_or_create_transit_location(fba_location)
@@ -2067,7 +2087,7 @@ class SyncEngine:
             lines, 'Rifornimento Amazon FBA', auto_validate=False,
         )
 
-    def receive_from_fba(self, dest_warehouse, lines):
+    def receive_from_fba(self, dest_warehouse, lines, marketplace=None):
         """
         Registra la ricezione fisica di un rientro scorte da Amazon (removal order):
         trasferimento interno dal magazzino FBA configurato al magazzino di
@@ -2075,9 +2095,11 @@ class SyncEngine:
         Lato Amazon la giacenza è già stata tolta dal fulfillable (e quindi dal
         magazzino FBA Odoo) al prossimo giro di sync_fba_quantities.
         lines: iterabile di (product_variant, quantity).
+        'marketplace' (opzionale): stesso significato di ship_to_fba — magazzino
+        FBA dedicato se dato, altrimenti il pool EU condiviso (default).
         Ritorna il picking creato e validato.
         """
-        fba_location = self._get_warehouse_location('amazon_fba_warehouse_id')
+        fba_location = self._get_fba_warehouse_location(marketplace)
         if not fba_location:
             raise UserError('Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).')
         return self._create_and_validate_internal_transfer(
@@ -2170,23 +2192,30 @@ class SyncEngine:
         'In transito verso Amazon' (rifornimenti registrati con ship_to_fba).
 
         Fase 3 multi-marketplace (inventario FBA Pan-Europeo, confermato
-        dall'utente): il magazzino FBA in Odoo è UNICO, non per marketplace —
-        a differenza di prezzo/quantità FBM e riconciliazione, qui non ha senso
-        gating primario/secondario sul campo legacy x_amazon_qty: rappresenta
-        lo stesso stock fisico pooled, riconfermato (redundante ma innocuo,
-        idempotente) da ognuno dei marketplace attivi che il chiamante itera
-        (vedi _thread_sync_fba_quantities). Se un marketplace attivo avesse
-        invece inventario davvero separato (es. UK/US fuori dal pool EU), il
-        valore dell'ultimo marketplace processato sovrascriverebbe gli altri —
-        rischio noto, accettato dall'utente per il caso Pan-EU.
+        dall'utente): "pooled" non è un caso speciale per IT/DE/ES/FR, è
+        determinato da ke.amazon.marketplace.is_fba_pooled() — vero se questo
+        marketplace condivide il magazzino FBA effettivo con almeno un altro
+        marketplace attivo (vedi quel metodo per i dettagli, incluso come
+        un marketplace entra/esce dal pool senza toccare codice). Per un
+        marketplace pooled, il magazzino FBA in Odoo è condiviso — qui non ha
+        senso gating primario/secondario sul campo legacy x_amazon_qty:
+        rappresenta lo stesso stock fisico, riconfermato (redundante ma
+        innocuo, idempotente) da ognuno dei marketplace pooled che il
+        chiamante itera (vedi _thread_sync_fba_quantities).
+        Per un marketplace NON pooled (inventario davvero separato, es. UK/US
+        fuori dal pool EU), la quantità precedente/nuova si legge/scrive su
+        ke.amazon.listing.qty (già scoped per marketplace) invece che sul
+        campo condiviso x_amazon_qty, per non farla interferire con la
+        contabilità del pool su cui questo marketplace non è più.
         Ritorna il next_token per la pagina successiva, o None se era l'ultima.
         """
-        fba_location = self._get_warehouse_location('amazon_fba_warehouse_id')
+        marketplace = self._current_marketplace()
+        fba_location = self._get_fba_warehouse_location(marketplace)
         if not fba_location:
             raise UserError('Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).')
         transit_location = self._get_or_create_transit_location(fba_location)
-        marketplace = self._current_marketplace()
         mp_tag = f'[{marketplace.code}] ' if marketplace else ''
+        dedicated = bool(marketplace) and not marketplace.is_fba_pooled()
 
         items, new_page_token = self.client.fetch_inventory_page(page_token)
 
@@ -2216,7 +2245,16 @@ class SyncEngine:
                 product_tmpl = variant.product_tmpl_id
 
             try:
-                previous_qty = product_tmpl.x_amazon_qty or 0
+                listing = None
+                if dedicated:
+                    # Inventario non pooled: previous/new qty su ke.amazon.listing,
+                    # mai su x_amazon_qty (quel campo resta il valore del pool EU).
+                    listing = self.env['ke.amazon.listing'].sudo().search([
+                        ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+                    ], limit=1)
+                    previous_qty = listing.qty if listing else 0
+                else:
+                    previous_qty = product_tmpl.x_amazon_qty or 0
                 increase = fba_qty - previous_qty
                 # Prima si sposta (se c'è un aumento) dal transito al magazzino FBA
                 # reale — un movimento fisico che incrementa già il quant FBA — e
@@ -2231,15 +2269,20 @@ class SyncEngine:
                         product_variant, transit_location, fba_location, increase,
                     )
                 self._set_product_stock(product_variant, fba_location, fba_qty)
-                product_tmpl.write({'x_amazon_qty': int(fba_qty)})
-                # Riga listing del marketplace corrente, se esiste già (creata da
-                # full_import/reconcile): aggiornata per visibilità, mai creata qui.
-                if marketplace:
-                    listing = self.env['ke.amazon.listing'].sudo().search([
-                        ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
-                    ], limit=1)
+                if dedicated:
                     if listing:
                         listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
+                else:
+                    product_tmpl.write({'x_amazon_qty': int(fba_qty)})
+                    # Riga listing del marketplace corrente, se esiste già (creata
+                    # da full_import/reconcile): aggiornata per visibilità, mai
+                    # creata qui.
+                    if marketplace:
+                        listing = self.env['ke.amazon.listing'].sudo().search([
+                            ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+                        ], limit=1)
+                        if listing:
+                            listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
                 updated += 1
                 msg = (
                     f'{mp_tag}OK {sku} ({matched_on} #{product_tmpl.id}): '
@@ -2402,8 +2445,13 @@ class SyncEngine:
         # Assegna il magazzino corretto in base al canale di fulfillment
         fulfillment_channel = order_data.get('FulfillmentChannel', '')
         company = self.env.company
+        marketplace = self._current_marketplace()
         if fulfillment_channel == 'AFN':
-            wh_id = company.amazon_fba_warehouse_id.id
+            # Magazzino dedicato del marketplace se impostato (inventario FBA
+            # non pooled, es. UK/US), altrimenti il pool EU condiviso — stesso
+            # fallback usato da sync_fba_quantities_page.
+            fba_warehouse = marketplace.get_fba_warehouse() if marketplace else company.amazon_fba_warehouse_id
+            wh_id = fba_warehouse.id
         else:
             wh_id = company.amazon_fbm_warehouse_id.id
 
@@ -2415,7 +2463,7 @@ class SyncEngine:
             'x_amazon_fulfillment_channel': fulfillment_channel,
             'x_amazon_purchase_date': purchase_date,
             'x_amazon_sales_channel': order_data.get('SalesChannel', ''),
-            'x_amazon_marketplace_id': self._current_marketplace().id,
+            'x_amazon_marketplace_id': marketplace.id,
         }
         if wh_id:
             order_vals['warehouse_id'] = wh_id
@@ -2738,13 +2786,20 @@ class SyncEngine:
         varianti — in quel caso la riga viene saltata con un messaggio esplicito
         invece di scrivere un dato sbagliato (limite noto, vedi TASK.md).
 
-        Fase 3 multi-marketplace (inventario FBA Pan-EU pooled, confermato
-        dall'utente): come sync_fba_quantities_page, nessun gating primario/
-        secondario — l'FNSKU è l'etichetta della stessa unità fisica pooled,
-        riconfermata (redundante ma innocua, idempotente) da ogni marketplace
-        attivo che il chiamante itera. Stesso rischio noto per UK/US non
-        pooled: da rivedere se/quando diventano marketplace attivi (vedi
-        TASK.md e il commento in sync_fba_quantities_page).
+        Fase 3 multi-marketplace: "pooled" determinato da
+        ke.amazon.marketplace.is_fba_pooled() (stesso meccanismo di
+        sync_fba_quantities_page — condivide il magazzino FBA con almeno un
+        altro marketplace attivo). Per un marketplace pooled (IT/DE/ES/FR
+        oggi, confermato dall'utente), nessun gating primario/secondario —
+        l'FNSKU è l'etichetta della stessa unità fisica pooled, riconfermata
+        (redundante ma innocua, idempotente) da ogni marketplace pooled che
+        il chiamante itera, scritta sul campo condiviso x_amazon_fnsku.
+        Per un marketplace NON pooled (inventario davvero separato, es.
+        UK/US), l'FNSKU può essere realmente diverso da quello del pool per
+        lo stesso prodotto: si scrive invece su ke.amazon.listing.fnsku (già
+        scoped per marketplace), mai su x_amazon_fnsku, per non farlo
+        sovrascrivere dall'ultimo marketplace
+        processato.
         Non imposta qui log_rec.state='done': con più marketplace in coda
         questo metodo gira una volta per marketplace, chiude il log solo
         _finish_fnsku_import in amazon_sync_log.py a coda esaurita. I
@@ -2753,6 +2808,7 @@ class SyncEngine:
         """
         marketplace = self._current_marketplace()
         mp_tag = f'[{marketplace.code}] ' if marketplace else ''
+        dedicated = bool(marketplace) and not marketplace.is_fba_pooled()
         matched = not_found = errors = 0
         lines = []
 
@@ -2771,29 +2827,49 @@ class SyncEngine:
 
                 product = variant.product_tmpl_id
                 if len(product.product_variant_ids) > 1:
-                    # x_amazon_fnsku è un campo di template, condiviso da tutte le
+                    # x_amazon_fnsku (e, per lo stesso motivo, ke.amazon.listing.fnsku,
+                    # anch'esso a livello di template) è condiviso da tutte le
                     # varianti — anche se QUESTA variante è stata identificata con
                     # precisione, scriverlo qui sovrascriverebbe l'FNSKU (diverso)
                     # delle varianti sorelle. Serve un campo per-variante per
-                    # gestire correttamente questo caso (non ancora implementato).
+                    # gestire correttamente questo caso (non ancora implementato),
+                    # a prescindere da pooled/dedicato.
                     not_found += 1
                     lines.append(
                         f'{mp_tag}SALTATO {sku}: appartiene a una famiglia con più varianti, '
-                        f"x_amazon_fnsku è condiviso per template — richiede un campo "
+                        f"l'FNSKU è condiviso per template — richiede un campo "
                         f'FNSKU per variante non ancora implementato'
                     )
                     continue
-                if product.x_amazon_fnsku != fnsku:
-                    product.write({'x_amazon_fnsku': fnsku})
-                    lines.append(f'{mp_tag}OK {sku} → {fnsku}')
-                else:
-                    lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku}')
-                # Riga listing del marketplace corrente, se esiste già (creata da
-                # full_import/reconcile): aggiornata per visibilità, mai creata qui.
+
+                listing = None
                 if marketplace:
                     listing = self.env['ke.amazon.listing'].sudo().search([
                         ('product_id', '=', product.id), ('marketplace_id', '=', marketplace.id),
                     ], limit=1)
+
+                if dedicated:
+                    if not listing:
+                        not_found += 1
+                        lines.append(
+                            f'{mp_tag}SALTATO {sku}: nessuna riga ke.amazon.listing per questo '
+                            f'marketplace dedicato (serve da full import/riconciliazione prima)'
+                        )
+                        continue
+                    if listing.fnsku != fnsku:
+                        listing.write({'fnsku': fnsku})
+                        lines.append(f'{mp_tag}OK {sku} → {fnsku}')
+                    else:
+                        lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku}')
+                else:
+                    if product.x_amazon_fnsku != fnsku:
+                        product.write({'x_amazon_fnsku': fnsku})
+                        lines.append(f'{mp_tag}OK {sku} → {fnsku}')
+                    else:
+                        lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku}')
+                    # Riga listing del marketplace corrente, se esiste già
+                    # (creata da full_import/reconcile): aggiornata per
+                    # visibilità, mai creata qui.
                     if listing:
                         listing.write({'fnsku': fnsku})
                 matched += 1

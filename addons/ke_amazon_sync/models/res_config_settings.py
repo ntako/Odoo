@@ -320,6 +320,47 @@ class ResConfigSettings(models.TransientModel):
             },
         }
 
+    def action_set_pooled_fba_warehouse_on_marketplaces(self):
+        """
+        Operazione una tantum: imposta esplicitamente il Magazzino FBA
+        aziendale (questa pagina) su ogni marketplace ATTIVO che ha ancora
+        'Magazzino FBA' vuoto — così l'appartenenza al pool si legge dal
+        magazzino condiviso stesso (vedi ke.amazon.marketplace.is_fba_pooled),
+        non da una convenzione implicita "vuoto = pool EU". Non cambia il
+        comportamento di oggi (get_fba_warehouse() già ricadeva sullo stesso
+        valore aziendale per i marketplace vuoti): rende solo esplicito ciò
+        che prima era implicito, per chiarezza futura quando un marketplace
+        dovesse entrare/uscire dal pool. Salta i marketplace che hanno già un
+        Magazzino FBA proprio (non li sovrascrive, potrebbero essere
+        volutamente dedicati) — sicura da rilanciare più volte.
+        """
+        company_wh = self.env.company.amazon_fba_warehouse_id
+        if not company_wh:
+            raise UserError(
+                'Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini) — '
+                'impostalo prima di eseguire questa migrazione.'
+            )
+        to_update = self.env['ke.amazon.marketplace'].search([
+            ('active', '=', True), ('fba_warehouse_id', '=', False),
+        ])
+        if to_update:
+            to_update.write({'fba_warehouse_id': company_wh.id})
+        self.env.cr.commit()
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Magazzino FBA pooled impostato',
+                'message': (
+                    f'{len(to_update)} marketplace impostati esplicitamente su "{company_wh.name}" '
+                    f'({", ".join(to_update.mapped("code")) or "nessuno da aggiornare"}).'
+                ),
+                'sticky': True,
+                'type': 'success',
+            },
+        }
+
     def action_run_download_images(self):
         """Scarica le immagini mancanti dai prodotti Amazon in background."""
         self._validate_credentials()
