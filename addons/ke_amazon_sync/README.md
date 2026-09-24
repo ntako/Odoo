@@ -81,7 +81,7 @@ Confronta i listing attivi su Amazon con i prodotti in Odoo, senza modificare nu
 
 - Usa Reports API per scaricare il listing completo (nessun limite di prodotti)
 - Aggiorna `x_amazon_status` e `x_amazon_price` per i prodotti già collegati
-- Gestisce SKU riassegnati (es. `PFS-1234` → `PFS-1234+`) aggiornando `x_amazon_sku`
+- Gestisce SKU riassegnati (es. `PFS-1234` → `PFS-1234+`) aggiornando `x_amazon_sku` — lo SKU sostituito resta visibile in `x_amazon_sku_previous` (tab Amazon del prodotto), solo indicazione informativa
 - Segnala nel log i prodotti presenti su Amazon ma non ancora importati in Odoo
 - Schedulabile ogni N ore
 

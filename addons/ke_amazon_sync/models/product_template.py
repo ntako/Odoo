@@ -118,6 +118,13 @@ class ProductTemplate(models.Model):
         'Amazon SKU', index=True, copy=False,
         help='SKU interno Amazon (può differire dal default_code Odoo).',
     )
+    x_amazon_sku_previous = fields.Char(
+        'SKU Amazon precedente', copy=False, readonly=True,
+        help='Ultimo SKU sostituito da riconciliazione/import completo quando Amazon '
+             'riassegna lo SKU (es. rifornimento \'PFS-1234\' → \'PFS-1234+\'). Solo '
+             'indicazione informativa — non usato per nessun match, si aggiorna da solo '
+             'ogni volta che x_amazon_sku viene riassegnato di nuovo.',
+    )
     x_amazon_fnsku = fields.Char(
         'FNSKU', index=True, copy=False,
         help='Codice Amazon FNSKU: identifica la giacenza FBA di QUESTO venditore per '

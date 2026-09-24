@@ -45,6 +45,7 @@
                         <group string="Identificatori">
                             <field name="x_amazon_asin"/>
                             <field name="x_amazon_sku"/>
+                            <field name="x_amazon_sku_previous" invisible="not x_amazon_sku_previous"/>
                             <field name="x_amazon_fnsku"/>
                             <field name="x_amazon_product_type" widget="char"/>
                             <div class="o_field_widget" invisible="x_amazon_product_type">

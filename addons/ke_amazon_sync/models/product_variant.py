@@ -14,6 +14,11 @@ class ProductProduct(models.Model):
         'Amazon SKU (variante)', index=True, copy=False,
         help='SKU Amazon per questa specifica variante.',
     )
+    x_amazon_sku_previous = fields.Char(
+        'SKU Amazon precedente (variante)', copy=False, readonly=True,
+        help='Ultimo SKU sostituito dalla riconciliazione quando Amazon riassegna lo '
+             'SKU di questa variante (es. rifornimento). Solo indicazione informativa.',
+    )
 
     def get_amazon_sale_price(self):
         """

@@ -1071,6 +1071,12 @@ class SyncEngine:
             old_sku = product.x_amazon_sku or ''
             if new_sku != old_sku and (not old_sku or product.default_code == old_sku):
                 vals['default_code'] = new_sku
+            # Indicazione informativa (non usata per nessun match): tiene visibile
+            # l'ultimo SKU sostituito, per capire a colpo d'occhio quali prodotti
+            # sono stati riassegnati (es. rifornimento con '+') senza dover cercare
+            # nel log sincronizzazioni.
+            if new_sku != old_sku and old_sku:
+                vals['x_amazon_sku_previous'] = old_sku
 
         if vals:
             product.write(vals)
@@ -2958,6 +2964,8 @@ class SyncEngine:
                             # con un FNSKU sbagliato finché non arriva il prossimo
                             # Import FNSKU (già incatenato al full import).
                             'x_amazon_fnsku': False,
+                            # Solo indicazione informativa, non usata per match.
+                            'x_amazon_sku_previous': sku,
                         })
                     self._upsert_listing(product, plus_data)
                     odoo_skus_seen.add(plus_sku)
@@ -2995,6 +3003,7 @@ class SyncEngine:
                                 'x_amazon_price': new_price,
                                 'x_amazon_last_sync': datetime.now(),
                                 'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
+                                'x_amazon_sku_previous': sku,  # solo indicazione informativa
                             })
                         self._upsert_listing(product, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
@@ -3033,7 +3042,10 @@ class SyncEngine:
                     new_status = 'active' if 'BUYABLE' in plus_data.get('status', '') else 'inactive'
                     new_price = plus_data.get('price') or 0.0
                     if is_primary:
-                        variant.write({'x_amazon_sku': plus_sku, 'default_code': plus_sku})
+                        variant.write({
+                            'x_amazon_sku': plus_sku, 'default_code': plus_sku,
+                            'x_amazon_sku_previous': sku,  # solo indicazione informativa
+                        })
                         tmpl_vals = {
                             'x_amazon_status': new_status,
                             'x_amazon_price': new_price,
@@ -3070,7 +3082,10 @@ class SyncEngine:
                         new_status = 'active' if 'BUYABLE' in amazon_data_by_asin.get('status', '') else 'inactive'
                         new_price = amazon_data_by_asin.get('price') or 0.0
                         if is_primary:
-                            variant.write({'x_amazon_sku': new_sku, 'default_code': new_sku})
+                            variant.write({
+                                'x_amazon_sku': new_sku, 'default_code': new_sku,
+                                'x_amazon_sku_previous': sku,  # solo indicazione informativa
+                            })
                             tmpl_vals_asin = {
                                 'x_amazon_status': new_status,
                                 'x_amazon_price': new_price,
