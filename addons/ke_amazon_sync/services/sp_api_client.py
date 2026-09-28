@@ -255,6 +255,66 @@ class SpApiClient:
             _log.warning('Impossibile recuperare catalogo ASIN %s: %s', asin, exc)
             return {}
 
+    # searchCatalogItems accetta fino a 20 identifiers per chiamata (stesso
+    # rate limit ufficiale di getCatalogItem: 2 richieste/s, burst 2 — per
+    # questo riusa DELAY_CATALOG_S) e con includedData=dimensions restituisce
+    # lo stesso identico blocco 'dimensions'/'summaries'/'productTypes' di
+    # getCatalogItem per ogni item trovato: permette di arricchire fino a 20
+    # prodotti con una sola chiamata invece di una per ASIN (usato da
+    # apply_category_mapping in sync_engine.py per il backfill categoria/
+    # dimensioni, dove il collo di bottiglia erano le migliaia di chiamate
+    # singole, non il rate limit in sé).
+    @_with_retry(DELAY_CATALOG_S, retry_max=3, backoff_s=8)
+    def _catalog_search_batch_call(self, asins):
+        from sp_api.api.catalog_items.catalog_items_2022_04_01 import CatalogItemsV20220401
+        api = CatalogItemsV20220401(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
+        response = api.search_catalog_items(
+            # Amazon vuole 'identifiers' come stringa comma-delimited (vedi
+            # doc dell'operazione), NON una lista Python: la libreria
+            # sp_api passa 'params' così com'è a httpx, che serializza una
+            # lista come chiave ripetuta (identifiers=A&identifiers=B&...)
+            # invece che come valore unico — Amazon con quella forma tiene
+            # solo il primo e scarta silenziosamente tutti gli altri (nessun
+            # errore, risposta 200 con un solo item: verificato dal vivo,
+            # richiesti 5/10/20 ASIN, tornava sempre e solo il primo).
+            # search_by_ean non ne aveva mai risentito perché passa sempre
+            # un solo EAN alla volta.
+            identifiers=','.join(asins),
+            identifiersType='ASIN',
+            marketplaceIds=[self.marketplace_id],
+            includedData=['attributes', 'dimensions', 'identifiers', 'images',
+                          'productTypes', 'summaries', 'classifications', 'relationships'],
+            locale=self.locale,
+        )
+        return response.payload
+
+    def get_catalog_items_batch(self, asins):
+        """
+        Come get_catalog_item, ma per un gruppo di ASIN (max 20 per chiamata
+        — limite di searchCatalogItems) in una sola richiesta ad Amazon.
+        Ritorna {asin: item_payload}; un ASIN passato ma assente dal dict
+        risultato significa che Amazon non ha trovato/restituito dati per
+        quell'ASIN (stesso significato del dict vuoto di get_catalog_item),
+        non è un errore.
+
+        SellingApiException NON viene catturata qui (a differenza di
+        get_catalog_item): un fallimento della chiamata batch riguarda TUTTI
+        gli ASIN richiesti insieme, non uno solo — se lo si inghiottisse e
+        si ritornasse {} come per un "nessun dato", il chiamante non
+        potrebbe distinguere "Amazon non ha questi dati" (vero, non serve
+        ritentare) da "la chiamata è fallita" (throttling/errore transitorio,
+        va ritentato) e finirebbe per segnare tutto il gruppo come "nessun
+        dato disponibile" — visto succedere in produzione: stessi ASIN,
+        richiesti di nuovo poco dopo, risposta completa. Il chiamante
+        (apply_category_mapping) deve gestire l'eccezione batch per batch.
+        """
+        if not asins:
+            return {}
+        if len(asins) > 20:
+            raise ValueError('get_catalog_items_batch supporta al massimo 20 ASIN per chiamata')
+        payload = self._catalog_search_batch_call(asins)
+        return {item.get('asin'): item for item in payload.get('items', []) if item.get('asin')}
+
     # ------------------------------------------------------------------
     # Ricerca per EAN
     # ------------------------------------------------------------------

@@ -254,10 +254,15 @@ def _merge_catalog(product, catalog):
     existing_specs.update(cat_specs)
     product['spec_attrs'] = existing_specs
 
-    # Dimensioni
+    # Dimensioni — preferisce 'item' (prodotto nudo), ma Amazon spesso
+    # popola solo 'package' (prodotto imballato) e lascia 'item' assente:
+    # senza fallback il prodotto risultava sempre senza dimensioni anche
+    # quando Amazon le aveva (verificato dal vivo su un ASIN reale — vedi
+    # TASK.md). 'package' è leggermente più grande del prodotto nudo ma è
+    # comunque un dato reale, meglio di niente per volume/logistica.
     dims = catalog.get('dimensions', [{}])
     dim_block = dims[0] if dims else {}
-    item_d = dim_block.get('item', {})
+    item_d = dim_block.get('item') or dim_block.get('package') or {}
     product['weight_kg'] = _convert_weight(item_d.get('weight', {}))
     product['length_cm'] = _convert_length(item_d.get('length', {}))
     product['width_cm'] = _convert_length(item_d.get('width', {}))
@@ -1732,88 +1737,163 @@ class SyncEngine:
     # Funzione 4: Riconciliazione store (manuale o schedulata)
     # -----------------------------------------------------------------------
 
-    def apply_category_mapping(self, log_rec, offset, chunk_size):
+    _CAT_MAP_BATCH_SIZE = 20  # max identifiers per chiamata searchCatalogItems
+
+    def apply_category_mapping(self, log_rec, offset, chunk_size, max_id=None):
         """
         Arricchisce i prodotti con ASIN tramite Catalog API:
         - categoria Amazon (x_amazon_category)
         - dimensioni (lunghezza, larghezza, altezza, peso)
-        Chiama il Catalog API solo se mancano categoria O dimensioni.
+        - brand (x_amazon_brand) e descrizione/bullet point (description_sale),
+          solo se attualmente vuoti — mai sovrascritti se già impostati a mano
+        Chiama il Catalog API solo se manca uno qualsiasi di questi campi, in
+        gruppi da _CAT_MAP_BATCH_SIZE ASIN per chiamata (searchCatalogItems,
+        get_catalog_items_batch in sp_api_client.py) invece di un ASIN per
+        chiamata — stesso rate limit di getCatalogItem, ma fino a 20 prodotti
+        per richiesta: era questo il vero collo di bottiglia del backfill su
+        cataloghi da migliaia di SKU, non il rate limit in sé (vedi
+        _CAT_MAP_CHUNK_SIZE in amazon_sync_log.py per il perché è stato
+        alzato in coppia con questa modifica).
+
+        max_id (opzionale, id massimo di product.template congelato da
+        action_start_apply_category_mapping): senza, 'total' viene ricalcolato
+        da una search live ad ogni tick — se un import/riconciliazione crea
+        migliaia di prodotti nuovi con ASIN mentre questo giro è a metà, il
+        primo tick può vedere un 'total' molto più basso di quello reale e
+        il giro si segna concluso non appena il suo offset lo raggiunge,
+        anche se arrivano molti altri prodotti subito dopo (bug osservato in
+        produzione: giro segnato 'done' dopo 700 prodotti su un catalogo di
+        5.884, partito a ridosso della fine di un import completo che ne
+        aveva appena creati 8.579). Con max_id il perimetro del giro resta
+        fisso dall'avvio in poi, indipendentemente da cosa viene creato dopo.
         Ritorna (next_offset, total) o (None, total) se completato.
         """
-        products = self.env['product.template'].search(
-            [('x_amazon_asin', '!=', False)], order='id asc',
-        )
+        domain = [('x_amazon_asin', '!=', False)]
+        if max_id:
+            domain.append(('id', '<=', max_id))
+        products = self.env['product.template'].search(domain, order='id asc')
         total = len(products)
         chunk = products[offset:offset + chunk_size]
         if not chunk:
             return None, total
 
         updated = skipped = errors = 0
-        lines = []
+        msg_by_product_id = {}
+        to_fetch = []
 
         for product in chunk:
-            asin = product.x_amazon_asin
-            ref = product.default_code or asin
+            ref = product.default_code or product.x_amazon_asin
             needs_catalog = (
                 not product.x_amazon_category
                 or not product.product_length
                 or not product.x_amazon_product_type
                 or not product.x_amazon_browse_node_id
+                or not product.x_amazon_brand
+                or not product.description_sale
             )
-            if not needs_catalog:
+            if needs_catalog:
+                to_fetch.append(product)
+            else:
                 skipped += 1
-                lines.append(f'SKIP {ref}: dati già presenti')
-                continue
+                msg_by_product_id[product.id] = f'SKIP {ref}: dati già presenti'
+
+        for i in range(0, len(to_fetch), self._CAT_MAP_BATCH_SIZE):
+            batch = to_fetch[i:i + self._CAT_MAP_BATCH_SIZE]
             try:
-                catalog = self.client.get_catalog_item(asin)
-
-                summaries = catalog.get('summaries', [{}])
-                s0 = summaries[0] if summaries else {}
-                browse_cls = s0.get('browseClassification', {})
-                category = browse_cls.get('displayName', '')
-                browse_node_id = browse_cls.get('classificationId', '')
-
-                product_types = catalog.get('productTypes') or [{}]
-                product_type = product_types[0].get('productType', '')
-
-                dims = catalog.get('dimensions', [{}])
-                dim_block = dims[0] if dims else {}
-                item_d = dim_block.get('item', {})
-
-                vals = {}
-                if category:
-                    vals['x_amazon_category'] = category
-                if browse_node_id:
-                    vals['x_amazon_browse_node_id'] = browse_node_id
-                if product_type:
-                    vals['x_amazon_product_type'] = product_type
-                weight_kg = _convert_weight(item_d.get('weight', {}))
-                length_cm = _convert_length(item_d.get('length', {}))
-                width_cm = _convert_length(item_d.get('width', {}))
-                height_cm = _convert_length(item_d.get('height', {}))
-                if weight_kg is not None:
-                    vals['weight'] = weight_kg
-                if length_cm is not None:
-                    vals['product_length'] = length_cm
-                if width_cm is not None:
-                    vals['product_width'] = width_cm
-                if height_cm is not None:
-                    vals['product_height'] = height_cm
-
-                if vals:
-                    product.write(vals)
-                    updated += 1
-                    msg = f'OK {ref}: type="{product_type}" cat="{category}" L={length_cm} W={width_cm} H={height_cm}'
-                else:
-                    skipped += 1
-                    msg = f'SKIP {ref}: nessun dato disponibile su Amazon'
-
+                catalog_by_asin = self.client.get_catalog_items_batch([p.x_amazon_asin for p in batch])
             except Exception as exc:
-                errors += 1
-                msg = f'ERRORE {ref}: {exc}'
-                _log.error(msg, exc_info=True)
-            lines.append(msg)
+                # La chiamata batch è fallita per TUTTO il gruppo (throttling
+                # dopo i retry, errore di rete, ecc.) — non è "Amazon non ha
+                # questi dati", è "non siamo riusciti a chiederglieli". Segnare
+                # ERRORE (non SKIP) fa sì che needs_catalog resti vero per
+                # questi prodotti e vengano ritentati al prossimo giro,
+                # invece di essere scambiati per genuinamente privi di dati.
+                errors += len(batch)
+                for product in batch:
+                    ref = product.default_code or product.x_amazon_asin
+                    msg = f'ERRORE {ref}: chiamata batch fallita ({exc}), da ritentare'
+                    _log.error(msg)
+                    msg_by_product_id[product.id] = msg
+                continue
 
+            for product in batch:
+                asin = product.x_amazon_asin
+                ref = product.default_code or asin
+                try:
+                    catalog = catalog_by_asin.get(asin, {})
+
+                    summaries = catalog.get('summaries', [{}])
+                    s0 = summaries[0] if summaries else {}
+                    browse_cls = s0.get('browseClassification', {})
+                    category = browse_cls.get('displayName', '')
+                    browse_node_id = browse_cls.get('classificationId', '')
+
+                    product_types = catalog.get('productTypes') or [{}]
+                    product_type = product_types[0].get('productType', '')
+
+                    # Fallback 'item'->'package' — vedi stesso commento/fix in
+                    # _update_product qui sopra, stesso bug, stessa causa.
+                    dims = catalog.get('dimensions', [{}])
+                    dim_block = dims[0] if dims else {}
+                    item_d = dim_block.get('item') or dim_block.get('package') or {}
+
+                    # Brand/descrizione/bullet point: stessi campi che
+                    # _merge_catalog estrae per il percorso a piccolo
+                    # catalogo (full_import/full_import_chunk, mai chiamato
+                    # per cataloghi grandi come questo, vedi TASK.md) — 'attributes'
+                    # è già richiesto in includedData dalla chiamata batch,
+                    # nessuna chiamata Amazon aggiuntiva, solo dati già
+                    # scaricati e finora scartati.
+                    cat_attrs = catalog.get('attributes', {})
+                    brand = s0.get('brand', '') or _cat_val(cat_attrs, 'brand')
+                    description = _cat_val(cat_attrs, 'product_description')
+                    bullets = [str(v.get('value', '')) for v in cat_attrs.get('bullet_point', []) if v.get('value')]
+
+                    vals = {}
+                    if category:
+                        vals['x_amazon_category'] = category
+                    if browse_node_id:
+                        vals['x_amazon_browse_node_id'] = browse_node_id
+                    if product_type:
+                        vals['x_amazon_product_type'] = product_type
+                    weight_kg = _convert_weight(item_d.get('weight', {}))
+                    length_cm = _convert_length(item_d.get('length', {}))
+                    width_cm = _convert_length(item_d.get('width', {}))
+                    height_cm = _convert_length(item_d.get('height', {}))
+                    if weight_kg is not None:
+                        vals['weight'] = weight_kg
+                    if length_cm is not None:
+                        vals['product_length'] = length_cm
+                    if width_cm is not None:
+                        vals['product_width'] = width_cm
+                    if height_cm is not None:
+                        vals['product_height'] = height_cm
+                    # Solo se vuoti: non sovrascrivere una descrizione/brand
+                    # impostati a mano in Odoo con quanto trovato su Amazon.
+                    if brand and not product.x_amazon_brand:
+                        vals['x_amazon_brand'] = brand
+                    if (description or bullets) and not product.description_sale:
+                        formatted = self._format_description({'description': description, 'bullet_points': bullets})
+                        if formatted:
+                            vals['description_sale'] = formatted
+
+                    if vals:
+                        product.write(vals)
+                        updated += 1
+                        msg = f'OK {ref}: type="{product_type}" cat="{category}" L={length_cm} W={width_cm} H={height_cm}'
+                        if 'x_amazon_brand' in vals or 'description_sale' in vals:
+                            msg += f' brand={"sì" if "x_amazon_brand" in vals else "-"} desc={"sì" if "description_sale" in vals else "-"}'
+                    else:
+                        skipped += 1
+                        msg = f'SKIP {ref}: nessun dato disponibile su Amazon'
+
+                except Exception as exc:
+                    errors += 1
+                    msg = f'ERRORE {ref}: {exc}'
+                    _log.error(msg, exc_info=True)
+                msg_by_product_id[product.id] = msg
+
+        lines = [msg_by_product_id[p.id] for p in chunk]
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
             'products_total': total,

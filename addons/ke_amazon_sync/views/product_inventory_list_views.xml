@@ -13,6 +13,10 @@
                 <field name="x_amazon_stock_fba" string="Giacenza FBA" sum="Totale"/>
                 <field name="x_amazon_stock_fbm" string="Giacenza FBM" sum="Totale"/>
                 <field name="x_amazon_stock_generale" string="Giacenza Generale" sum="Totale"/>
+                <field name="x_amazon_qty" string="Quantità dichiarata su Amazon" sum="Totale"
+                       optional="show"/>
+                <field name="x_amazon_qty_diff" string="Differenza (Amazon - Odoo, solo FBM)"
+                       optional="show"/>
             </list>
         </field>
     </record>

@@ -140,6 +140,21 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
             params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
             params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
+        elif self.sync_type == 'apply_cat_mapping':
+            # Cron a chunk (non un thread): qui bisogna anche disattivare il
+            # cron esplicitamente, non solo liberare lo stato — a differenza
+            # dei thread di background sopra, che si fermano da soli, il cron
+            # continuerebbe a girare al prossimo tick e a rimettere
+            # cat_map_state='running' via _cron_apply_category_mapping se
+            # non lo disattiviamo qui. Branch mancante fino ad oggi: un click
+            # su "Ferma e segna terminato" su questo tipo di log segnava il
+            # record 'done' ma lasciava cat_map_state incastrato su 'running'
+            # — stesso sintomo del bug del giro prematuramente 'done' più sopra.
+            params.set_param('ke_amazon_sync.cat_map_state', 'idle')
+            params.set_param('ke_amazon_sync.cat_map_offset', '')
+            params.set_param('ke_amazon_sync.cat_map_max_id', '')
+            params.set_param('ke_amazon_sync.cat_map_log_id', '')
+            self._disable_cat_map_cron()
         vals = {'state': state, 'end_date': fields.Datetime.now()}
         if error_summary:
             vals['error_summary'] = error_summary
@@ -858,7 +873,18 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.reconcile_log_id', '')
         self.env.cr.commit()
 
-    _CAT_MAP_CHUNK_SIZE = 50
+    # Con apply_category_mapping che ora chiama searchCatalogItems a gruppi
+    # da 20 ASIN (SyncEngine._CAT_MAP_BATCH_SIZE) invece di getCatalogItem
+    # uno alla volta, 50 prodotti/tick avrebbero richiesto solo 3 chiamate
+    # (~1.8s) su un tick da 2 minuti — il vero limite non era mai stato il
+    # rate limit di Amazon ma questo chunk fisso. Alzato a 500: 25 chiamate
+    # batch (~15s) per tick, ancora ampio margine sotto i 2 minuti anche
+    # contando retry su throttling e l'overhead di scrittura Odoo (write()
+    # per prodotto, un solo commit a fine chunk). Se in produzione emergono
+    # timeout del cron (--limit-time-real-cron) o lock su tabelle collegate,
+    # va abbassato di nuovo — non è un valore derivato da un test reale sul
+    # carico di scrittura Odoo, solo dal budget delle chiamate Amazon.
+    _CAT_MAP_CHUNK_SIZE = 500
 
     def action_start_apply_category_mapping(self):
         from odoo.exceptions import UserError
@@ -871,7 +897,25 @@ class AmazonSyncLog(models.Model):
 
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.cat_map_state') == 'running':
-            raise UserError('Mapping categorie già in corso. Controlla il log sincronizzazioni.')
+            # Non fidarsi ciecamente del parametro: osservato più volte in
+            # produzione che resta incastrato su 'running' anche quando il
+            # log a cui punta è già concluso (done/error) — tipicamente un
+            # riavvio del server a cavallo dell'ultimo tick del cron, che
+            # interrompe la sequenza di write() prima che arrivi a ripulire
+            # lo stato. Il log stesso (state) è la fonte di verità più
+            # affidabile: se non è più 'running' lì, il parametro è solo
+            # incoerente, non un giro davvero in corso — lo ripuliamo invece
+            # di bloccare per sempre un nuovo avvio.
+            stale_log_id = int(params.get_param('ke_amazon_sync.cat_map_log_id', '0') or 0)
+            stale_log = self.browse(stale_log_id) if stale_log_id else self.browse()
+            if stale_log.exists() and stale_log.state == 'running':
+                raise UserError('Mapping categorie già in corso. Controlla il log sincronizzazioni.')
+            _log.warning(
+                'cat_map_state incoerente (running) ma il log collegato (id=%s) non lo è più '
+                '(stato=%s) — ripulisco il parametro e procedo con un nuovo avvio.',
+                stale_log_id, stale_log.state if stale_log.exists() else 'non trovato',
+            )
+            params.set_param('ke_amazon_sync.cat_map_state', 'idle')
 
         log_rec = self.create({
             'name': f'Aggiornamento da Catalog API — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
@@ -882,6 +926,16 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.cat_map_state', 'running')
         params.set_param('ke_amazon_sync.cat_map_log_id', str(log_rec.id))
         params.set_param('ke_amazon_sync.cat_map_offset', '0')
+        # Congela il perimetro (id massimo) al momento dell'avvio: apply_category_mapping
+        # ricalcola 'total' ad ogni tick con una search live, quindi un import completo/
+        # riconciliazione in corso in parallelo che crea nuovi prodotti con ASIN farebbe
+        # crescere 'total' durante la corsa — o, sintomo osservato in produzione, se il
+        # mapping parte mentre un import è ancora a metà, 'total' visto dai primi tick è
+        # molto più basso del reale e il ciclo si segna 'done' non appena il suo offset lo
+        # raggiunge, anche se mancano ancora migliaia di prodotti creati poco dopo. Fissare
+        # l'id massimo qui congela il perimetro del giro indipendentemente da cosa arriva dopo.
+        max_id_rec = self.env['product.template'].search([], order='id desc', limit=1)
+        params.set_param('ke_amazon_sync.cat_map_max_id', str(max_id_rec.id if max_id_rec else 0))
         self.env.cr.commit()
 
         cron = self.env.ref('ke_amazon_sync.cron_apply_category_mapping', raise_if_not_found=False)
@@ -925,9 +979,10 @@ class AmazonSyncLog(models.Model):
             return
 
         offset = int(params.get_param('ke_amazon_sync.cat_map_offset', '0') or 0)
+        max_id = int(params.get_param('ke_amazon_sync.cat_map_max_id', '0') or 0) or None
         try:
             engine = SyncEngine(self.env, client)
-            next_offset, total = engine.apply_category_mapping(log_rec, offset, self._CAT_MAP_CHUNK_SIZE)
+            next_offset, total = engine.apply_category_mapping(log_rec, offset, self._CAT_MAP_CHUNK_SIZE, max_id=max_id)
         except Exception as e:
             _log.error('Cron apply_category_mapping fallito: %s', e, exc_info=True)
             log_rec.write({'state': 'error', 'error_summary': str(e), 'end_date': fields.Datetime.now()})
@@ -940,6 +995,7 @@ class AmazonSyncLog(models.Model):
             log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
             params.set_param('ke_amazon_sync.cat_map_state', 'idle')
             params.set_param('ke_amazon_sync.cat_map_offset', '')
+            params.set_param('ke_amazon_sync.cat_map_max_id', '')
             self.env.cr.commit()
             self._disable_cat_map_cron()
             _log.info('apply_category_mapping completato: %d prodotti totali.', total)
