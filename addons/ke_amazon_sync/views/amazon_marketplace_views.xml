@@ -4,7 +4,7 @@
         <field name="name">ke.amazon.marketplace.list</field>
         <field name="model">ke.amazon.marketplace</field>
         <field name="arch" type="xml">
-            <list string="Marketplace Amazon" editable="bottom">
+            <list string="Marketplace Amazon">
                 <field name="sequence" widget="handle"/>
                 <field name="name"/>
                 <field name="code"/>

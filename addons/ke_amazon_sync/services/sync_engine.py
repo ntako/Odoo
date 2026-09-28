@@ -629,9 +629,30 @@ class SyncEngine:
             'is_parent_listing': False,
         }
 
+    # Batch searchCatalogItems per l'arricchimento durante l'import a report —
+    # stesso valore di _CAT_MAP_BATCH_SIZE e stesso motivo (la risposta tronca
+    # 'items' a 10 anche se ne chiedi di più, vedi commento lì).
+    _FULL_IMPORT_CATALOG_BATCH_SIZE = 10
+
     def full_import_report_rows(self, log_rec, rows, row_offset, chunk_size, update_existing):
         """
-        Processa un chunk di righe del report listing (senza chiamate catalog API).
+        Processa un chunk di righe del report listing, arricchendo ogni ASIN
+        con una chiamata batch al Catalog API (10 ASIN/chiamata, stesso
+        meccanismo di apply_category_mapping) PRIMA di creare/aggiornare i
+        prodotti — a differenza del comportamento originale (nessuna chiamata
+        catalog qui, dimensioni/categoria/brand/descrizione/relazioni-varianti
+        sempre lasciate vuote fino a un giro separato di "Aggiorna da Catalog
+        API", che in più non ha mai potuto costruire famiglie di varianti
+        perché quel giro tocca solo campi su prodotti già creati come semplici).
+        Con questa chiamata in più, un ASIN che risulta 'relationships'
+        type=VARIATION viene instradato su _process_variant_listing (stessa
+        funzione già usata dal percorso legacy full_import/full_import_chunk
+        per cataloghi piccoli) invece di diventare un prodotto standalone.
+        Se la chiamata batch per un gruppo fallisce, quei prodotti vengono
+        comunque creati (come semplici, senza arricchimento) invece di bloccare
+        l'intero import — recuperabili in seguito da un giro di "Aggiorna da
+        Catalog API" (che però non potrà mai retroattivamente trasformarli in
+        varianti collegate, solo backfillare categoria/dimensioni/brand/testo).
         Ritorna il prossimo row_offset, oppure None se tutte le righe sono state elaborate.
         """
         product_type_odoo = _resolve_product_type(
@@ -667,6 +688,17 @@ class SyncEngine:
             if listing.asin and listing.asin not in existing_by_asin:
                 existing_by_asin[listing.asin] = listing.product_id
 
+        # Mappe famiglie varianti, stesso schema di full_import/full_import_chunk
+        # (mai popolate finora in questo percorso — vedi _process_variant_listing).
+        existing_by_parent_asin = {
+            p.x_amazon_parent_asin: p for p in
+            self.env['product.template'].search([('x_amazon_parent_asin', '!=', False)])
+        }
+        existing_variant_by_asin = {
+            v.x_amazon_asin: v for v in
+            self.env['product.product'].search([('x_amazon_asin', '!=', False)])
+        }
+
         # ASIN → SKU "buono" nel report: a parità di ASIN vince sempre la versione '+'
         # (rifornimento), indipendentemente dal pattern esatto del vecchio SKU
         # (typo, punto, ecc. — non ci si affida più al confronto testuale sku+'+').
@@ -684,6 +716,26 @@ class SyncEngine:
         if not chunk:
             return None
 
+        # Arricchimento Catalog API a batch (10 ASIN/chiamata) PRIMA di creare
+        # i prodotti — vedi docstring. Un fallimento di UNA chiamata batch non
+        # blocca l'intero chunk: quei prodotti restano senza arricchimento
+        # (creati comunque, come semplici), recuperabili in seguito.
+        chunk_asins = sorted({
+            (row.get('asin1') or '').strip() for row in chunk
+            if (row.get('asin1') or '').strip()
+        })
+        catalog_by_asin = {}
+        for i in range(0, len(chunk_asins), self._FULL_IMPORT_CATALOG_BATCH_SIZE):
+            batch = chunk_asins[i:i + self._FULL_IMPORT_CATALOG_BATCH_SIZE]
+            try:
+                catalog_by_asin.update(self.client.get_catalog_items_batch(batch))
+            except Exception as exc:
+                _log.warning(
+                    'full_import_report_rows: chiamata batch Catalog API fallita per %d ASIN '
+                    '(creati comunque senza arricchimento, recuperabili da Aggiorna da Catalog '
+                    'API in seguito): %s', len(batch), exc,
+                )
+
         created = updated = skipped = errors = 0
         lines = []
 
@@ -694,17 +746,44 @@ class SyncEngine:
             if not sku:
                 continue
 
-            # SKU superato dalla versione '+' con lo stesso ASIN: marca inattivo e salta
-            best_sku = best_sku_by_asin.get(asin) if asin else None
-            if best_sku and best_sku != sku and best_sku.endswith('+'):
-                existing = existing_by_sku.get(sku) or existing_by_default_code.get(sku)
-                if existing:
-                    existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
-                skipped += 1
-                lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
-                continue
+            if asin and asin in catalog_by_asin:
+                _merge_catalog(product, catalog_by_asin[asin])
 
             try:
+                # Contenitore della famiglia (non un'offerta vendibile a sé) — salta.
+                if product.get('is_parent_listing'):
+                    skipped += 1
+                    lines.append(f'SALTATO (parent listing): {sku} / {asin}')
+                    continue
+
+                parent_asin = product.get('parent_asin')
+                if parent_asin:
+                    # --- Variante di una famiglia (relationships dal Catalog API) ---
+                    res, msg = self._process_variant_listing(
+                        product, parent_asin, product_type_odoo,
+                        existing_by_parent_asin, existing_variant_by_asin,
+                        update_existing,
+                    )
+                    if res == 'created':
+                        created += 1
+                    elif res == 'updated':
+                        updated += 1
+                    else:
+                        skipped += 1
+                    lines.append(msg)
+                    continue
+
+                # --- Prodotto semplice (comportamento invariato) ---
+                # SKU superato dalla versione '+' con lo stesso ASIN: marca inattivo e salta.
+                best_sku = best_sku_by_asin.get(asin) if asin else None
+                if best_sku and best_sku != sku and best_sku.endswith('+'):
+                    existing = existing_by_sku.get(sku) or existing_by_default_code.get(sku)
+                    if existing:
+                        existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
+                    skipped += 1
+                    lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
+                    continue
+
                 existing = (
                     existing_by_sku.get(sku)
                     or existing_by_asin.get(asin)
@@ -735,11 +814,12 @@ class SyncEngine:
                 if product['ean']:
                     existing_by_barcode[product['ean']] = result_tmpl
                 existing_by_default_code[sku] = result_tmpl
+                lines.append(msg)
             except Exception as exc:
                 errors += 1
                 msg = f'ERRORE {sku}: {exc}'
                 _log.error(msg, exc_info=True)
-            lines.append(msg)
+                lines.append(msg)
 
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
@@ -1737,7 +1817,16 @@ class SyncEngine:
     # Funzione 4: Riconciliazione store (manuale o schedulata)
     # -----------------------------------------------------------------------
 
-    _CAT_MAP_BATCH_SIZE = 20  # max identifiers per chiamata searchCatalogItems
+    # NON 20 nonostante la doc SP-API dica "fino a 20 identifiers": verificato
+    # dal vivo che la risposta di searchCatalogItems tronca silenziosamente
+    # 'items' a un massimo di 10, anche quando 'numberOfResults' nella stessa
+    # risposta conferma che tutti i richiesti esistono e anche senza
+    # 'pagination'/nextToken per recuperare il resto — nessun errore, nessun
+    # segnale di troncamento, i dati mancanti finivano scambiati per "Amazon
+    # non ce li ha". Riprodotto in modo consistente con richieste da 12/15/20
+    # identifiers (sempre e solo 10 item tornati), anche con pause extra tra
+    # le chiamate (non è throttling). 10 richiesti -> 10 tornati, sempre.
+    _CAT_MAP_BATCH_SIZE = 10
 
     def apply_category_mapping(self, log_rec, offset, chunk_size, max_id=None):
         """

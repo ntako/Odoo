@@ -290,8 +290,18 @@ class SpApiClient:
 
     def get_catalog_items_batch(self, asins):
         """
-        Come get_catalog_item, ma per un gruppo di ASIN (max 20 per chiamata
-        — limite di searchCatalogItems) in una sola richiesta ad Amazon.
+        Come get_catalog_item, ma per un gruppo di ASIN in una sola richiesta
+        ad Amazon. Il limite qui sotto (20) è quello della RICHIESTA
+        (searchCatalogItems accetta fino a 20 identifiers, non dà errore con
+        meno) — ma la RISPOSTA tronca silenziosamente 'items' a un massimo
+        di 10, anche quando 'numberOfResults' conferma che tutti quelli
+        richiesti esistono e senza 'pagination'/nextToken per recuperare il
+        resto (verificato dal vivo: 12/15/20 richiesti -> sempre e solo 10
+        tornati, non throttling, riproducibile). Chi chiama con più di 10
+        ASIN per volta perderà silenziosamente dati reali, scambiabili per
+        "Amazon non li ha" — usa gruppi da 10, non da 20, nonostante quello
+        che dice la doc SP-API sulla richiesta (vedi _CAT_MAP_BATCH_SIZE in
+        sync_engine.py, che usa 10 proprio per questo).
         Ritorna {asin: item_payload}; un ASIN passato ma assente dal dict
         risultato significa che Amazon non ha trovato/restituito dati per
         quell'ASIN (stesso significato del dict vuoto di get_catalog_item),
