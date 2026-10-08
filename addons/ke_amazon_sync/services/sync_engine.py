@@ -1080,6 +1080,7 @@ class SyncEngine:
                 'x_amazon_browse_node_id': data.get('browse_node_id', ''),
             })
             if data.get('brand'):
+                vals['x_amazon_brand'] = data['brand']
                 vals['x_amazon_found_by_manufacturer'] = False
         img = _fetch_image_b64(data.get('image_url'))
         if img:
@@ -1304,6 +1305,17 @@ class SyncEngine:
             **_storable_vals(self.env),
             'categ_id': categ.id,
             'weight': first_child.get('weight_kg') or 0.0,
+            # Dimensioni/categoria-Amazon/brand mancavano qui — scritti solo
+            # da _create_product (prodotti semplici), mai da questa funzione
+            # (famiglie varianti). Trovato verificando un Full Import reale:
+            # 0 famiglie su 2.166 con x_amazon_category/x_amazon_brand, solo
+            # 76 con dimensioni (quelle arrivate da un giro successivo di
+            # apply_category_mapping, non dalla creazione). Il dato era già
+            # disponibile in first_child (_merge_catalog lo popola), solo mai
+            # copiato in vals.
+            'product_length': first_child.get('length_cm') or 0.0,
+            'product_width': first_child.get('width_cm') or 0.0,
+            'product_height': first_child.get('height_cm') or 0.0,
             'description_sale': description,
             'x_amazon_parent_asin': parent_asin,
             'x_amazon_product_type': first_child.get('product_type', ''),
@@ -1311,6 +1323,12 @@ class SyncEngine:
             'x_amazon_fulfillment': first_child.get('fulfillment', 'fbm'),
             'x_amazon_last_sync': datetime.now(),
         }
+        if first_child.get('category'):
+            vals['x_amazon_category'] = first_child['category']
+        if first_child.get('browse_node_id'):
+            vals['x_amazon_browse_node_id'] = first_child['browse_node_id']
+        if first_child.get('brand'):
+            vals['x_amazon_brand'] = first_child['brand']
         img = _fetch_image_b64(first_child.get('image_url'))
         if img:
             vals['image_1920'] = img
@@ -1881,11 +1899,23 @@ class SyncEngine:
         5.884, partito a ridosso della fine di un import completo che ne
         aveva appena creati 8.579). Con max_id il perimetro del giro resta
         fisso dall'avvio in poi, indipendentemente da cosa viene creato dopo.
+        Copre anche i TEMPLATE di famiglie di varianti (x_amazon_parent_asin
+        impostato), non solo i prodotti semplici: per una famiglia l'ASIN non
+        vive sul template (resta sempre vuoto), ma su una delle sue varianti
+        — qui si usa la prima variante come rappresentante per interrogare il
+        Catalog API, scrivendo comunque sul template (categoria/dimensioni/
+        brand sono dati di famiglia, condivisi da tutte le varianti). Aggiunto
+        dopo aver scoperto che _create_configurable_template non scriveva
+        affatto questi campi alla creazione (0 su 2.166 famiglie in un Full
+        Import reale) — quel bug è stato corretto a parte, ma le famiglie già
+        create prima del fix restavano comunque scoperte, perché questa
+        funzione non le considerava proprio (dominio filtrato solo su
+        x_amazon_asin, sempre vuoto per una famiglia).
         Ritorna (next_offset, total) o (None, total) se completato.
         """
-        domain = [('x_amazon_asin', '!=', False)]
+        domain = ['|', ('x_amazon_asin', '!=', False), ('x_amazon_parent_asin', '!=', False)]
         if max_id:
-            domain.append(('id', '<=', max_id))
+            domain = ['&'] + domain + [('id', '<=', max_id)]
         products = self.env['product.template'].search(domain, order='id asc')
         total = len(products)
         chunk = products[offset:offset + chunk_size]
@@ -1894,10 +1924,19 @@ class SyncEngine:
 
         updated = skipped = errors = 0
         msg_by_product_id = {}
-        to_fetch = []
+        to_fetch = []  # lista di (product, query_asin)
 
         for product in chunk:
-            ref = product.default_code or product.x_amazon_asin
+            if product.x_amazon_parent_asin:
+                representative = product.product_variant_ids[:1]
+                query_asin = representative.x_amazon_asin if representative else ''
+            else:
+                query_asin = product.x_amazon_asin
+            ref = product.default_code or query_asin or f'#{product.id}'
+            if not query_asin:
+                skipped += 1
+                msg_by_product_id[product.id] = f'SKIP {ref}: famiglia senza varianti con ASIN, impossibile interrogare Amazon'
+                continue
             needs_catalog = (
                 not product.x_amazon_category
                 or not product.product_length
@@ -1907,7 +1946,7 @@ class SyncEngine:
                 or not product.description_sale
             )
             if needs_catalog:
-                to_fetch.append(product)
+                to_fetch.append((product, query_asin))
             else:
                 skipped += 1
                 msg_by_product_id[product.id] = f'SKIP {ref}: dati già presenti'
@@ -1915,7 +1954,7 @@ class SyncEngine:
         for i in range(0, len(to_fetch), self._CAT_MAP_BATCH_SIZE):
             batch = to_fetch[i:i + self._CAT_MAP_BATCH_SIZE]
             try:
-                catalog_by_asin = self.client.get_catalog_items_batch([p.x_amazon_asin for p in batch])
+                catalog_by_asin = self.client.get_catalog_items_batch([qa for _, qa in batch])
             except Exception as exc:
                 # La chiamata batch è fallita per TUTTO il gruppo (throttling
                 # dopo i retry, errore di rete, ecc.) — non è "Amazon non ha
@@ -1924,15 +1963,14 @@ class SyncEngine:
                 # questi prodotti e vengano ritentati al prossimo giro,
                 # invece di essere scambiati per genuinamente privi di dati.
                 errors += len(batch)
-                for product in batch:
-                    ref = product.default_code or product.x_amazon_asin
+                for product, query_asin in batch:
+                    ref = product.default_code or query_asin
                     msg = f'ERRORE {ref}: chiamata batch fallita ({exc}), da ritentare'
                     _log.error(msg)
                     msg_by_product_id[product.id] = msg
                 continue
 
-            for product in batch:
-                asin = product.x_amazon_asin
+            for product, asin in batch:
                 ref = product.default_code or asin
                 try:
                     catalog = catalog_by_asin.get(asin, {})
