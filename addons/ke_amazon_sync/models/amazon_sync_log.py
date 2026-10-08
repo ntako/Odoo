@@ -1347,9 +1347,17 @@ class AmazonSyncLog(models.Model):
                     engine = SyncEngine(env, client)
                     page_token = None
                     token_restarts = 0
+                    # Accumulatore {asin: qty totale} per l'intero marketplace —
+                    # sync_fba_quantities_page lo muta in place e riconcilia solo
+                    # sull'ultima pagina (vedi il suo commento per il motivo:
+                    # aggregare per ASIN, non per SKU). Va azzerato insieme a
+                    # page_token quando si riparte da capo per un token scaduto,
+                    # altrimenti le pagine già viste prima del riavvio verrebbero
+                    # sommate due volte.
+                    asin_totals = {}
                     while True:
                         try:
-                            new_page_token = engine.sync_fba_quantities_page(log_rec, page_token)
+                            new_page_token = engine.sync_fba_quantities_page(log_rec, page_token, asin_totals)
                         except Exception as exc:
                             msg = str(exc).lower()
                             is_token_error = 'token' in msg and ('expired' in msg or 'invalid' in msg)
@@ -1362,6 +1370,7 @@ class AmazonSyncLog(models.Model):
                                     self._FBA_SYNC_MAX_TOKEN_RESTARTS, exc,
                                 )
                                 page_token = None
+                                asin_totals = {}
                                 continue
                             raise
                         if not new_page_token:

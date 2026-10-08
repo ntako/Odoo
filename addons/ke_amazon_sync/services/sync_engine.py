@@ -725,8 +725,19 @@ class SyncEngine:
             if (row.get('asin1') or '').strip()
         })
         catalog_by_asin = {}
+        n_batches = (len(chunk_asins) + self._FULL_IMPORT_CATALOG_BATCH_SIZE - 1) // self._FULL_IMPORT_CATALOG_BATCH_SIZE
         for i in range(0, len(chunk_asins), self._FULL_IMPORT_CATALOG_BATCH_SIZE):
             batch = chunk_asins[i:i + self._FULL_IMPORT_CATALOG_BATCH_SIZE]
+            batch_num = i // self._FULL_IMPORT_CATALOG_BATCH_SIZE + 1
+            # Strumentazione minima aggiunta dopo uno stallo reale non
+            # diagnosticato (import fermo per ore, nessun errore in log,
+            # nessun lock DB, Amazon raggiungibile subito dopo) — WARNING (non
+            # INFO) perché su questa istanza il livello log filtra INFO. Se si
+            # blocca di nuovo, l'ultima riga "richiedo" senza il "ricevuto"
+            # corrispondente isola con precisione la chiamata in corso, invece
+            # di dover indagare alla cieca come la prima volta.
+            _log.warning('full_import_report_rows: richiedo batch Catalog API %d/%d (%d ASIN)',
+                         batch_num, n_batches, len(batch))
             try:
                 catalog_by_asin.update(self.client.get_catalog_items_batch(batch))
             except Exception as exc:
@@ -735,6 +746,8 @@ class SyncEngine:
                     '(creati comunque senza arricchimento, recuperabili da Aggiorna da Catalog '
                     'API in seguito): %s', len(batch), exc,
                 )
+            else:
+                _log.warning('full_import_report_rows: ricevuto batch Catalog API %d/%d', batch_num, n_batches)
 
         created = updated = skipped = errors = 0
         lines = []
@@ -2348,66 +2361,98 @@ class SyncEngine:
         move._action_done()
         return qty_to_move
 
-    def sync_fba_quantities_page(self, log_rec, page_token=None):
+    def sync_fba_quantities_page(self, log_rec, page_token=None, asin_totals=None):
         """
-        Scarica e processa UNA pagina di inventario FBA da Amazon, aggiornando i
-        quant Odoo nel magazzino FBA configurato. Pensata per essere richiamata
-        a ripetizione (una pagina per invocazione del cron) invece di scaricare
-        tutte le pagine in un colpo solo: con centinaia di pagine possibili, un
-        singolo retry/backoff per throttling potrebbe far superare il limite di
-        tempo reale del cron se si tenta di fare tutto in un'unica chiamata.
-        Se la giacenza riportata da Amazon per uno SKU è aumentata rispetto
-        all'ultima sync, la differenza viene "consumata" dalla location
-        'In transito verso Amazon' (rifornimenti registrati con ship_to_fba).
+        Scarica UNA pagina di inventario FBA e la accumula in 'asin_totals'
+        (dict mutato in place, {asin: quantità totale}); riconcilia i quant
+        Odoo solo sull'ULTIMA pagina (quando Amazon non restituisce più un
+        nextToken). Il chiamante (_thread_sync_fba_quantities) possiede
+        'asin_totals' per tutta la durata di un marketplace e lo passa a ogni
+        chiamata — deve azzerarlo se riparte da capo per un token scaduto,
+        altrimenti le pagine già viste verrebbero sommate due volte.
+
+        Aggrega per ASIN, non per SKU: durante una transizione di
+        etichettatura Amazon (FNSKU) lo stesso ASIN può comparire sotto due
+        SKU contemporaneamente attivi (il vecchio, in esaurimento, e il nuovo
+        con '+', su cui arrivano i rifornimenti) — Odoo tratta l'ASIN come
+        identità primaria del prodotto (deciso in sessione), quindi la
+        giacenza reale è la SOMMA di entrambi gli SKU, non quella di uno solo.
+        Prima di questo fix, riconciliando riga per riga per SKU, il vecchio
+        SKU (che punta allo stesso prodotto Odoo rinominato al nuovo '+' — vedi
+        _update_product/best_sku_by_asin) semplicemente non trovava più nessun
+        prodotto con quello x_amazon_sku esatto e la sua giacenza spariva dalla
+        vista di Odoo, silenziosamente. Aggregare per pagina non basterebbe:
+        se il vecchio e il nuovo SKU finiscono su pagine diverse (probabile,
+        l'inventario è paginato ~50 righe a volta), sommarli pagina per pagina
+        sovrascriverebbe invece di sommare (_set_product_stock imposta un
+        valore ASSOLUTO) — da qui la necessità di accumulare su TUTTE le
+        pagine prima di scrivere qualunque quant.
+
+        Se la giacenza aggregata per un ASIN è aumentata rispetto all'ultima
+        sync, la differenza viene "consumata" dalla location 'In transito
+        verso Amazon' (rifornimenti registrati con ship_to_fba) prima di
+        riconciliare al valore assoluto — stesso ordine (transito prima,
+        assoluto dopo) del fix P1 doppio-incremento originale, per lo stesso
+        motivo: al contrario il quant finirebbe doppiamente incrementato.
 
         Fase 3 multi-marketplace (inventario FBA Pan-Europeo, confermato
         dall'utente): "pooled" non è un caso speciale per IT/DE/ES/FR, è
         determinato da ke.amazon.marketplace.is_fba_pooled() — vero se questo
         marketplace condivide il magazzino FBA effettivo con almeno un altro
-        marketplace attivo (vedi quel metodo per i dettagli, incluso come
-        un marketplace entra/esce dal pool senza toccare codice). Per un
-        marketplace pooled, il magazzino FBA in Odoo è condiviso — qui non ha
-        senso gating primario/secondario sul campo legacy x_amazon_qty:
-        rappresenta lo stesso stock fisico, riconfermato (redundante ma
-        innocuo, idempotente) da ognuno dei marketplace pooled che il
-        chiamante itera (vedi _thread_sync_fba_quantities).
-        Per un marketplace NON pooled (inventario davvero separato, es. UK/US
-        fuori dal pool EU), la quantità precedente/nuova si legge/scrive su
-        ke.amazon.listing.qty (già scoped per marketplace) invece che sul
-        campo condiviso x_amazon_qty, per non farla interferire con la
-        contabilità del pool su cui questo marketplace non è più.
-        Ritorna il next_token per la pagina successiva, o None se era l'ultima.
+        marketplace attivo. Per un marketplace pooled, il magazzino FBA in
+        Odoo è condiviso — qui non ha senso gating primario/secondario sul
+        campo legacy x_amazon_qty: rappresenta lo stesso stock fisico,
+        riconfermato (redundante ma innocuo, idempotente) da ognuno dei
+        marketplace pooled che il chiamante itera. Per un marketplace NON
+        pooled (inventario davvero separato, es. UK/US fuori dal pool EU),
+        la quantità precedente/nuova si legge/scrive su ke.amazon.listing.qty
+        (già scoped per marketplace) invece che sul campo condiviso
+        x_amazon_qty, per non farla interferire con la contabilità del pool
+        su cui questo marketplace non è più.
+        Ritorna il next_token per la pagina successiva, o None se era l'ultima
+        (e la riconciliazione è già stata fatta).
         """
         marketplace = self._current_marketplace()
         fba_location = self._get_fba_warehouse_location(marketplace)
         if not fba_location:
             raise UserError('Magazzino FBA non configurato (Impostazioni → Amazon → Magazzini).')
-        transit_location = self._get_or_create_transit_location(fba_location)
         mp_tag = f'[{marketplace.code}] ' if marketplace else ''
-        dedicated = bool(marketplace) and not marketplace.is_fba_pooled()
 
         items, new_page_token = self.client.fetch_inventory_page(page_token)
 
-        updated = errors = skipped = 0
-        lines = [f'{mp_tag}Pagina ricevuta: {len(items)} SKU.']
-
+        if asin_totals is None:
+            asin_totals = {}
         for entry in items:
-            sku = entry['sku']
-            fba_qty = float(entry['qty'] or 0)
+            asin = entry.get('asin') or ''
+            if not asin:
+                continue
+            asin_totals[asin] = asin_totals.get(asin, 0.0) + float(entry.get('qty') or 0)
 
+        if new_page_token:
+            # Non ultima pagina: solo accumulo, nessuna scrittura su Odoo qui.
+            return new_page_token
+
+        # --- Ultima pagina: riconcilia tutto quello accumulato per il marketplace ---
+        transit_location = self._get_or_create_transit_location(fba_location)
+        dedicated = bool(marketplace) and not marketplace.is_fba_pooled()
+
+        updated = errors = skipped = 0
+        lines = [f'{mp_tag}Inventario scaricato: {len(asin_totals)} ASIN distinti.']
+
+        for asin, fba_qty in asin_totals.items():
             product_tmpl = self.env['product.template'].search(
-                [('x_amazon_sku', '=', sku)], limit=1,
+                [('x_amazon_asin', '=', asin)], limit=1,
             )
             matched_on = 'template'
             if product_tmpl:
                 product_variant = product_tmpl.product_variant_id
             else:
                 variant = self.env['product.product'].search(
-                    [('x_amazon_sku', '=', sku)], limit=1,
+                    [('x_amazon_asin', '=', asin)], limit=1,
                 )
                 if not variant:
                     skipped += 1
-                    lines.append(f'{mp_tag}SALTATO {sku}: nessun prodotto Odoo con questo x_amazon_sku')
+                    lines.append(f'{mp_tag}SALTATO {asin}: nessun prodotto Odoo con questo x_amazon_asin')
                     continue
                 matched_on = 'variante'
                 product_variant = variant
@@ -2416,8 +2461,6 @@ class SyncEngine:
             try:
                 listing = None
                 if dedicated:
-                    # Inventario non pooled: previous/new qty su ke.amazon.listing,
-                    # mai su x_amazon_qty (quel campo resta il valore del pool EU).
                     listing = self.env['ke.amazon.listing'].sudo().search([
                         ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
                     ], limit=1)
@@ -2425,13 +2468,6 @@ class SyncEngine:
                 else:
                     previous_qty = product_tmpl.x_amazon_qty or 0
                 increase = fba_qty - previous_qty
-                # Prima si sposta (se c'è un aumento) dal transito al magazzino FBA
-                # reale — un movimento fisico che incrementa già il quant FBA — e
-                # SOLO DOPO si riconcilia al valore assoluto dichiarato da Amazon.
-                # Nell'ordine inverso (riconciliazione assoluta, poi movimento in
-                # aggiunta) il quant FBA finiva doppiamente incrementato: prima
-                # impostato a fba_qty, poi il movimento del transito ci sommava
-                # sopra ancora la quantità spostata.
                 moved = 0.0
                 if increase > 0:
                     moved = self._consume_transit_stock(
@@ -2443,9 +2479,6 @@ class SyncEngine:
                         listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
                 else:
                     product_tmpl.write({'x_amazon_qty': int(fba_qty)})
-                    # Riga listing del marketplace corrente, se esiste già (creata
-                    # da full_import/reconcile): aggiornata per visibilità, mai
-                    # creata qui.
                     if marketplace:
                         listing = self.env['ke.amazon.listing'].sudo().search([
                             ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
@@ -2454,7 +2487,7 @@ class SyncEngine:
                             listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
                 updated += 1
                 msg = (
-                    f'{mp_tag}OK {sku} ({matched_on} #{product_tmpl.id}): '
+                    f'{mp_tag}OK {asin} ({matched_on} #{product_tmpl.id}): '
                     f'FBA qty {previous_qty:g} → {fba_qty:g}'
                 )
                 if moved > 0:
@@ -2462,26 +2495,25 @@ class SyncEngine:
                 lines.append(msg)
             except Exception as exc:
                 errors += 1
-                lines.append(f'{mp_tag}ERRORE {sku}: {exc}')
-                _log.error('sync_fba: errore aggiornamento %s: %s', sku, exc)
+                lines.append(f'{mp_tag}ERRORE {asin}: {exc}')
+                _log.error('sync_fba: errore aggiornamento %s: %s', asin, exc)
 
-        if not new_page_token:
-            lines.append(
-                f'{mp_tag}Riepilogo: {log_rec.products_updated + updated} aggiornati, '
-                f'{log_rec.products_skipped + skipped} saltati (nessun match), '
-                f'{log_rec.products_error + errors} errori, '
-                f'{log_rec.products_total + len(items)} SKU totali da Amazon.'
-            )
+        lines.append(
+            f'{mp_tag}Riepilogo: {log_rec.products_updated + updated} aggiornati, '
+            f'{log_rec.products_skipped + skipped} saltati (nessun match), '
+            f'{log_rec.products_error + errors} errori, '
+            f'{len(asin_totals)} ASIN totali da Amazon.'
+        )
         new_log = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
-            'products_total': log_rec.products_total + len(items),
+            'products_total': log_rec.products_total + len(asin_totals),
             'products_updated': log_rec.products_updated + updated,
             'products_skipped': log_rec.products_skipped + skipped,
             'products_error': log_rec.products_error + errors,
             'log_lines': new_log,
         })
         self.env.cr.commit()
-        return new_page_token
+        return None
 
     # ------------------------------------------------------------------
     # Import ordini Amazon → sale.order

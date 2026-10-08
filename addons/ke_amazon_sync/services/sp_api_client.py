@@ -411,11 +411,15 @@ class SpApiClient:
     def fetch_inventory_page(self, page_token=None):
         """
         Scarica UNA pagina di inventario FBA (senza scorrere tutte le pagine).
-        Ritorna ([{'sku':..., 'qty':...}, ...], next_token_o_None). Usata dalla
-        sync a blocchi per evitare che un'unica invocazione del cron debba
+        Ritorna ([{'sku':..., 'asin':..., 'qty':...}, ...], next_token_o_None).
+        Usata dalla sync a blocchi per evitare che un'unica invocazione debba
         scaricare tutte le pagine (potenzialmente centinaia) in un colpo solo,
-        rischiando di superare il limite di tempo reale del cron in caso di
-        throttling/retry con backoff su una singola pagina.
+        rischiando di superare il limite di tempo reale in caso di
+        throttling/retry con backoff su una singola pagina. 'asin' è incluso
+        perché la riconciliazione (sync_engine.sync_fba_quantities_page)
+        aggrega per ASIN, non per SKU: durante una transizione di
+        etichettatura Amazon lo stesso ASIN può comparire sotto due SKU
+        diversi (vecchio e nuovo '+') nella stessa risposta.
         In caso di errore la chiamata viene rilanciata (non va confusa con la
         fine della paginazione): il chiamante deve trattarla come fallimento,
         altrimenti la sync verrebbe erroneamente segnata come completata a metà.
@@ -425,6 +429,7 @@ class SpApiClient:
         items = [
             {
                 'sku': s.get('sellerSku', ''),
+                'asin': s.get('asin', ''),
                 'qty': s.get('inventoryDetails', {}).get('fulfillableQuantity', 0),
             }
             for s in payload.get('inventorySummaries', [])
