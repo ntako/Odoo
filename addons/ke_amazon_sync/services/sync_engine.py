@@ -1167,14 +1167,27 @@ class SyncEngine:
             # Aggiorna default_code se era allineato al vecchio SKU Amazon o se non c'era SKU precedente
             # (non sovrascrivere codici impostati manualmente dall'utente)
             old_sku = product.x_amazon_sku or ''
+            old_default_code = product.default_code or ''
             if new_sku != old_sku and (not old_sku or product.default_code == old_sku):
                 vals['default_code'] = new_sku
-            # Indicazione informativa (non usata per nessun match): tiene visibile
-            # l'ultimo SKU sostituito, per capire a colpo d'occhio quali prodotti
-            # sono stati riassegnati (es. rifornimento con '+') senza dover cercare
-            # nel log sincronizzazioni.
-            if new_sku != old_sku and old_sku:
-                vals['x_amazon_sku_previous'] = old_sku
+                # Indicazione informativa (non usata per nessun match): tiene
+                # visibile l'ultimo codice sostituito, per capire a colpo
+                # d'occhio quali prodotti sono stati riassegnati (es.
+                # rifornimento con '+') senza dover cercare nel log
+                # sincronizzazioni. Tracciava solo 'old_sku' — quindi SOLO
+                # quando c'era già uno SKU Amazon da sostituire: un prodotto
+                # puramente manuale (x_amazon_sku mai impostato, default_code
+                # = riferimento interno originale) abbinato per la prima volta
+                # via EAN/barcode finiva nel ramo 'not old_sku' sopra, il suo
+                # default_code originale veniva sovrascritto e perso senza
+                # traccia da nessuna parte (trovato verificando 176 prodotti
+                # rinominati così dopo un Full Import reale). Tracciare invece
+                # 'old_default_code' copre entrambi i casi con lo stesso
+                # campo: quando c'era già un old_sku coincide con prima
+                # (default_code era allineato a x_amazon_sku), quando non
+                # c'era cattura il codice manuale originale.
+                if old_default_code and old_default_code != new_sku:
+                    vals['x_amazon_sku_previous'] = old_default_code
 
         if vals:
             product.write(vals)
