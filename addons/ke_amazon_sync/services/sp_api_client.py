@@ -50,6 +50,7 @@ def _with_retry(delay_s, retry_max=None, backoff_s=None):
         def wrapper(*args, **kwargs):
             import socket
             import ssl
+            import httpx
             import requests.exceptions
             from sp_api.base.exceptions import (
                 SellingApiRequestThrottledException, SellingApiException,
@@ -74,9 +75,19 @@ def _with_retry(delay_s, retry_max=None, backoff_s=None):
                     else:
                         raise
                 except (requests.exceptions.RequestException, ssl.SSLError,
-                        socket.timeout, OSError) as exc:
-                    # Errori di rete/SSL transitori: retry con attesa fissa breve
-                    _log.warning('%s: errore rete/SSL "%s" (tentativo %d/%d), attendo %ds',
+                        socket.timeout, OSError, httpx.TransportError) as exc:
+                    # Errori di rete/SSL/DNS transitori: retry con attesa fissa
+                    # breve. httpx.TransportError (ConnectError/ReadTimeout/
+                    # NetworkError/ecc.) aggiunto dopo un incidente reale: la
+                    # libreria sp_api usa httpx sotto il cofano, non requests —
+                    # le sue eccezioni non derivano da OSError/socket.timeout/
+                    # ssl.SSLError (verificato sull'MRO), quindi un blip DNS
+                    # transitorio (httpx.ConnectError, "Temporary failure in
+                    # name resolution") non veniva mai catturato qui: usciva
+                    # subito, facendo fallire l'intero thread invece di
+                    # ritentare. Questo except esisteva già per requests, ma
+                    # era morto per la libreria realmente in uso.
+                    _log.warning('%s: errore rete/SSL/DNS "%s" (tentativo %d/%d), attendo %ds',
                                  fn.__name__, exc, attempt, retry_max, RETRY_NET_BACKOFF_S)
                     if attempt == retry_max:
                         raise
@@ -477,6 +488,14 @@ class SpApiClient:
     # Reports API (GET_MERCHANT_LISTINGS_ALL_DATA) — nessun limite di 1000
     # ------------------------------------------------------------------
 
+    # Nessuna di queste request_*_report/download_report_rows passava per
+    # _with_retry — chiamate dirette, un blip di rete/DNS transitorio le
+    # faceva fallire subito senza alcun ritentativo (a differenza delle
+    # chiamate Catalog/Inventory/Listings più sotto, già tutte protette).
+    # Delay minimo perché sono chiamate rare (una/due per marketplace per
+    # sync, mai in un ciclo stretto) — qui serve resilienza, non un vero
+    # rate limit.
+    @_with_retry(1.0, retry_max=3, backoff_s=8)
     def request_listings_report(self):
         """Crea un report listing completo. Ritorna il reportId."""
         from sp_api.api import Reports
@@ -487,6 +506,7 @@ class SpApiClient:
         )
         return resp.payload['reportId']
 
+    @_with_retry(1.0, retry_max=3, backoff_s=8)
     def request_returns_report(self, data_start_time):
         """Crea il report dei resi cliente FBA da data_start_time (ISO-8601) a oggi. Ritorna il reportId."""
         from sp_api.api import Reports
@@ -498,6 +518,7 @@ class SpApiClient:
         )
         return resp.payload['reportId']
 
+    @_with_retry(1.0, retry_max=3, backoff_s=8)
     def request_orders_report(self, data_start_time, data_end_time, marketplace_ids=None):
         """
         Crea il report ordini completo (GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL,
@@ -529,6 +550,7 @@ class SpApiClient:
         )
         return resp.payload['reportId']
 
+    @_with_retry(1.0, retry_max=3, backoff_s=8)
     def request_fnsku_report(self):
         """
         Crea il report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA). Ritorna il
@@ -558,14 +580,28 @@ class SpApiClient:
         all'infinito invece di segnalare il problema — trovato con un caso
         reale (marketplace non autorizzato, import bloccato per ore senza
         mai fallire visibilmente, nessun errore in log finché non fermato
-        a mano). Solo gli errori davvero transitori (429, 5xx) vengono
-        ancora ritentati silenziosamente.
+        a mano). Solo gli errori davvero transitori (429, 5xx, e ora anche
+        un blip di rete/DNS — httpx.TransportError, vedi sotto) vengono
+        ancora ritentati silenziosamente: il chiamante gira già in un poll
+        loop (ogni _REPORT_POLL_INTERVAL_S secondi, fino a un tetto di
+        sicurezza), quindi basta ritornare None per farlo ritentare da solo
+        al giro successivo — niente retry interno qui, lo fa già chi chiama.
+        Trovato con un incidente reale: un blip DNS transitorio
+        (httpx.ConnectError, "Temporary failure in name resolution") non
+        era una SellingApiException (quella copre solo errori HTTP con
+        risposta ricevuta da Amazon, non un fallimento di connessione prima
+        ancora di arrivarci) — usciva subito, facendo fallire l'intero
+        thread invece di essere ritentato al giro successivo.
         """
+        import httpx
         from sp_api.api import Reports
         from sp_api.base import SellingApiException
         api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
         try:
             resp = api.get_report(report_id)
+        except httpx.TransportError as exc:
+            _log.warning('check_report_ready: errore rete/DNS transitorio, ritento al prossimo giro: %s', exc)
+            return None
         except SellingApiException as exc:
             code = getattr(exc, 'code', None)
             if code == 429 or (isinstance(code, int) and code >= 500):
@@ -580,6 +616,7 @@ class SpApiClient:
             raise RuntimeError(f'Report {report_id} terminato con stato: {status}')
         return None
 
+    @_with_retry(1.0, retry_max=3, backoff_s=8)
     def download_report_rows(self, document_id):
         """Scarica e parsa il report TSV. Ritorna lista di dict (una riga = un prodotto)."""
         import csv
