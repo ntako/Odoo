@@ -539,6 +539,7 @@ class SyncEngine:
                         product, parent_asin, product_type_odoo,
                         existing_by_parent_asin, existing_variant_by_asin,
                         update_existing, existing_by_sku, existing_by_default_code,
+                        existing_variant_tmpl_by_sku,
                     )
                     if res == 'created':
                         created += 1
@@ -821,6 +822,7 @@ class SyncEngine:
                         product, parent_asin, product_type_odoo,
                         existing_by_parent_asin, existing_variant_by_asin,
                         update_existing, existing_by_sku, existing_by_default_code,
+                        existing_variant_tmpl_by_sku,
                     )
                     if res == 'created':
                         created += 1
@@ -1020,6 +1022,7 @@ class SyncEngine:
                         product, parent_asin, product_type_odoo,
                         existing_by_parent_asin, existing_variant_by_asin,
                         update_existing, existing_by_sku, existing_by_default_code,
+                        existing_variant_tmpl_by_sku,
                     )
                     if res == 'created':
                         created += 1
@@ -1318,7 +1321,8 @@ class SyncEngine:
     def _process_variant_listing(self, product, parent_asin, product_type_odoo,
                                   existing_by_parent_asin, existing_variant_by_asin,
                                   update_existing, existing_by_sku=None,
-                                  existing_by_default_code=None):
+                                  existing_by_default_code=None,
+                                  existing_variant_tmpl_by_sku=None):
         """
         Processa un child ASIN Amazon come variante Odoo.
         Crea o aggiorna il product.template della famiglia e aggiunge la variante.
@@ -1335,6 +1339,17 @@ class SyncEngine:
         si promuove sul posto il template semplice esistente (sotto). Il caso
         "famiglia già creata da un fratello" (0 casi oggi, possibile in
         futuro) non può fondersi in sicurezza qui, viene solo segnalato.
+
+        existing_variant_tmpl_by_sku (opzionale, stessa mappa usata dal ramo
+        prodotto-semplice per riconoscere uno SKU già-variante quando la riga
+        ha l'ASIN vuoto — vedi lì): va aggiornata anche qui ogni volta che una
+        variante viene creata/confermata, altrimenti resta ferma allo stato
+        dell'inizio del chunk e una riga più avanti nello STESSO chunk per lo
+        stesso SKU non la trova ancora, duplicando. Trovato e verificato dopo
+        il Full Import del 2026-10-12: 22 casi, tutti creati nella stessa
+        finestra di un chunk (stesso `create_date` al microsecondo — il
+        `now()` di Postgres è fisso per transazione, conferma che sono nati
+        nello stesso commit).
         """
         sku = product['sku']
         asin = product['asin']
@@ -1400,6 +1415,8 @@ class SyncEngine:
                             _log.warning('Impossibile assegnare barcode %s a variante %s: %s',
                                          product['ean'], sku, exc)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
+                if existing_variant_tmpl_by_sku is not None:
+                    existing_variant_tmpl_by_sku[sku] = tmpl
                 msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}'
                 return 'updated', msg
             else:
@@ -1445,6 +1462,8 @@ class SyncEngine:
         variant = self._add_variant_to_template(tmpl, product, attr_label, attr_value)
         if variant:
             existing_variant_by_asin[asin] = variant
+            if existing_variant_tmpl_by_sku is not None:
+                existing_variant_tmpl_by_sku[sku] = tmpl
             self._init_product_warehouse_quant(
                 variant, product.get('fulfillment', 'fbm'), product.get('qty_available') or 0,
             )
