@@ -1356,14 +1356,18 @@ class SyncEngine:
         attr_info = product.get('variation_attr')
 
         conflict = (existing_by_sku or {}).get(sku) or (existing_by_default_code or {}).get(sku)
-        if conflict and conflict.x_amazon_parent_asin:
-            conflict = None  # è già una famiglia, non un prodotto semplice in conflitto
 
         # Trova o crea il template della famiglia
         tmpl = existing_by_parent_asin.get(parent_asin)
         if not tmpl:
-            if conflict:
-                # Promuove sul posto il template semplice esistente a famiglia
+            if conflict and conflict.x_amazon_parent_asin == parent_asin:
+                # Il conflitto trovato è già la famiglia giusta —
+                # existing_by_parent_asin non l'aveva ancora (mappa non
+                # sincronizzata in qualche punto): riusala invece di
+                # crearne una terza.
+                tmpl = conflict
+            elif conflict and not conflict.x_amazon_parent_asin:
+                # Prodotto semplice genuino: promuove sul posto a famiglia
                 # — stesso id, stessa product.product, nessun quant da
                 # spostare (verificato dal vivo: aggiungere la prima riga
                 # attributo a un template con una sola variante riusa quella
@@ -1382,17 +1386,41 @@ class SyncEngine:
                 if stripped_name and stripped_name != tmpl.name:
                     promo_vals['name'] = stripped_name
                 tmpl.write(promo_vals)
+            elif conflict:
+                # conflict è GIA' una famiglia ma con un parent_asin DIVERSO
+                # da quello di questa riga — non è il caso "promuovi un
+                # semplice", è un conflitto genuino: lo stesso SKU risulta
+                # appartenere a due famiglie diverse secondo Amazon in
+                # momenti diversi dello stesso import (verificato dal vivo:
+                # ASIN del report non più aggiornato, lo SKU non esiste
+                # nemmeno più sul marketplace che l'aveva riportato così).
+                # Creare una terza famiglia peggiorerebbe le cose: segnala
+                # e basta, stesso trattamento del caso sotto. Bug trovato
+                # perché la vecchia versione di questo controllo nullificava
+                # 'conflict' ogni volta che era già una famiglia, nascondendo
+                # anche questo caso genuino invece di segnalarlo.
+                msg = (
+                    f'SALTATO (conflitto): {sku} / {asin} risulta già nella famiglia '
+                    f'"{conflict.name[:40]}" (id={conflict.id}, parent_asin={conflict.x_amazon_parent_asin}) '
+                    f'ma questa riga indica un parent_asin diverso ({parent_asin}) — '
+                    f'probabile ASIN non aggiornato nel report Amazon, serve verifica manuale'
+                )
+                _log.warning(msg)
+                return 'skipped', msg
             else:
                 tmpl = self._create_configurable_template(product, parent_asin, product_type_odoo)
             existing_by_parent_asin[parent_asin] = tmpl
         elif conflict and conflict.id != tmpl.id:
-            # La famiglia esiste già (creata da un fratello) E questo SKU è
-            # ANCHE un template semplice separato: fondere qui richiederebbe
-            # spostare stock.quant/righe ordine dal semplice a una nuova
-            # variante — troppo rischioso da fare automaticamente dentro il
-            # loop di import. Segnala, non creare un'altra variante duplicata.
+            # La famiglia esiste già (trovata via parent_asin) E lo stesso
+            # SKU punta ANCHE a un template diverso (semplice separato, o
+            # un'altra famiglia con parent_asin diverso — stesso genere di
+            # conflitto del ramo sopra): fondere qui richiederebbe spostare
+            # stock.quant/righe ordine, troppo rischioso in automatico
+            # dentro il loop di import. Segnala, non creare un'altra
+            # variante duplicata.
             msg = (
-                f'SALTATO (conflitto): {sku} / {asin} esiste già come prodotto semplice '
+                f'SALTATO (conflitto): {sku} / {asin} esiste già come '
+                f'{"prodotto semplice" if not conflict.x_amazon_parent_asin else "famiglia diversa"} '
                 f'(id={conflict.id}) separato dalla famiglia "{tmpl.name[:40]}" (id={tmpl.id}) '
                 f'— serve fusione manuale'
             )
@@ -1402,6 +1430,22 @@ class SyncEngine:
         # Controlla se questa variante (child ASIN) esiste già
         existing_variant = existing_variant_by_asin.get(asin)
         if existing_variant:
+            if update_existing and not sku.endswith('+') and (existing_variant.x_amazon_sku or '').endswith('+'):
+                # Non sovrascrivere un SKU con '+' usando uno senza '+' —
+                # stessa guardia già presente nel ramo prodotto-semplice,
+                # mancava qui. Tra marketplace diversi lo stesso ASIN può
+                # comparire a volte con '+' a volte senza (propagazione non
+                # sincrona della riassegnazione FNSKU) — senza questa
+                # guardia lo SKU della variante "rimbalza" tra le due forme
+                # a seconda dell'ordine di elaborazione dei marketplace, e
+                # la forma non attualmente salvata diventa invisibile al
+                # matching per le righe successive (existing_variant_tmpl_
+                # by_sku) — causa diretta di duplicati, verificata dal vivo
+                # sul Full Import del 2026-10-13 (C4C-0BELTC4MANYGO+ → senza
+                # '+' da un marketplace, poi una riga successiva con '+' non
+                # trovava più nulla e duplicava).
+                msg = f'SALTATO (sostituito da {existing_variant.x_amazon_sku}): {sku}'
+                return 'skipped', msg
             if update_existing:
                 existing_variant.write({
                     'x_amazon_sku': sku,
