@@ -287,6 +287,37 @@ class TestFullImportMatching(TransactionCase):
         self.assertTrue(t1.exists())
         self.assertTrue(t2.exists())
 
+    # ------------------------------------------------------------------
+    # Tredicesimo bug (2026-10-15): find_simple ritorna correttamente None
+    # quando il match è una famiglia, ma se quella famiglia ha la variante
+    # senza x_amazon_sku scritto (debito di dati da bug precedenti, solo
+    # default_code presente), variant_tmpl_by_sku da solo non la trova più
+    # e una riga con ASIN vuoto per quello SKU creava un duplicato.
+    # ------------------------------------------------------------------
+
+    def test_empty_asin_row_skips_family_even_without_variant_sku(self):
+        sku = 'ZZT-NOVARIANTSKU'
+        parent = 'B0ZZNOVARIANTPARENT'
+
+        fam_tmpl = self.env['product.template'].create({
+            'name': 'ZZT Famiglia senza variant sku', 'type': 'consu', 'is_storable': True,
+            'x_amazon_parent_asin': parent,
+        })
+        # Solo default_code sulla variante, MAI x_amazon_sku/x_amazon_asin —
+        # replica esatta del debito di dati trovato dal vivo (es. SKU
+        # "034-45-100", id reale 23564): la variante ha default_code ma non
+        # x_amazon_sku, quindi non compare in variant_tmpl_by_sku.
+        fam_tmpl.product_variant_id.write({'default_code': sku})
+
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        log = self._make_log('test famiglia senza variant sku')
+        self._run(eng, log, [make_report_row(sku, asin='')])
+
+        count = self.env['product.template'].search_count([('default_code', '=', sku)])
+        self.assertEqual(count, 1, 'non deve creare un duplicato anche se la famiglia non ha x_amazon_sku sulla variante')
+        fam_tmpl.invalidate_recordset()
+        self.assertEqual(fam_tmpl.x_amazon_parent_asin, parent, 'la famiglia non deve essere stata toccata')
+
     def test_detect_duplicate_skus_no_false_positive_on_unique_sku(self):
         self.env['product.template'].create({
             'name': 'ZZT Unico', 'type': 'consu', 'is_storable': True,

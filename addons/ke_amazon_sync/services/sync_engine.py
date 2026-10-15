@@ -476,6 +476,22 @@ class _MatchMaps:
             return match
         return None
 
+    def find_known_family(self, sku):
+        """
+        Ritorna il template famiglia già noto per questo SKU, usato dal ramo
+        prodotto-semplice per evitare un duplicato quando la riga ha
+        l'ASIN vuoto. Cerca prima tra le varianti (variant_tmpl_by_sku),
+        poi come riserva tra i template stessi (stessa ricerca di
+        find_family_conflict) — alcune famiglie più vecchie hanno la
+        variante senza x_amazon_sku scritto (debito di una generazione di
+        bug precedente, mai sanato retroattivamente), quindi il solo
+        controllo su variant_tmpl_by_sku non basta: senza questa riserva,
+        una riga con ASIN vuoto per quello SKU non trova nulla e crea un
+        duplicato. Trovato e verificato dal vivo il 2026-10-15 (129 casi
+        su un Full Import reale, tredicesimo bug).
+        """
+        return self.variant_tmpl_by_sku.get(sku) or self.find_family_conflict(sku)
+
     def register_simple(self, sku, asin, ean, tmpl):
         """Un solo punto per aggiornare tutte le mappe del ramo prodotto-semplice."""
         self.by_sku[sku] = tmpl
@@ -654,15 +670,15 @@ class SyncEngine:
                             skipped += 1
                             msg = f'SALTATO (già esiste): {sku}'
                         result_tmpl = existing
-                    elif maps.variant_tmpl_by_sku.get(sku):
-                        # Vedi commento su _MatchMaps.variant_tmpl_by_sku:
-                        # SKU già variante di una famiglia, riga senza ASIN nel
+                    elif maps.find_known_family(sku):
+                        # Vedi commento su _MatchMaps.find_known_family: SKU
+                        # già di una famiglia esistente, riga senza ASIN nel
                         # report — salta invece di creare un duplicato o
                         # corrompere il template famiglia con campi "semplice".
-                        variant_tmpl = maps.variant_tmpl_by_sku[sku]
+                        variant_tmpl = maps.find_known_family(sku)
                         skipped += 1
                         msg = (
-                            f'SALTATO (SKU già variante della famiglia "{variant_tmpl.name[:40]}" '
+                            f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
                             f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
                         )
                         result_tmpl = None
@@ -894,21 +910,21 @@ class SyncEngine:
                         skipped += 1
                         msg = f'SALTATO (già esiste): {sku}'
                     result_tmpl = existing
-                elif maps.variant_tmpl_by_sku.get(sku):
-                    # Lo SKU appartiene già a una variante di una famiglia esistente,
-                    # ma questa riga del report ha l'ASIN vuoto (quirk noto del
-                    # report bulk Amazon: a volte omette l'ASIN anche se il listing
-                    # ce l'ha, verificato dal vivo via Listings API in tempo reale
-                    # sullo stesso SKU) — senza ASIN non possiamo instradare su
+                elif maps.find_known_family(sku):
+                    # Vedi commento su _MatchMaps.find_known_family: SKU già
+                    # di una famiglia esistente, riga senza ASIN nel report
+                    # (quirk noto del report bulk Amazon: a volte omette
+                    # l'ASIN anche se il listing ce l'ha, verificato dal vivo
+                    # via Listings API in tempo reale sullo stesso SKU) —
+                    # senza ASIN non possiamo instradare su
                     # _process_variant_listing, e chiamare _update_product qui
                     # scriverebbe campi "semplice" su un template famiglia
                     # (corrompendolo). Meglio saltare che creare un duplicato o
-                    # corrompere la famiglia — trovato e verificato dopo il Full
-                    # Import del 2026-10-09 (7 casi).
-                    variant_tmpl = maps.variant_tmpl_by_sku[sku]
+                    # corrompere la famiglia.
+                    variant_tmpl = maps.find_known_family(sku)
                     skipped += 1
                     msg = (
-                        f'SALTATO (SKU già variante della famiglia "{variant_tmpl.name[:40]}" '
+                        f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
                         f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
                     )
                     result_tmpl = None
@@ -1026,15 +1042,15 @@ class SyncEngine:
                             skipped += 1
                             msg = f'SALTATO (già esiste): {sku}'
                         result_tmpl = existing
-                    elif maps.variant_tmpl_by_sku.get(sku):
-                        # Vedi commento su _MatchMaps.variant_tmpl_by_sku:
-                        # SKU già variante di una famiglia, riga senza ASIN nel
+                    elif maps.find_known_family(sku):
+                        # Vedi commento su _MatchMaps.find_known_family: SKU
+                        # già di una famiglia esistente, riga senza ASIN nel
                         # report — salta invece di creare un duplicato o
                         # corrompere il template famiglia con campi "semplice".
-                        variant_tmpl = maps.variant_tmpl_by_sku[sku]
+                        variant_tmpl = maps.find_known_family(sku)
                         skipped += 1
                         msg = (
-                            f'SALTATO (SKU già variante della famiglia "{variant_tmpl.name[:40]}" '
+                            f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
                             f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
                         )
                         result_tmpl = None
