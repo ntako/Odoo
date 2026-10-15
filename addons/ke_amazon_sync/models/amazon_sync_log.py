@@ -658,6 +658,19 @@ class AmazonSyncLog(models.Model):
                     params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
                     env.cr.commit()
 
+                # Rilevamento (non risoluzione) SKU duplicati su tutto il
+                # catalogo, a coda marketplace esaurita — vedi
+                # SyncEngine.detect_duplicate_skus. Sola lettura, non deve
+                # mai far fallire la chiusura dell'import se qualcosa va
+                # storto nella query stessa.
+                try:
+                    dup_engine = SyncEngine(env, None)
+                    n_dup = dup_engine.detect_duplicate_skus(log_rec)
+                    if n_dup:
+                        _log.warning('Full import: %d SKU duplicati rilevati, vedi log sincronizzazione.', n_dup)
+                except Exception as exc:
+                    _log.warning('Rilevamento SKU duplicati fallito (non bloccante): %s', exc)
+
                 SyncLog._finish_full_import(log_rec)
             except Exception as exc:
                 _log.error('Thread full_import fallito: %s', exc, exc_info=True)

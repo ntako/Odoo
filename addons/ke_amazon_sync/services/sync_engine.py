@@ -373,6 +373,130 @@ def _resolve_product_type(env, requested):
     return next(iter(valid), 'consu')
 
 
+class _MatchMaps:
+    """
+    Raggruppa tutte le mappe di matching SKU/ASIN/EAN usate da full_import/
+    full_import_report_rows/full_import_chunk e da _process_variant_listing,
+    con un punto unico per leggerle (find_*) e aggiornarle (register_*).
+
+    Nata dal nono/decimo/undicesimo/dodicesimo bug (2026-10-09/12/13, vedi
+    TASK.md): tutti causati dalla stessa dinamica — una mappa costruita una
+    volta a inizio chunk, tenuta sincronizzata a mano con righe sparse nei
+    due rami (prodotto semplice / variante), e puntualmente dimenticata in
+    uno dei due quando se ne aggiungeva una nuova o se ne cambiava la
+    semantica. Centralizzare qui lettura e scrittura non elimina la
+    possibilità di un bug, ma lo confina a UN punto invece che a N punti
+    sincronizzati manualmente.
+    """
+
+    def __init__(self, env, by_barcode):
+        self.by_sku = {
+            p.x_amazon_sku: p for p in
+            env['product.template'].search([('x_amazon_sku', '!=', False)])
+        }
+        self.by_asin = {
+            p.x_amazon_asin: p for p in
+            env['product.template'].search([('x_amazon_asin', '!=', False)])
+        }
+        self.by_default_code = {
+            p.default_code: p for p in
+            env['product.template'].search([('default_code', '!=', False)])
+            if p.default_code
+        }
+        # Costruita a parte (SyncEngine._build_barcode_map(), serve self)
+        # e passata qui invece di ricostruita, per non duplicare la query.
+        self.by_barcode = by_barcode
+        self.by_parent_asin = {
+            p.x_amazon_parent_asin: p for p in
+            env['product.template'].search([('x_amazon_parent_asin', '!=', False)])
+        }
+        self.variant_by_asin = {
+            v.x_amazon_asin: v for v in
+            env['product.product'].search([('x_amazon_asin', '!=', False)])
+        }
+        # Varianti di famiglia indicizzate per SKU (non solo per ASIN): serve
+        # a riconoscere uno SKU già appartenente a una famiglia anche quando
+        # la riga del report ha l'ASIN vuoto (quirk noto del report bulk
+        # Amazon — verificato dal vivo via Listings API che il listing
+        # l'ASIN ce l'ha davvero, il report a volte no). x_amazon_sku su
+        # product.product è scritto solo per le varianti di famiglia, mai
+        # per prodotti semplici — nessun falso positivo possibile qui.
+        self.variant_tmpl_by_sku = {
+            v.x_amazon_sku: v.product_tmpl_id for v in
+            env['product.product'].search([('x_amazon_sku', '!=', False)])
+        }
+
+    def add_listing_fallback(self, listings):
+        """
+        Fase 3 multi-marketplace: un prodotto creato/aggiornato SOLO da un
+        marketplace non primario non ha i campi legacy x_amazon_* popolati
+        (vedi SyncEngine._is_primary_marketplace) — senza questo, un secondo
+        marketplace per lo stesso prodotto non lo troverebbe in by_sku/
+        by_asin e ne creerebbe un duplicato. ke.amazon.listing copre tutti i
+        marketplace, a prescindere da quale sia primario.
+        """
+        for listing in listings:
+            if listing.sku and listing.sku not in self.by_sku:
+                self.by_sku[listing.sku] = listing.product_id
+            if listing.asin and listing.asin not in self.by_asin:
+                self.by_asin[listing.asin] = listing.product_id
+
+    def find_simple(self, sku, asin, ean):
+        """
+        Prodotto semplice esistente per sku/asin/ean/default_code, o None.
+        Ritorna None anche quando il match trovato è in realtà un template
+        famiglia (visibile qui solo perché Odoo espone default_code/
+        x_amazon_sku del template quando la famiglia ha momentaneamente una
+        sola variante) — _update_product non va MAI chiamato su una
+        famiglia, le scriverebbe sopra campi "semplice" corrompendola
+        (decimo bug, verificato dal vivo con un test isolato).
+        """
+        match = (
+            self.by_sku.get(sku)
+            or self.by_asin.get(asin)
+            or (ean and self.by_barcode.get(ean))
+            or self.by_default_code.get(sku)
+        )
+        if match and match.x_amazon_parent_asin:
+            return None
+        return match
+
+    def find_family_conflict(self, sku):
+        """
+        Stesso match di find_simple, letto al contrario: un template
+        famiglia trovato per questo SKU tramite le mappe 'semplice'. Usato
+        da _process_variant_listing per sapere se questo SKU appartiene GIA'
+        a una famiglia (eventualmente diversa da quella indicata dalla riga
+        corrente — dodicesimo bug, causa A: ASIN non più aggiornato nel
+        report, due famiglie diverse trovate per lo stesso SKU in momenti
+        diversi dello stesso import).
+        """
+        match = self.by_sku.get(sku) or self.by_default_code.get(sku)
+        if match and match.x_amazon_parent_asin:
+            return match
+        return None
+
+    def register_simple(self, sku, asin, ean, tmpl):
+        """Un solo punto per aggiornare tutte le mappe del ramo prodotto-semplice."""
+        self.by_sku[sku] = tmpl
+        if asin:
+            self.by_asin[asin] = tmpl
+        if ean:
+            self.by_barcode[ean] = tmpl
+        self.by_default_code[sku] = tmpl
+
+    def register_family(self, parent_asin, tmpl):
+        self.by_parent_asin[parent_asin] = tmpl
+
+    def register_variant(self, asin, sku, variant, tmpl):
+        """Un solo punto per aggiornare le mappe del ramo variante — causa
+        diretta dell'undicesimo bug quando mancava per variant_tmpl_by_sku."""
+        if asin:
+            self.variant_by_asin[asin] = variant
+        if sku:
+            self.variant_tmpl_by_sku[sku] = tmpl
+
+
 class SyncEngine:
     def __init__(self, env, client):
         self.env = env
@@ -471,40 +595,7 @@ class SyncEngine:
         )
 
         # Pre-carica indici per matching rapido
-        existing_by_sku = {
-            p.x_amazon_sku: p for p in
-            self.env['product.template'].search([('x_amazon_sku', '!=', False)])
-        }
-        existing_by_asin = {
-            p.x_amazon_asin: p for p in
-            self.env['product.template'].search([('x_amazon_asin', '!=', False)])
-        }
-        existing_by_barcode = self._build_barcode_map()
-        existing_by_default_code = {
-            p.default_code: p for p in
-            self.env['product.template'].search([('default_code', '!=', False)])
-            if p.default_code
-        }
-        existing_by_parent_asin = {
-            p.x_amazon_parent_asin: p for p in
-            self.env['product.template'].search([('x_amazon_parent_asin', '!=', False)])
-        }
-        existing_variant_by_asin = {
-            v.x_amazon_asin: v for v in
-            self.env['product.product'].search([('x_amazon_asin', '!=', False)])
-        }
-        # Varianti di famiglia indicizzate per SKU (non solo per ASIN): serve al
-        # ramo prodotto-semplice sotto per riconoscere uno SKU già appartenente
-        # a una famiglia anche quando la riga del report ha l'ASIN vuoto (quirk
-        # noto del report bulk Amazon — verificato dal vivo via Listings API che
-        # il listing l'ASIN ce l'ha davvero, il report a volte no). x_amazon_sku
-        # su product.product è scritto solo da _add_variant_to_template/
-        # _process_variant_listing, mai per prodotti semplici — nessun falso
-        # positivo possibile qui.
-        existing_variant_tmpl_by_sku = {
-            v.x_amazon_sku: v.product_tmpl_id for v in
-            self.env['product.product'].search([('x_amazon_sku', '!=', False)])
-        }
+        maps = _MatchMaps(self.env, self._build_barcode_map())
 
         created = updated = skipped = errors = 0
         lines = []
@@ -536,10 +627,7 @@ class SyncEngine:
                 if parent_asin:
                     # --- Prodotto con varianti ---
                     res, msg = self._process_variant_listing(
-                        product, parent_asin, product_type_odoo,
-                        existing_by_parent_asin, existing_variant_by_asin,
-                        update_existing, existing_by_sku, existing_by_default_code,
-                        existing_variant_tmpl_by_sku,
+                        product, parent_asin, product_type_odoo, maps, update_existing,
                     )
                     if res == 'created':
                         created += 1
@@ -549,28 +637,14 @@ class SyncEngine:
                         skipped += 1
                 else:
                     # --- Prodotto semplice ---
-                    # Il match per ASIN copre già il caso di rifornimento (SKU cambiato,
-                    # ASIN invariato), qualunque sia il pattern esatto del vecchio SKU.
-                    existing = (
-                        existing_by_sku.get(sku)
-                        or existing_by_asin.get(asin)
-                        or (product['ean'] and existing_by_barcode.get(product['ean']))
-                        or existing_by_default_code.get(sku)
-                    )
-                    if existing and existing.x_amazon_parent_asin:
-                        # Il "match" trovato è in realtà un template famiglia
-                        # (visibile qui solo perché Odoo espone default_code/
-                        # x_amazon_sku del template quando la famiglia ha
-                        # momentaneamente una sola variante) — non è un
-                        # prodotto semplice, _update_product scriverebbe
-                        # campi "semplice" sul template famiglia corrompendolo.
-                        # Trattalo come non-trovato: ricade sul controllo
-                        # existing_variant_tmpl_by_sku sotto.
-                        existing = None
+                    # find_simple ritorna None anche quando il match trovato è
+                    # in realtà un template famiglia (vedi _MatchMaps.find_simple).
+                    existing = maps.find_simple(sku, asin, product['ean'])
                     # Non sovrascrivere un SKU con '+' usando uno senza '+'
                     if existing and not sku.endswith('+') and (existing.x_amazon_sku or '').endswith('+'):
                         skipped += 1
                         msg = f'SALTATO (sostituito da {existing.x_amazon_sku}): {sku}'
+                        result_tmpl = None
                     elif existing:
                         if update_existing:
                             self._update_product(existing, product)
@@ -579,21 +653,26 @@ class SyncEngine:
                         else:
                             skipped += 1
                             msg = f'SALTATO (già esiste): {sku}'
-                    elif sku in existing_variant_tmpl_by_sku:
-                        # Vedi commento su existing_variant_tmpl_by_sku più sopra:
+                        result_tmpl = existing
+                    elif maps.variant_tmpl_by_sku.get(sku):
+                        # Vedi commento su _MatchMaps.variant_tmpl_by_sku:
                         # SKU già variante di una famiglia, riga senza ASIN nel
                         # report — salta invece di creare un duplicato o
                         # corrompere il template famiglia con campi "semplice".
-                        variant_tmpl = existing_variant_tmpl_by_sku[sku]
+                        variant_tmpl = maps.variant_tmpl_by_sku[sku]
                         skipped += 1
                         msg = (
                             f'SALTATO (SKU già variante della famiglia "{variant_tmpl.name[:40]}" '
                             f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
                         )
+                        result_tmpl = None
                     else:
-                        self._create_product(product, product_type_odoo)
+                        result_tmpl = self._create_product(product, product_type_odoo)
                         created += 1
                         msg = f'CREATO: {sku} / {asin} — {product["name"][:50]}'
+
+                    if result_tmpl:
+                        maps.register_simple(sku, asin, product['ean'], result_tmpl)
 
             except Exception as exc:
                 errors += 1
@@ -696,54 +775,14 @@ class SyncEngine:
             )
         )
 
-        existing_by_sku = {
-            p.x_amazon_sku: p for p in
-            self.env['product.template'].search([('x_amazon_sku', '!=', False)])
-        }
-        existing_by_asin = {
-            p.x_amazon_asin: p for p in
-            self.env['product.template'].search([('x_amazon_asin', '!=', False)])
-        }
-        existing_by_barcode = self._build_barcode_map()
-        existing_by_default_code = {
-            p.default_code: p for p in
-            self.env['product.template'].search([('default_code', '!=', False)])
-            if p.default_code
-        }
+        maps = _MatchMaps(self.env, self._build_barcode_map())
         # Fase 3 multi-marketplace: un prodotto creato/aggiornato SOLO da un
         # marketplace non primario non ha i campi legacy x_amazon_* popolati
         # (vedi _is_primary_marketplace) — senza questo, un secondo marketplace
         # per lo stesso prodotto non lo troverebbe nelle mappe sopra e ne
         # creerebbe un duplicato. ke.amazon.listing copre tutti i marketplace,
         # a prescindere da quale sia primario.
-        for listing in self.env['ke.amazon.listing'].sudo().search([]):
-            if listing.sku and listing.sku not in existing_by_sku:
-                existing_by_sku[listing.sku] = listing.product_id
-            if listing.asin and listing.asin not in existing_by_asin:
-                existing_by_asin[listing.asin] = listing.product_id
-
-        # Mappe famiglie varianti, stesso schema di full_import/full_import_chunk
-        # (mai popolate finora in questo percorso — vedi _process_variant_listing).
-        existing_by_parent_asin = {
-            p.x_amazon_parent_asin: p for p in
-            self.env['product.template'].search([('x_amazon_parent_asin', '!=', False)])
-        }
-        existing_variant_by_asin = {
-            v.x_amazon_asin: v for v in
-            self.env['product.product'].search([('x_amazon_asin', '!=', False)])
-        }
-        # Varianti di famiglia indicizzate per SKU (non solo per ASIN): serve al
-        # ramo prodotto-semplice sotto per riconoscere uno SKU già appartenente
-        # a una famiglia anche quando la riga del report ha l'ASIN vuoto (quirk
-        # noto del report bulk Amazon — verificato dal vivo via Listings API che
-        # il listing l'ASIN ce l'ha davvero, il report a volte no). x_amazon_sku
-        # su product.product è scritto solo da _add_variant_to_template/
-        # _process_variant_listing, mai per prodotti semplici — nessun falso
-        # positivo possibile qui.
-        existing_variant_tmpl_by_sku = {
-            v.x_amazon_sku: v.product_tmpl_id for v in
-            self.env['product.product'].search([('x_amazon_sku', '!=', False)])
-        }
+        maps.add_listing_fallback(self.env['ke.amazon.listing'].sudo().search([]))
 
         # ASIN → SKU "buono" nel report: a parità di ASIN vince sempre la versione '+'
         # (rifornimento), indipendentemente dal pattern esatto del vecchio SKU
@@ -819,10 +858,7 @@ class SyncEngine:
                 if parent_asin:
                     # --- Variante di una famiglia (relationships dal Catalog API) ---
                     res, msg = self._process_variant_listing(
-                        product, parent_asin, product_type_odoo,
-                        existing_by_parent_asin, existing_variant_by_asin,
-                        update_existing, existing_by_sku, existing_by_default_code,
-                        existing_variant_tmpl_by_sku,
+                        product, parent_asin, product_type_odoo, maps, update_existing,
                     )
                     if res == 'created':
                         created += 1
@@ -837,31 +873,18 @@ class SyncEngine:
                 # SKU superato dalla versione '+' con lo stesso ASIN: marca inattivo e salta.
                 best_sku = best_sku_by_asin.get(asin) if asin else None
                 if best_sku and best_sku != sku and best_sku.endswith('+'):
-                    existing = existing_by_sku.get(sku) or existing_by_default_code.get(sku)
+                    existing = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
                     if existing:
                         existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
                     skipped += 1
                     lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
                     continue
 
-                existing = (
-                    existing_by_sku.get(sku)
-                    or existing_by_asin.get(asin)
-                    or (product['ean'] and existing_by_barcode.get(product['ean']))
-                    or existing_by_default_code.get(sku)
-                )
-                if existing and existing.x_amazon_parent_asin:
-                    # Il "match" trovato è in realtà un template famiglia
-                    # (visibile qui solo perché Odoo espone default_code/
-                    # x_amazon_sku del template quando la famiglia ha
-                    # momentaneamente una sola variante) — non è un prodotto
-                    # semplice, _update_product scriverebbe campi "semplice"
-                    # sul template famiglia corrompendolo. Trattalo come
-                    # non-trovato: ricade sul controllo
-                    # existing_variant_tmpl_by_sku sotto. Verificato dal vivo
-                    # (test isolato ha riprodotto esattamente questa scrittura
-                    # indesiderata prima di questo fix).
-                    existing = None
+                # find_simple ritorna None anche quando il match trovato è in
+                # realtà un template famiglia (vedi _MatchMaps.find_simple) —
+                # ricade sul controllo variant_tmpl_by_sku sotto invece di
+                # corrompere la famiglia con _update_product.
+                existing = maps.find_simple(sku, asin, product['ean'])
                 if existing:
                     if update_existing:
                         self._update_product(existing, product)
@@ -871,7 +894,7 @@ class SyncEngine:
                         skipped += 1
                         msg = f'SALTATO (già esiste): {sku}'
                     result_tmpl = existing
-                elif sku in existing_variant_tmpl_by_sku:
+                elif maps.variant_tmpl_by_sku.get(sku):
                     # Lo SKU appartiene già a una variante di una famiglia esistente,
                     # ma questa riga del report ha l'ASIN vuoto (quirk noto del
                     # report bulk Amazon: a volte omette l'ASIN anche se il listing
@@ -882,7 +905,7 @@ class SyncEngine:
                     # (corrompendolo). Meglio saltare che creare un duplicato o
                     # corrompere la famiglia — trovato e verificato dopo il Full
                     # Import del 2026-10-09 (7 casi).
-                    variant_tmpl = existing_variant_tmpl_by_sku[sku]
+                    variant_tmpl = maps.variant_tmpl_by_sku[sku]
                     skipped += 1
                     msg = (
                         f'SALTATO (SKU già variante della famiglia "{variant_tmpl.name[:40]}" '
@@ -899,12 +922,7 @@ class SyncEngine:
                 # 'amzn.gr.*', varianti 'stickerless', typo nello SKU) non verrebbe
                 # riconosciuto come lo stesso prodotto e finirebbe duplicato.
                 if result_tmpl:
-                    existing_by_sku[sku] = result_tmpl
-                    if asin:
-                        existing_by_asin[asin] = result_tmpl
-                    if product['ean']:
-                        existing_by_barcode[product['ean']] = result_tmpl
-                    existing_by_default_code[sku] = result_tmpl
+                    maps.register_simple(sku, asin, product['ean'], result_tmpl)
                 lines.append(msg)
             except Exception as exc:
                 errors += 1
@@ -942,55 +960,18 @@ class SyncEngine:
             )
         )
 
-        existing_by_sku = {
-            p.x_amazon_sku: p for p in
-            self.env['product.template'].search([('x_amazon_sku', '!=', False)])
-        }
-        existing_by_asin = {
-            p.x_amazon_asin: p for p in
-            self.env['product.template'].search([('x_amazon_asin', '!=', False)])
-        }
+        maps = _MatchMaps(self.env, self._build_barcode_map())
         # Fase 3 multi-marketplace (stesso fix già fatto in full_import_report_rows,
         # mancava qui — vedi TASK.md): un prodotto creato/aggiornato SOLO da un
         # marketplace non primario non ha i campi legacy x_amazon_* popolati
         # (vedi _is_primary_marketplace), quindi non comparirebbe nelle mappe
         # sopra e un secondo marketplace lo duplicherebbe invece di aggiornarlo.
         # ke.amazon.listing copre tutti i marketplace, a prescindere da quale
-        # sia primario. Non serve estendere existing_by_parent_asin/
-        # existing_variant_by_asin: le famiglie con varianti non passano mai
-        # da _upsert_listing (vedi _process_variant_listing), quindi non hanno
-        # comunque righe ke.amazon.listing da cui attingere.
-        for mp_listing in self.env['ke.amazon.listing'].sudo().search([]):
-            if mp_listing.sku and mp_listing.sku not in existing_by_sku:
-                existing_by_sku[mp_listing.sku] = mp_listing.product_id
-            if mp_listing.asin and mp_listing.asin not in existing_by_asin:
-                existing_by_asin[mp_listing.asin] = mp_listing.product_id
-        existing_by_barcode = self._build_barcode_map()
-        existing_by_default_code = {
-            p.default_code: p for p in
-            self.env['product.template'].search([('default_code', '!=', False)])
-            if p.default_code
-        }
-        existing_by_parent_asin = {
-            p.x_amazon_parent_asin: p for p in
-            self.env['product.template'].search([('x_amazon_parent_asin', '!=', False)])
-        }
-        existing_variant_by_asin = {
-            v.x_amazon_asin: v for v in
-            self.env['product.product'].search([('x_amazon_asin', '!=', False)])
-        }
-        # Varianti di famiglia indicizzate per SKU (non solo per ASIN): serve al
-        # ramo prodotto-semplice sotto per riconoscere uno SKU già appartenente
-        # a una famiglia anche quando la riga del report ha l'ASIN vuoto (quirk
-        # noto del report bulk Amazon — verificato dal vivo via Listings API che
-        # il listing l'ASIN ce l'ha davvero, il report a volte no). x_amazon_sku
-        # su product.product è scritto solo da _add_variant_to_template/
-        # _process_variant_listing, mai per prodotti semplici — nessun falso
-        # positivo possibile qui.
-        existing_variant_tmpl_by_sku = {
-            v.x_amazon_sku: v.product_tmpl_id for v in
-            self.env['product.product'].search([('x_amazon_sku', '!=', False)])
-        }
+        # sia primario. Non serve estendere by_parent_asin/variant_by_asin: le
+        # famiglie con varianti non passano mai da _upsert_listing (vedi
+        # _process_variant_listing), quindi non hanno comunque righe
+        # ke.amazon.listing da cui attingere.
+        maps.add_listing_fallback(self.env['ke.amazon.listing'].sudo().search([]))
 
         created = updated = skipped = errors = 0
         lines = []
@@ -1019,10 +1000,7 @@ class SyncEngine:
 
                 if parent_asin:
                     res, msg = self._process_variant_listing(
-                        product, parent_asin, product_type_odoo,
-                        existing_by_parent_asin, existing_variant_by_asin,
-                        update_existing, existing_by_sku, existing_by_default_code,
-                        existing_variant_tmpl_by_sku,
+                        product, parent_asin, product_type_odoo, maps, update_existing,
                     )
                     if res == 'created':
                         created += 1
@@ -1031,24 +1009,9 @@ class SyncEngine:
                     else:
                         skipped += 1
                 else:
-                    # Il match per ASIN copre già il caso di rifornimento (SKU cambiato,
-                    # ASIN invariato), qualunque sia il pattern esatto del vecchio SKU.
-                    existing = (
-                        existing_by_sku.get(sku)
-                        or existing_by_asin.get(asin)
-                        or (product['ean'] and existing_by_barcode.get(product['ean']))
-                        or existing_by_default_code.get(sku)
-                    )
-                    if existing and existing.x_amazon_parent_asin:
-                        # Il "match" trovato è in realtà un template famiglia
-                        # (visibile qui solo perché Odoo espone default_code/
-                        # x_amazon_sku del template quando la famiglia ha
-                        # momentaneamente una sola variante) — non è un
-                        # prodotto semplice, _update_product scriverebbe
-                        # campi "semplice" sul template famiglia
-                        # corrompendolo. Trattalo come non-trovato: ricade sul
-                        # controllo existing_variant_tmpl_by_sku sotto.
-                        existing = None
+                    # find_simple ritorna None anche quando il match trovato è
+                    # in realtà un template famiglia (vedi _MatchMaps.find_simple).
+                    existing = maps.find_simple(sku, asin, product['ean'])
                     # Non sovrascrivere un SKU con '+' usando uno senza '+'
                     if existing and not sku.endswith('+') and (existing.x_amazon_sku or '').endswith('+'):
                         skipped += 1
@@ -1063,12 +1026,12 @@ class SyncEngine:
                             skipped += 1
                             msg = f'SALTATO (già esiste): {sku}'
                         result_tmpl = existing
-                    elif sku in existing_variant_tmpl_by_sku:
-                        # Vedi commento su existing_variant_tmpl_by_sku più sopra:
+                    elif maps.variant_tmpl_by_sku.get(sku):
+                        # Vedi commento su _MatchMaps.variant_tmpl_by_sku:
                         # SKU già variante di una famiglia, riga senza ASIN nel
                         # report — salta invece di creare un duplicato o
                         # corrompere il template famiglia con campi "semplice".
-                        variant_tmpl = existing_variant_tmpl_by_sku[sku]
+                        variant_tmpl = maps.variant_tmpl_by_sku[sku]
                         skipped += 1
                         msg = (
                             f'SALTATO (SKU già variante della famiglia "{variant_tmpl.name[:40]}" '
@@ -1085,12 +1048,7 @@ class SyncEngine:
                     # varianti 'stickerless', typo nello SKU) non verrebbe riconosciuto
                     # come lo stesso prodotto e finirebbe duplicato.
                     if result_tmpl:
-                        existing_by_sku[sku] = result_tmpl
-                        if asin:
-                            existing_by_asin[asin] = result_tmpl
-                        if product['ean']:
-                            existing_by_barcode[product['ean']] = result_tmpl
-                        existing_by_default_code[sku] = result_tmpl
+                        maps.register_simple(sku, asin, product['ean'], result_tmpl)
             except Exception as exc:
                 errors += 1
                 msg = f'ERRORE {sku}: {exc}'
@@ -1126,6 +1084,77 @@ class SyncEngine:
         if exclude_product_ids:
             domain.append(('id', 'not in', list(exclude_product_ids)))
         return not self.env['product.product'].sudo().search(domain, limit=1)
+
+    def detect_duplicate_skus(self, log_rec):
+        """
+        Rileva (non risolve) SKU che risultano su più di un product.template
+        tra i prodotti legati ad Amazon — causa principale verificata dal
+        vivo: il report bulk Amazon contiene a volte un ASIN storico/non
+        aggiornato per alcune righe (dodicesimo bug, vedi TASK.md), oppure
+        marketplace diversi creano template indipendenti per lo stesso SKU
+        testuale prima che il matching li riconosca come lo stesso prodotto.
+
+        Scrive un riepilogo nel log della sync con abbastanza dettaglio (id,
+        tipo semplice/famiglia, ASIN/parent_asin, marketplace coinvolti) per
+        una verifica manuale — NON fonde né cancella nulla: fondere
+        automaticamente due template rischierebbe di spostare stock/ordini
+        sul prodotto sbagliato (stesso principio già applicato al conflitto
+        rilevato durante l'import, vedi _process_variant_listing).
+
+        Chiamato una volta a fine Full Import (tutti i marketplace
+        esauriti), sull'intero catalogo — non solo sui prodotti toccati da
+        questo giro, così resta uno strumento di verifica anche per
+        duplicati residui da giri precedenti. Ritorna il numero di gruppi
+        di SKU duplicati trovati (0 se nessuno).
+        """
+        self.env.cr.execute("""
+            WITH dups AS (
+                SELECT t.default_code
+                FROM product_template t
+                WHERE t.default_code IS NOT NULL AND t.default_code != ''
+                  AND (
+                        (t.x_amazon_asin IS NOT NULL AND t.x_amazon_asin != '')
+                     OR (t.x_amazon_parent_asin IS NOT NULL AND t.x_amazon_parent_asin != '')
+                     OR EXISTS (SELECT 1 FROM ke_amazon_listing l WHERE l.product_id = t.id)
+                  )
+                GROUP BY t.default_code
+                HAVING count(*) > 1
+            )
+            SELECT t.id, t.default_code, t.x_amazon_asin, t.x_amazon_parent_asin
+            FROM product_template t
+            JOIN dups d ON d.default_code = t.default_code
+            ORDER BY t.default_code, t.id
+        """)
+        rows = self.env.cr.dictfetchall()
+        if not rows:
+            return 0
+
+        by_code = {}
+        for r in rows:
+            by_code.setdefault(r['default_code'], []).append(r)
+
+        lines = [
+            f'=== SKU DUPLICATI RILEVATI: {len(by_code)} — verifica manuale, '
+            f'nessuna fusione automatica ==='
+        ]
+        for code, templates in by_code.items():
+            parts = []
+            for t in templates:
+                tmpl_id = t['id']
+                listings = self.env['ke.amazon.listing'].sudo().search([('product_id', '=', tmpl_id)])
+                marketplaces = ', '.join(listings.mapped('marketplace_id.code')) or '-'
+                kind = 'famiglia' if t['x_amazon_parent_asin'] else 'semplice'
+                parts.append(
+                    f'id={tmpl_id} ({kind}, asin={t["x_amazon_asin"] or "-"}, '
+                    f'parent_asin={t["x_amazon_parent_asin"] or "-"}, marketplace=[{marketplaces}])'
+                )
+            lines.append(f'SKU "{code}": ' + ' | '.join(parts))
+
+        log_rec.write({
+            'log_lines': ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip(),
+        })
+        self.env.cr.commit()
+        return len(by_code)
 
     def _build_barcode_map(self):
         """Mappa barcode -> product.template. Logga (senza bloccare) i barcode duplicati:
@@ -1318,51 +1347,44 @@ class SyncEngine:
     # Gestione prodotti con varianti (famiglia Amazon)
     # -----------------------------------------------------------------------
 
-    def _process_variant_listing(self, product, parent_asin, product_type_odoo,
-                                  existing_by_parent_asin, existing_variant_by_asin,
-                                  update_existing, existing_by_sku=None,
-                                  existing_by_default_code=None,
-                                  existing_variant_tmpl_by_sku=None):
+    def _process_variant_listing(self, product, parent_asin, product_type_odoo, maps, update_existing):
         """
         Processa un child ASIN Amazon come variante Odoo.
         Crea o aggiorna il product.template della famiglia e aggiunge la variante.
         Ritorna (stato, msg) dove stato è 'created'|'updated'|'skipped'.
 
-        existing_by_sku/existing_by_default_code (opzionali, stesse mappe già
-        costruite dal ramo prodotto-semplice nei tre chiamanti): rilevano il
-        caso in cui questo SKU è già stato importato come prodotto semplice
-        in un passaggio precedente (es. l'arricchimento Catalog API era
-        fallito quella volta e non aveva ancora rivelato 'relationships') —
-        senza questo controllo si creerebbe un secondo template per lo stesso
-        SKU reale. Trovato e verificato dopo il Full Import del 2026-10-09:
-        127 casi, tutti con famiglia ancora senza altri fratelli — per quelli
-        si promuove sul posto il template semplice esistente (sotto). Il caso
-        "famiglia già creata da un fratello" (0 casi oggi, possibile in
-        futuro) non può fondersi in sicurezza qui, viene solo segnalato.
+        `maps` (_MatchMaps, condivisa col ramo prodotto-semplice nei tre
+        chiamanti) rileva il caso in cui questo SKU è già stato importato
+        come prodotto semplice in un passaggio precedente (es. l'arricchimento
+        Catalog API era fallito quella volta e non aveva ancora rivelato
+        'relationships') — senza questo controllo si creerebbe un secondo
+        template per lo stesso SKU reale. Trovato e verificato dopo il Full
+        Import del 2026-10-09: 127 casi, tutti con famiglia ancora senza
+        altri fratelli — per quelli si promuove sul posto il template
+        semplice esistente (sotto). Il caso "famiglia già creata da un
+        fratello" non può fondersi in sicurezza qui, viene solo segnalato.
 
-        existing_variant_tmpl_by_sku (opzionale, stessa mappa usata dal ramo
-        prodotto-semplice per riconoscere uno SKU già-variante quando la riga
-        ha l'ASIN vuoto — vedi lì): va aggiornata anche qui ogni volta che una
-        variante viene creata/confermata, altrimenti resta ferma allo stato
-        dell'inizio del chunk e una riga più avanti nello STESSO chunk per lo
-        stesso SKU non la trova ancora, duplicando. Trovato e verificato dopo
-        il Full Import del 2026-10-12: 22 casi, tutti creati nella stessa
-        finestra di un chunk (stesso `create_date` al microsecondo — il
-        `now()` di Postgres è fisso per transazione, conferma che sono nati
-        nello stesso commit).
+        `maps.variant_tmpl_by_sku` va aggiornata anche qui (via
+        maps.register_variant) ogni volta che una variante viene creata/
+        confermata, altrimenti resta ferma allo stato dell'inizio del chunk
+        e una riga più avanti nello STESSO chunk per lo stesso SKU non la
+        trova ancora, duplicando. Trovato e verificato dopo il Full Import
+        del 2026-10-12: 22 casi, tutti creati nella stessa finestra di un
+        chunk (stesso `create_date` al microsecondo — il `now()` di Postgres
+        è fisso per transazione, conferma che sono nati nello stesso commit).
         """
         sku = product['sku']
         asin = product['asin']
         attr_info = product.get('variation_attr')
 
-        conflict = (existing_by_sku or {}).get(sku) or (existing_by_default_code or {}).get(sku)
+        conflict = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
 
         # Trova o crea il template della famiglia
-        tmpl = existing_by_parent_asin.get(parent_asin)
+        tmpl = maps.by_parent_asin.get(parent_asin)
         if not tmpl:
             if conflict and conflict.x_amazon_parent_asin == parent_asin:
                 # Il conflitto trovato è già la famiglia giusta —
-                # existing_by_parent_asin non l'aveva ancora (mappa non
+                # maps.by_parent_asin non l'aveva ancora (mappa non
                 # sincronizzata in qualche punto): riusala invece di
                 # crearne una terza.
                 tmpl = conflict
@@ -1409,7 +1431,7 @@ class SyncEngine:
                 return 'skipped', msg
             else:
                 tmpl = self._create_configurable_template(product, parent_asin, product_type_odoo)
-            existing_by_parent_asin[parent_asin] = tmpl
+            maps.register_family(parent_asin, tmpl)
         elif conflict and conflict.id != tmpl.id:
             # La famiglia esiste già (trovata via parent_asin) E lo stesso
             # SKU punta ANCHE a un template diverso (semplice separato, o
@@ -1428,7 +1450,7 @@ class SyncEngine:
             return 'skipped', msg
 
         # Controlla se questa variante (child ASIN) esiste già
-        existing_variant = existing_variant_by_asin.get(asin)
+        existing_variant = maps.variant_by_asin.get(asin)
         if existing_variant:
             if update_existing and not sku.endswith('+') and (existing_variant.x_amazon_sku or '').endswith('+'):
                 # Non sovrascrivere un SKU con '+' usando uno senza '+' —
@@ -1439,11 +1461,11 @@ class SyncEngine:
                 # guardia lo SKU della variante "rimbalza" tra le due forme
                 # a seconda dell'ordine di elaborazione dei marketplace, e
                 # la forma non attualmente salvata diventa invisibile al
-                # matching per le righe successive (existing_variant_tmpl_
-                # by_sku) — causa diretta di duplicati, verificata dal vivo
-                # sul Full Import del 2026-10-13 (C4C-0BELTC4MANYGO+ → senza
-                # '+' da un marketplace, poi una riga successiva con '+' non
-                # trovava più nulla e duplicava).
+                # matching per le righe successive (maps.variant_tmpl_by_sku)
+                # — causa diretta di duplicati, verificata dal vivo sul Full
+                # Import del 2026-10-13 (C4C-0BELTC4MANYGO+ → senza '+' da un
+                # marketplace, poi una riga successiva con '+' non trovava
+                # più nulla e duplicava).
                 msg = f'SALTATO (sostituito da {existing_variant.x_amazon_sku}): {sku}'
                 return 'skipped', msg
             if update_existing:
@@ -1459,8 +1481,7 @@ class SyncEngine:
                             _log.warning('Impossibile assegnare barcode %s a variante %s: %s',
                                          product['ean'], sku, exc)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
-                if existing_variant_tmpl_by_sku is not None:
-                    existing_variant_tmpl_by_sku[sku] = tmpl
+                maps.register_variant(asin, sku, existing_variant, tmpl)
                 msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}'
                 return 'updated', msg
             else:
@@ -1505,9 +1526,7 @@ class SyncEngine:
 
         variant = self._add_variant_to_template(tmpl, product, attr_label, attr_value)
         if variant:
-            existing_variant_by_asin[asin] = variant
-            if existing_variant_tmpl_by_sku is not None:
-                existing_variant_tmpl_by_sku[sku] = tmpl
+            maps.register_variant(asin, sku, variant, tmpl)
             self._init_product_warehouse_quant(
                 variant, product.get('fulfillment', 'fbm'), product.get('qty_available') or 0,
             )
