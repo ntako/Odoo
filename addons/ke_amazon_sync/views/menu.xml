@@ -22,11 +22,29 @@
               parent="stock.menu_stock_root"
               sequence="99"/>
 
+    <!-- Il click diretto su "Import Completo" apriva prima l'import subito;
+         ora apre la vista dei report scaricati (gestione/selezione), così
+         si può controllare/riusare un report già scaricato invece di
+         richiederne sempre uno nuovo — vedi TASK.md. L'avvio vero e proprio
+         resta lo stesso action_start_full_import di sempre, ora raggiungibile
+         dal menu "Avvia Full Import" sotto. -->
     <menuitem id="menu_amazon_full_import"
-              name="Import Completo (Manuale)"
+              name="Report Amazon (Import Completo)"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_report"
+              sequence="10"/>
+
+    <menuitem id="menu_amazon_report_request"
+              name="Richiedi nuovo report"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_report_request_wizard"
+              sequence="11"/>
+
+    <menuitem id="menu_amazon_full_import_start"
+              name="Avvia Full Import"
               parent="menu_amazon_sync_root"
               action="action_amazon_full_import_server"
-              sequence="10"/>
+              sequence="12"/>
 
     <menuitem id="menu_amazon_sync_log"
               name="Log Sincronizzazioni"

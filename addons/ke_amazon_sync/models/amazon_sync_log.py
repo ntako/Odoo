@@ -625,26 +625,79 @@ class AmazonSyncLog(models.Model):
                             page_token = next_token
                     else:
                         # Fasi 1-3: import completo via Reports API (nessun limite).
-                        report_id = client.request_listings_report()
-                        msg = f'[{marketplace.code}] Report Amazon richiesto (ID: {report_id}). In attesa...'
-                        SyncLog._append_log_line(log_rec, msg)
+                        # Vista "Report Amazon" (ke.amazon.report, vedi TASK.md):
+                        # se l'utente ha selezionato esplicitamente un report
+                        # già scaricato per questo marketplace, lo si riusa
+                        # invece di richiederne uno nuovo ad Amazon — utile sia
+                        # per velocità (nessuna attesa di poll) sia per
+                        # rielaborare deliberatamente un report vecchio (es.
+                        # per verificare un'anomalia già nota). Il flag si
+                        # disattiva da solo una volta usato, per non rischiare
+                        # di riprocessare per sbaglio lo stesso report in un
+                        # giro futuro senza che l'utente l'abbia scelto di nuovo.
+                        AmazonReport = env['ke.amazon.report']
+                        selected_report = AmazonReport.search([
+                            ('marketplace_id', '=', marketplace.id),
+                            ('selected_for_import', '=', True),
+                            ('state', '=', 'downloaded'),
+                        ], limit=1, order='request_date desc')
 
-                        document_id = None
-                        deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
-                        while time.monotonic() < deadline:
-                            time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
-                            document_id = client.check_report_ready(report_id)
-                            if document_id:
-                                break
-                        if not document_id:
-                            raise RuntimeError(
-                                f'Report {report_id} ({marketplace.code}) non pronto dopo '
-                                f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                        if selected_report:
+                            rows = selected_report.get_rows()
+                            msg = (
+                                f'[{marketplace.code}] Uso il report già scaricato del '
+                                f'{selected_report.request_date} ({len(rows)} righe) invece di '
+                                f'richiederne uno nuovo.'
                             )
+                            SyncLog._append_log_line(log_rec, msg)
+                            selected_report.write({'selected_for_import': False})
+                            env.cr.commit()
+                        else:
+                            report_id = client.request_listings_report()
+                            msg = f'[{marketplace.code}] Report Amazon richiesto (ID: {report_id}). In attesa...'
+                            SyncLog._append_log_line(log_rec, msg)
 
-                        rows = client.download_report_rows(document_id)
-                        msg = f'[{marketplace.code}] Report scaricato: {len(rows)} prodotti totali. Elaborazione...'
-                        SyncLog._append_log_line(log_rec, msg)
+                            document_id = None
+                            deadline = time.monotonic() + SyncLog._REPORT_POLL_MAX_MINUTES * 60
+                            while time.monotonic() < deadline:
+                                time.sleep(SyncLog._REPORT_POLL_INTERVAL_S)
+                                document_id = client.check_report_ready(report_id)
+                                if document_id:
+                                    break
+                            if not document_id:
+                                raise RuntimeError(
+                                    f'Report {report_id} ({marketplace.code}) non pronto dopo '
+                                    f'{SyncLog._REPORT_POLL_MAX_MINUTES} minuti di attesa.'
+                                )
+
+                            content = client.download_report_raw(document_id)
+                            rows = client.parse_report_text(content)
+                            msg = f'[{marketplace.code}] Report scaricato: {len(rows)} prodotti totali. Elaborazione...'
+                            SyncLog._append_log_line(log_rec, msg)
+
+                            # Traccia anche i report richiesti "al volo" nella
+                            # vista "Report Amazon", per coerenza con quelli
+                            # richiesti esplicitamente dall'utente — vedi
+                            # ke.amazon.report.action_request_new.
+                            try:
+                                import base64 as _base64
+                                attachment = env['ir.attachment'].create({
+                                    'name': f'amazon_report_{marketplace.code}_{log_rec.id}.tsv',
+                                    'type': 'binary',
+                                    'datas': _base64.b64encode(content.encode('utf-8')),
+                                })
+                                AmazonReport.create({
+                                    'marketplace_id': marketplace.id,
+                                    'state': 'downloaded',
+                                    'amazon_report_id': report_id,
+                                    'amazon_document_id': document_id,
+                                    'download_date': fields.Datetime.now(),
+                                    'row_count': len(rows),
+                                    'attachment_id': attachment.id,
+                                })
+                                env.cr.commit()
+                            except Exception as exc:
+                                _log.warning('Tracciamento report "al volo" fallito (non bloccante): %s', exc)
 
                         row_offset = 0
                         while row_offset is not None:

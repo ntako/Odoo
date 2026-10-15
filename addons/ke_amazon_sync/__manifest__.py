@@ -37,6 +37,7 @@
         'views/sale_order_views.xml',
         'views/stock_picking_views.xml',
         'views/amazon_fba_label_log_views.xml',
+        'views/amazon_report_views.xml',
         'views/menu.xml',
     ],
     'assets': {

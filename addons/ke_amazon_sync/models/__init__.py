@@ -5,6 +5,7 @@ from . import stock_picking
 from . import amazon_sync_log
 from . import amazon_marketplace
 from . import amazon_listing
+from . import amazon_report
 from . import amazon_fba_label_log
 from . import res_config_settings
 from . import sale_order

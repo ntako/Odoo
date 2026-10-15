@@ -617,17 +617,40 @@ class SpApiClient:
         return None
 
     @_with_retry(1.0, retry_max=3, backoff_s=8)
+    def download_report_raw(self, document_id):
+        """
+        Scarica il contenuto grezzo del report (TSV, BOM già rimosso), senza
+        parsing. Separato da download_report_rows (sotto) per poter
+        conservare il testo originale in un ir.attachment — vista "Report
+        Amazon" (gestione report scaricati per il Full Import) — invece di
+        scartarlo subito dopo il parsing, come succedeva prima.
+        """
+        from sp_api.api import Reports
+        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
+        resp = api.get_report_document(document_id, download=True)
+        content = resp.payload.get('document', '') or ''
+        return content.lstrip('﻿')  # strip UTF-8 BOM se presente
+
     def download_report_rows(self, document_id):
         """Scarica e parsa il report TSV. Ritorna lista di dict (una riga = un prodotto)."""
         import csv
         import io
-        from sp_api.api import Reports
-        api = Reports(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
-        resp = api.get_report_document(document_id, download=True)
-        content = resp.payload.get('document', '')
+        content = self.download_report_raw(document_id)
         if not content:
             return []
-        content = content.lstrip('﻿')  # strip UTF-8 BOM se presente
+        reader = csv.DictReader(io.StringIO(content), delimiter='\t')
+        return list(reader)
+
+    @staticmethod
+    def parse_report_text(content):
+        """Parsa un testo TSV già scaricato (es. da un ir.attachment salvato
+        in precedenza) in lista di dict — stessa logica di download_report_rows
+        ma senza richiamare Amazon, per rielaborare un report già scaricato."""
+        import csv
+        import io
+        if not content:
+            return []
+        content = content.lstrip('﻿')
         reader = csv.DictReader(io.StringIO(content), delimiter='\t')
         return list(reader)
 
