@@ -354,6 +354,25 @@ def _storable_vals(env):
     return {}
 
 
+def _needs_catalog_data(template):
+    """
+    True se a questo product.template manca almeno uno dei campi che il
+    Catalog API può fornire — stessa condizione usata da
+    apply_category_mapping ("Aggiorna da Catalog API") e, da oggi, anche da
+    full_import_report_rows per decidere se vale la pena ri-chiamare il
+    Catalog API per un ASIN che corrisponde già a un prodotto esistente
+    (vedi lì: niente di nuovo da imparare se è già tutto popolato).
+    """
+    return (
+        not template.x_amazon_category
+        or not template.product_length
+        or not template.x_amazon_product_type
+        or not template.x_amazon_browse_node_id
+        or not template.x_amazon_brand
+        or not template.description_sale
+    )
+
+
 def _resolve_product_type(env, requested):
     """Returns a valid product.template.type value for this Odoo installation."""
     field = env['product.template']._fields.get('type')
@@ -821,10 +840,38 @@ class SyncEngine:
         # i prodotti — vedi docstring. Un fallimento di UNA chiamata batch non
         # blocca l'intero chunk: quei prodotti restano senza arricchimento
         # (creati comunque, come semplici), recuperabili in seguito.
+        #
+        # Salta gli ASIN che corrispondono già a un prodotto SEMPLICE
+        # esistente con tutti i campi Catalog già popolati (_needs_catalog_
+        # data, stessa condizione di apply_category_mapping): per quelli non
+        # c'è nulla di nuovo da imparare, la chiamata è pura ripetizione —
+        # l'aggiornamento di prezzo/quantità/stato arriva comunque da
+        # _update_product più sotto (match su by_asin, indipendente
+        # dall'arricchimento). NON si applica a famiglie, prodotti con dati
+        # ancora incompleti, o ASIN mai visti prima: per quelli il Catalog
+        # API resta l'unico modo di sapere se una riga è una variante
+        # (relationships) — saltarlo rischierebbe di instradarla sul ramo
+        # sbagliato. Richiesta esplicita dell'utente dopo aver notato che un
+        # Full Import su un catalogo già in gran parte arricchito rifà le
+        # stesse migliaia di chiamate ad ogni giro senza risparmiare nulla.
         chunk_asins = sorted({
             (row.get('asin1') or '').strip() for row in chunk
             if (row.get('asin1') or '').strip()
         })
+        skipped_catalog_calls = 0
+        asins_to_fetch = []
+        for asin in chunk_asins:
+            existing = maps.by_asin.get(asin)
+            if existing and not existing.x_amazon_parent_asin and not _needs_catalog_data(existing):
+                skipped_catalog_calls += 1
+                continue
+            asins_to_fetch.append(asin)
+        chunk_asins = asins_to_fetch
+        if skipped_catalog_calls:
+            _log.warning(
+                'full_import_report_rows: %d ASIN già noti e completi, chiamata Catalog API saltata '
+                '(%d da richiedere)', skipped_catalog_calls, len(chunk_asins),
+            )
         catalog_by_asin = {}
         n_batches = (len(chunk_asins) + self._FULL_IMPORT_CATALOG_BATCH_SIZE - 1) // self._FULL_IMPORT_CATALOG_BATCH_SIZE
         for i in range(0, len(chunk_asins), self._FULL_IMPORT_CATALOG_BATCH_SIZE):
@@ -2196,15 +2243,7 @@ class SyncEngine:
                 skipped += 1
                 msg_by_product_id[product.id] = f'SKIP {ref}: famiglia senza varianti con ASIN, impossibile interrogare Amazon'
                 continue
-            needs_catalog = (
-                not product.x_amazon_category
-                or not product.product_length
-                or not product.x_amazon_product_type
-                or not product.x_amazon_browse_node_id
-                or not product.x_amazon_brand
-                or not product.description_sale
-            )
-            if needs_catalog:
+            if _needs_catalog_data(product):
                 to_fetch.append((product, query_asin))
             else:
                 skipped += 1

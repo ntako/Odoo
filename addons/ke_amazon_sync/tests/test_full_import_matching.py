@@ -328,3 +328,74 @@ class TestFullImportMatching(TransactionCase):
         with no_commit(self.env):
             n = eng.detect_duplicate_skus(log)
         self.assertEqual(n, 0)
+
+    # ------------------------------------------------------------------
+    # Ottimizzazione Catalog API (2026-10-15, richiesta dall'utente): salta
+    # la chiamata per ASIN già noti e completamente arricchiti — ma solo per
+    # prodotti semplici, mai per famiglie/dati incompleti/ASIN nuovi.
+    # ------------------------------------------------------------------
+
+    def test_catalog_api_skipped_for_known_complete_simple_product(self):
+        asin = 'B0ZZKNOWNCOMPLETE'
+        sku = 'ZZT-KNOWNCOMPLETE-SKU'
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT Prodotto completo', 'type': 'consu', 'is_storable': True,
+            'default_code': sku, 'x_amazon_sku': sku, 'x_amazon_asin': asin,
+            'x_amazon_category': 'Categoria test', 'product_length': 10.0,
+            'x_amazon_product_type': 'TEST_TYPE', 'x_amazon_browse_node_id': '12345',
+            'x_amazon_brand': 'Marca test', 'description_sale': 'Descrizione test',
+        })
+
+        requested_asins = []
+
+        class RecordingClient(FakeSpApiClient):
+            def get_catalog_items_batch(self, asins):
+                requested_asins.extend(asins)
+                return super().get_catalog_items_batch(asins)
+
+        eng = self.SyncEngine(self.env, RecordingClient())
+        log = self._make_log('test skip catalog api')
+        self._run(eng, log, [make_report_row(sku, asin=asin, price='15.50', qty='7')])
+
+        self.assertNotIn(asin, requested_asins, 'non deve richiamare il Catalog API per un prodotto già completo')
+        tmpl.invalidate_recordset()
+        self.assertEqual(tmpl.x_amazon_price, 15.50, 'il prezzo deve comunque aggiornarsi via _update_product')
+
+    def test_catalog_api_still_called_for_incomplete_existing_product(self):
+        asin = 'B0ZZKNOWNINCOMPLETE'
+        sku = 'ZZT-KNOWNINCOMPLETE-SKU'
+        self.env['product.template'].create({
+            'name': 'ZZT Prodotto incompleto', 'type': 'consu', 'is_storable': True,
+            'default_code': sku, 'x_amazon_sku': sku, 'x_amazon_asin': asin,
+            # Nessun campo Catalog popolato: needs_catalog deve restare True.
+        })
+
+        requested_asins = []
+
+        class RecordingClient(FakeSpApiClient):
+            def get_catalog_items_batch(self, asins):
+                requested_asins.extend(asins)
+                return super().get_catalog_items_batch(asins)
+
+        eng = self.SyncEngine(self.env, RecordingClient())
+        log = self._make_log('test non skip catalog api incompleto')
+        self._run(eng, log, [make_report_row(sku, asin=asin)])
+
+        self.assertIn(asin, requested_asins, 'un prodotto con dati Catalog mancanti deve continuare a essere interrogato')
+
+    def test_catalog_api_still_called_for_unknown_asin(self):
+        asin = 'B0ZZNEVERSEEN'
+        sku = 'ZZT-NEVERSEEN-SKU'
+
+        requested_asins = []
+
+        class RecordingClient(FakeSpApiClient):
+            def get_catalog_items_batch(self, asins):
+                requested_asins.extend(asins)
+                return super().get_catalog_items_batch(asins)
+
+        eng = self.SyncEngine(self.env, RecordingClient())
+        log = self._make_log('test non skip catalog api nuovo')
+        self._run(eng, log, [make_report_row(sku, asin=asin)])
+
+        self.assertIn(asin, requested_asins, 'un ASIN mai visto prima deve sempre essere interrogato')
