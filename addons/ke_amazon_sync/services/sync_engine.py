@@ -1246,6 +1246,84 @@ class SyncEngine:
             return gross
         return gross / (1.0 + rate / 100.0)
 
+    def _marketplace_lang_context(self):
+        """
+        Contesto {'lang': codice} per il marketplace corrente di questa sync
+        (ke.amazon.marketplace.lang_id), se configurato — usato per scrivere
+        nome/descrizione nello slot di traduzione giusto invece di
+        sovrascrivere sempre la lingua di default dell'ambiente (vedi
+        TASK.md, "Testi/traduzioni multi-marketplace": name/description_sale
+        sono già campi traducibili in Odoo, il problema era solo che le
+        nostre write() non specificavano mai la lingua). Dizionario vuoto
+        se non c'è un marketplace corrente o non ha lingua configurata — il
+        chiamante scrive allora nella lingua di default come sempre
+        (comportamento invariato per chi non ha ancora configurato lang_id).
+
+        Controlla anche che la lingua sia ATTIVA in Odoo (Impostazioni →
+        Traduzioni → Lingue): un `with_context(lang=...)` con un codice non
+        attivo fa sollevare a Odoo "Invalid language code", un'eccezione
+        non catturata da nessuna parte nel loop di import — trovato dal
+        vivo il 2026-10-16: un Full Import intero è caduto dopo 45 minuti
+        di lavoro per un marketplace con lang_id configurato ma la lingua
+        corrispondente non ancora attivata. Meglio ignorare silenziosamente
+        (scrivere nella lingua di default, come se lang_id non fosse
+        configurato) che perdere un intero giro per una svista di
+        configurazione.
+        """
+        marketplace = self._current_marketplace()
+        lang = marketplace.lang_id if marketplace else self.env['res.lang']
+        if not lang:
+            return {}
+        if not lang.active:
+            _log.warning(
+                "Marketplace '%s': lang_id='%s' configurato ma non attivo in Odoo "
+                "(Impostazioni → Traduzioni → Lingue) — ignorato per questo giro, "
+                "scritto nella lingua di default invece di far fallire l'import.",
+                marketplace.code, lang.code,
+            )
+            return {}
+        return {'lang': lang.code}
+
+    def _has_translation(self, template, field, lang):
+        """
+        True se 'template' ha già un valore esplicito per 'field' nella
+        lingua 'lang'. Non si può controllare leggendo il campo con
+        with_context(lang=...): se quella lingua non ha ancora una
+        traduzione propria, Odoo ritorna il valore di FALLBACK (un'altra
+        lingua), non una stringa vuota — un controllo 'if not
+        localized.field' darebbe sempre falso positivo (verificato dal vivo
+        con un test che falliva per questo motivo esatto). La colonna JSON
+        grezza invece non applica nessun fallback: una chiave assente resta
+        assente.
+        """
+        self.env.cr.execute(
+            f'SELECT ({field}->>%s) FROM product_template WHERE id = %s',
+            (lang, template.id),
+        )
+        row = self.env.cr.fetchone()
+        return bool(row and row[0])
+
+    def _write_localized_text(self, template, name=None, description_sale=None):
+        """
+        Scrive nome/descrizione sul template, nello slot di traduzione del
+        marketplace corrente, solo se quello slot è attualmente vuoto — mai
+        sovrascritto un testo già presente in quella lingua (stesso
+        principio già usato per brand/descrizione nel backfill di
+        apply_category_mapping). Non fa nulla se il marketplace corrente
+        non ha una lingua configurata.
+        """
+        ctx = self._marketplace_lang_context()
+        if not ctx:
+            return
+        lang = ctx['lang']
+        vals = {}
+        if name and not self._has_translation(template, 'name', lang):
+            vals['name'] = name
+        if description_sale and not self._has_translation(template, 'description_sale', lang):
+            vals['description_sale'] = description_sale
+        if vals:
+            template.with_context(**ctx).write(vals)
+
     def _create_product(self, data, product_type_odoo):
         categ = _get_or_create_category(self.env, data.get('category', ''))
         description = self._format_description(data)
@@ -1290,7 +1368,13 @@ class SyncEngine:
         img = _fetch_image_b64(data.get('image_url'))
         if img:
             vals['image_1920'] = img
-        template = self.env['product.template'].create(vals)
+        # Crea direttamente nello slot di traduzione del marketplace
+        # corrente (vedi _marketplace_lang_context) così name/description_
+        # sale nascono già nella lingua giusta, non solo in quella di
+        # default dell'ambiente.
+        template = self.env['product.template'].with_context(
+            **self._marketplace_lang_context()
+        ).create(vals)
         if data.get('spec_attrs'):
             self._set_product_attributes(template, data['spec_attrs'])
         self._init_product_warehouse_quant(
@@ -1397,6 +1481,13 @@ class SyncEngine:
 
         if vals:
             product.write(vals)
+        # Nome/descrizione nello slot di traduzione del marketplace corrente
+        # (vedi _write_localized_text) — a differenza dei campi "legacy"
+        # sopra, NON è gated su _is_primary_marketplace(): ogni marketplace,
+        # primario o no, ha un suo testo localizzato da catturare.
+        self._write_localized_text(
+            product, name=data.get('name'), description_sale=self._format_description(data),
+        )
         if not product.barcode and data.get('ean'):
             if self._barcode_free(data['ean'], exclude_product_ids=product.product_variant_ids.ids):
                 try:
@@ -1638,7 +1729,9 @@ class SyncEngine:
         img = _fetch_image_b64(first_child.get('image_url'))
         if img:
             vals['image_1920'] = img
-        return self.env['product.template'].create(vals)
+        return self.env['product.template'].with_context(
+            **self._marketplace_lang_context()
+        ).create(vals)
 
     def _add_variant_to_template(self, tmpl, product, attr_label, attr_value):
         """

@@ -399,3 +399,106 @@ class TestFullImportMatching(TransactionCase):
         self._run(eng, log, [make_report_row(sku, asin=asin)])
 
         self.assertIn(asin, requested_asins, 'un ASIN mai visto prima deve sempre essere interrogato')
+
+    # ------------------------------------------------------------------
+    # Testi/traduzioni multi-marketplace (2026-10-15, richiesta dell'utente
+    # in ottica esportazione PrestaShop): name/description_sale sono già
+    # campi traducibili in Odoo core — il problema era che le nostre write()
+    # non specificavano mai la lingua, quindi ogni marketplace sovrascriveva
+    # sempre lo stesso slot di lingua di default.
+    # ------------------------------------------------------------------
+
+    def _activate_fr(self):
+        """fr_FR esiste già come res.lang ma inattivo in odoo_test1 — lo
+        attivo solo per la durata del test (rollback automatico a fine test,
+        stesso meccanismo di qualunque altra modifica)."""
+        fr = self.env['res.lang'].with_context(active_test=False).search([('code', '=', 'fr_FR')])
+        fr.write({'active': True})
+        return fr
+
+    def test_create_product_writes_name_in_marketplace_language(self):
+        fr = self._activate_fr()
+        mkt = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Francia', 'code': 'ZZFR', 'marketplace_id': 'ZZFRMKTID',
+            'lang_id': fr.id, 'active': True,
+        })
+
+        class FrClient(FakeSpApiClient):
+            marketplace_id = 'ZZFRMKTID'
+
+        sku = 'ZZT-LANG-SKU'
+        eng = self.SyncEngine(self.env, FrClient())
+        log = self._make_log('test lingua creazione')
+        self._run(eng, log, [make_report_row(sku, asin='B0ZZLANGASIN', name='Nom francais du produit')])
+
+        tmpl = self.env['product.template'].search([('default_code', '=', sku)])
+        self.assertEqual(len(tmpl), 1)
+        self.assertEqual(tmpl.with_context(lang='fr_FR').name, 'Nom francais du produit')
+
+    def test_update_fills_empty_language_slot_without_overwriting_others(self):
+        fr = self._activate_fr()
+        mkt = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Francia 2', 'code': 'ZZFR2', 'marketplace_id': 'ZZFRMKTID2',
+            'lang_id': fr.id, 'active': True,
+        })
+        sku = 'ZZT-LANGFILL-SKU'
+        asin = 'B0ZZLANGFILLASIN'
+        # Scritto esplicitamente in it_IT: senza un contesto lingua esplicito
+        # qui, Odoo userebbe la lingua dell'utente/ambiente di test (non
+        # necessariamente it_IT), rendendo l'asserzione sotto inaffidabile.
+        tmpl = self.env['product.template'].with_context(lang='it_IT').create({
+            'name': 'Nome italiano esistente', 'type': 'consu', 'is_storable': True,
+            'default_code': sku, 'x_amazon_sku': sku, 'x_amazon_asin': asin,
+        })
+
+        class FrClient(FakeSpApiClient):
+            marketplace_id = 'ZZFRMKTID2'
+
+        eng = self.SyncEngine(self.env, FrClient())
+        log = self._make_log('test riempimento slot lingua')
+        self._run(eng, log, [make_report_row(sku, asin=asin, name='Nom francais rempli')])
+
+        tmpl.invalidate_recordset()
+        self.assertEqual(tmpl.with_context(lang='fr_FR').name, 'Nom francais rempli',
+                          'lo slot francese, vuoto, deve riempirsi')
+        self.assertEqual(tmpl.with_context(lang='it_IT').name, 'Nome italiano esistente',
+                          'lo slot italiano, già presente, non deve essere toccato')
+
+        # Un secondo giro con un testo francese diverso non deve sovrascrivere
+        # quello già presente (stesso principio "mai perdere un dato già
+        # scritto" già usato per brand/descrizione in apply_category_mapping).
+        self._run(eng, log, [make_report_row(sku, asin=asin, name='Nom francais different')])
+        tmpl.invalidate_recordset()
+        self.assertEqual(tmpl.with_context(lang='fr_FR').name, 'Nom francais rempli',
+                          'lo slot francese già popolato non deve essere sovrascritto da un giro successivo')
+
+    def test_import_does_not_crash_on_marketplace_with_inactive_lang(self):
+        """
+        Bug reale del 2026-10-16: un marketplace con lang_id configurato ma
+        la lingua corrispondente NON attiva in Odoo faceva sollevare
+        'Invalid language code', eccezione non catturata che ha fatto
+        fallire un intero Full Import dopo 45 minuti di lavoro. Qui fr_FR
+        NON viene attivata (a differenza degli altri test lingua sopra) —
+        deve degradare a scrivere nella lingua di default, mai sollevare.
+        """
+        mkt = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Francia inattiva', 'code': 'ZZFRINACT', 'marketplace_id': 'ZZFRINACTID',
+            'active': True,
+        })
+        fr_inactive = self.env['res.lang'].with_context(active_test=False).search([('code', '=', 'fr_FR')])
+        self.assertFalse(fr_inactive.active, 'precondizione del test: fr_FR deve essere inattiva qui')
+        mkt.write({'lang_id': fr_inactive.id})
+
+        class FrInactiveClient(FakeSpApiClient):
+            marketplace_id = 'ZZFRINACTID'
+
+        sku = 'ZZT-INACTIVELANG-SKU'
+        eng = self.SyncEngine(self.env, FrInactiveClient())
+        log = self._make_log('test lingua inattiva non blocca import')
+        # Non deve sollevare 'Invalid language code' né nessun'altra eccezione.
+        self._run(eng, log, [make_report_row(sku, asin='B0ZZINACTIVEASIN', name='Nome con lingua inattiva')])
+
+        tmpl = self.env['product.template'].search([('default_code', '=', sku)])
+        self.assertEqual(len(tmpl), 1, 'il prodotto deve comunque essere creato, non bloccare l\'intero import')
+        self.assertEqual(tmpl.name, 'Nome con lingua inattiva',
+                          'il nome deve scriversi nella lingua di default, non andare perso')

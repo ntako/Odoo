@@ -10,6 +10,7 @@
                 <field name="code"/>
                 <field name="marketplace_id"/>
                 <field name="currency_id"/>
+                <field name="lang_id" optional="show"/>
                 <field name="active" widget="boolean_toggle"/>
             </list>
         </field>
@@ -26,6 +27,7 @@
                         <field name="code"/>
                         <field name="marketplace_id"/>
                         <field name="currency_id"/>
+                        <field name="lang_id"/>
                         <field name="active"/>
                         <field name="sequence"/>
                         <field name="fba_warehouse_id"/>

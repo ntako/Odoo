@@ -20,6 +20,15 @@ class AmazonMarketplace(models.Model):
              'lo trovi.',
     )
     currency_id = fields.Many2one('res.currency', string='Valuta')
+    lang_id = fields.Many2one(
+        'res.lang', string='Lingua',
+        help='Lingua del testo (nome/descrizione) che il Catalog API restituisce per '
+             "questo marketplace — es. it_IT per Italia, fr_FR per Francia. Usata per "
+             'scrivere nome/descrizione nello slot di traduzione giusto invece che '
+             'sovrascrivere sempre la stessa lingua (vedi TASK.md, "Testi/traduzioni '
+             'multi-marketplace"). La lingua deve essere attiva in Impostazioni → '
+             'Traduzioni → Lingue, altrimenti Odoo non la tiene distinta dalle altre.',
+    )
     sequence = fields.Integer('Sequenza', default=10)
     fba_warehouse_id = fields.Many2one(
         'stock.warehouse', string='Magazzino FBA',
