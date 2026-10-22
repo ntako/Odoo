@@ -51,12 +51,16 @@ class FakeSpApiClient:
     # finto in ogni test solo per non far esplodere _upsert_listing.
     marketplace_id = None
 
-    def __init__(self, parent_asin_by_asin=None):
+    def __init__(self, parent_asin_by_asin=None, ean_by_asin=None):
         # {asin_figlio: parent_asin} — un ASIN non presente qui risulta
         # "nessuna relazione di variante" (prodotto standalone agli occhi
         # del Catalog API), stesso comportamento di un ASIN reale senza
         # 'relationships' nella risposta.
         self._parent_asin_by_asin = parent_asin_by_asin or {}
+        # {asin: ean} — EAN restituito negli 'identifiers' del Catalog API,
+        # l'unica fonte dell'EAN nel Full Import (il report listing ha solo
+        # l'ASIN come product-id).
+        self._ean_by_asin = ean_by_asin or {}
 
     def get_catalog_items_batch(self, asins):
         out = {}
@@ -70,6 +74,11 @@ class FakeSpApiClient:
                 }
             else:
                 out[asin] = {}
+            ean = self._ean_by_asin.get(asin)
+            if ean:
+                out[asin]['identifiers'] = [{'identifiers': [
+                    {'identifierType': 'EAN', 'identifier': ean},
+                ]}]
         return out
 
 

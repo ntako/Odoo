@@ -511,6 +511,49 @@ class _MatchMaps:
         """
         return self.variant_tmpl_by_sku.get(sku) or self.find_family_conflict(sku)
 
+    def find_family_by_variant_asin(self, asin):
+        """
+        Template famiglia che ha già una variante con questo ASIN, o None.
+        Serve al ramo prodotto-semplice quando la riga non è stata
+        riconosciuta come variante (chiamata Catalog API fallita, o
+        relationships assenti per quel marketplace): senza questo controllo
+        l'ASIN di una variante esistente diventava un prodotto semplice
+        duplicato — 290 casi trovati il 2026-10-22 tra i prodotti creati dai
+        marketplace secondari.
+        """
+        variant = self.variant_by_asin.get(asin) if asin else None
+        if variant and variant.product_tmpl_id.x_amazon_parent_asin:
+            return variant.product_tmpl_id
+        return None
+
+    def find_superseding(self, sku):
+        """
+        Prodotto (semplice o famiglia) che ha già in Odoo la versione '+' di
+        questo SKU, o None. Il report di un marketplace secondario può
+        contenere ancora il vecchio SKU senza '+', spesso senza ASIN: la
+        guardia "sostituito da X+" basata su best_sku_by_asin (stesso
+        report, stesso ASIN) non scatta, e la riga creava un prodotto nuovo
+        accanto a quello vero — 1.624 duplicati solo FR trovati il
+        2026-10-22, più quelli con ASIN in cui _update_product avrebbe
+        riportato il codice del prodotto vero da 'X+' a 'X'.
+        """
+        if not sku or sku.endswith('+'):
+            return None
+        plus = sku + '+'
+        return (
+            self.by_sku.get(plus)
+            or self.by_default_code.get(plus)
+            or self.variant_tmpl_by_sku.get(plus)
+        )
+
+    def forget(self, tmpl):
+        """Toglie 'tmpl' da tutte le mappe del ramo semplice — usato dopo
+        averlo archiviato (SyncEngine._merge_manual_into_variant), perché
+        una riga successiva dello stesso import non lo ritrovi."""
+        for mapping in (self.by_sku, self.by_asin, self.by_default_code, self.by_barcode):
+            for key in [k for k, v in mapping.items() if v.id == tmpl.id]:
+                del mapping[key]
+
     def register_simple(self, sku, asin, ean, tmpl):
         """Un solo punto per aggiornare tutte le mappe del ramo prodotto-semplice."""
         self.by_sku[sku] = tmpl
@@ -941,6 +984,28 @@ class SyncEngine:
                         existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
                     skipped += 1
                     lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
+                    continue
+
+                # Stessa guardia, ma con la versione '+' già in Odoo invece
+                # che nello stesso report (vedi _MatchMaps.find_superseding).
+                superseding = maps.find_superseding(sku)
+                if superseding:
+                    skipped += 1
+                    lines.append(
+                        f'SALTATO (sostituito da {sku}+ già in Odoo, id={superseding.id}): {sku}'
+                    )
+                    continue
+
+                # ASIN di una variante di famiglia già esistente, ma riga non
+                # riconosciuta come variante: saltare invece di creare un
+                # semplice duplicato (vedi _MatchMaps.find_family_by_variant_asin).
+                family = maps.find_family_by_variant_asin(asin)
+                if family:
+                    skipped += 1
+                    lines.append(
+                        f'SALTATO (ASIN di una variante della famiglia "{family.name[:40]}" '
+                        f'id={family.id}, riga non riconosciuta come variante): {sku} / {asin}'
+                    )
                     continue
 
                 # find_simple ritorna None anche quando il match trovato è in
@@ -1533,6 +1598,34 @@ class SyncEngine:
 
         conflict = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
 
+        # Prodotto manuale con lo stesso EAN, da unire nella variante (vedi
+        # _find_manual_by_ean). Se coincide con 'conflict' lo gestisce già la
+        # promozione sul posto qui sotto. Se c'è ma non si può unire e la
+        # variante non esiste ancora: salta PRIMA di creare la famiglia, che
+        # altrimenti resterebbe vuota.
+        #
+        # Stessa unione anche per un prodotto semplice con lo stesso SKU
+        # quando la famiglia esiste già (prima: "esiste già come prodotto
+        # semplice … serve fusione manuale", 410 righe nel Full Import del
+        # 2026-10-22 — estensione chiesta dall'utente). Se la famiglia non
+        # esiste ancora, il semplice con lo stesso SKU viene invece promosso
+        # sul posto a famiglia (sotto), come prima.
+        family = maps.by_parent_asin.get(parent_asin)
+        merge_by = 'EAN'
+        manual, manual_reason = self._find_manual_by_ean(maps, product.get('ean'))
+        if manual and conflict and manual.id == conflict.id and not family:
+            manual = manual_reason = None
+        if (not manual and family and conflict and conflict.id != family.id
+                and not conflict.x_amazon_parent_asin):
+            manual, manual_reason, merge_by = conflict, self._merge_blocker(conflict), 'SKU'
+        if manual and manual_reason and asin not in maps.variant_by_asin:
+            msg = (
+                f'SALTATO {sku} / {asin}: stesso {merge_by} del prodotto "{manual.name[:40]}" '
+                f'(id={manual.id}) che {manual_reason} — serve fusione manuale'
+            )
+            _log.warning(msg)
+            return 'skipped', msg
+
         # Trova o crea il template della famiglia
         tmpl = maps.by_parent_asin.get(parent_asin)
         if not tmpl:
@@ -1586,7 +1679,9 @@ class SyncEngine:
             else:
                 tmpl = self._create_configurable_template(product, parent_asin, product_type_odoo)
             maps.register_family(parent_asin, tmpl)
-        elif conflict and conflict.id != tmpl.id:
+        elif conflict and conflict.id != tmpl.id and not (
+            manual and manual.id == conflict.id and not manual_reason
+        ):
             # La famiglia esiste già (trovata via parent_asin) E lo stesso
             # SKU punta ANCHE a un template diverso (semplice separato, o
             # un'altra famiglia con parent_asin diverso — stesso genere di
@@ -1627,6 +1722,17 @@ class SyncEngine:
                     'x_amazon_sku': sku,
                     'default_code': sku,
                 })
+                # Doppione già creato da un import precedente (variante senza
+                # EAN perché occupato da un prodotto manuale): unione ora.
+                merged_note = ''
+                if (not existing_variant.barcode or merge_by == 'SKU') and manual and manual.id != tmpl.id:
+                    if manual_reason:
+                        merged_note = (f' — stesso {merge_by} del prodotto id={manual.id} che '
+                                       f'{manual_reason}, serve fusione manuale')
+                    else:
+                        moved = self._merge_manual_into_variant(maps, manual, existing_variant, merge_by)
+                        merged_note = (f' — unito il prodotto {manual.default_code or manual.name} '
+                                       f'(id={manual.id}), giacenza spostata: {moved:g}, originale archiviato')
                 if not existing_variant.barcode and product.get('ean'):
                     if self._barcode_free(product['ean'], exclude_product_ids=[existing_variant.id]):
                         try:
@@ -1636,7 +1742,7 @@ class SyncEngine:
                                          product['ean'], sku, exc)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
-                msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}'
+                msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}{merged_note}'
                 return 'updated', msg
             else:
                 msg = f'SALTATO (variante già esiste): {sku}'
@@ -1678,9 +1784,31 @@ class SyncEngine:
                     _log.warning(msg)
                     return 'skipped', msg
 
+        # Valore attributo già usato da una variante con un ASIN diverso
+        # (es. due misure della stessa famiglia con lo stesso "colore: Lemon
+        # Back"): _add_variant_to_template restituirebbe quella variante e le
+        # riscriverebbe SKU/ASIN, "rubandola" al fratello — 85 figli persi
+        # così nel Full Import del 2026-10-22, 2 dei quali con due prodotti
+        # manuali uniti nella stessa variante. Lo SKU nel valore la rende
+        # distinta.
+        if self._attr_value_taken(tmpl, attr_label, attr_value, asin):
+            attr_value = f'{attr_value} ({sku})'
+
+        if manual and manual.id == tmpl.id:
+            manual = None
         variant = self._add_variant_to_template(tmpl, product, attr_label, attr_value)
         if variant:
             maps.register_variant(asin, sku, variant, tmpl)
+            if manual:
+                # Niente giacenza iniziale da Amazon: quella vera è sul
+                # manuale e viene spostata qui, seedarla la raddoppierebbe.
+                moved = self._merge_manual_into_variant(maps, manual, variant, merge_by)
+                msg = (
+                    f'CREATO variante: {sku} / {asin} [{attr_label}={attr_value}] → {tmpl.name[:40]} '
+                    f'— unito il prodotto {manual.default_code or manual.name} (id={manual.id}, '
+                    f'stesso {merge_by}), giacenza spostata: {moved:g}, originale archiviato'
+                )
+                return 'created', msg
             self._init_product_warehouse_quant(
                 variant, product.get('fulfillment', 'fbm'), product.get('qty_available') or 0,
             )
@@ -1689,6 +1817,104 @@ class SyncEngine:
 
         msg = f'ERRORE creazione variante: {sku} / {asin}'
         return 'skipped', msg
+
+    @staticmethod
+    def _attr_value_taken(tmpl, attr_label, attr_value, asin):
+        """True se una variante di 'tmpl' con un ASIN diverso da 'asin' usa
+        già il valore attributo attr_label=attr_value (vedi chiamante)."""
+        return any(
+            v.x_amazon_asin and v.x_amazon_asin != asin and any(
+                ptav.attribute_id.name == attr_label and ptav.name == attr_value
+                for ptav in v.product_template_attribute_value_ids
+            )
+            for v in tmpl.product_variant_ids
+        )
+
+    def _find_manual_by_ean(self, maps, ean):
+        """
+        Prodotto semplice già in Odoo con questo EAN (tipicamente del
+        catalogo manuale pre-Amazon), da unire nella variante Amazon invece
+        di lasciarlo come doppione. Ritorna (template, None) se unibile,
+        (template, motivo) se c'è ma non si può unire in automatico, o
+        (None, None) se non c'è.
+
+        Trovato il 2026-10-22: il ramo varianti non cercava mai per EAN, solo
+        per SKU/codice — un prodotto manuale con codice diverso dallo SKU
+        Amazon (es. 'SVS77954' vs 'SAV-77954', stesso EAN) non veniva
+        trovato, e la variante nasceva doppione (senza EAN, già occupato dal
+        manuale) con la giacenza vera rimasta sul manuale: 1.403 varianti su
+        5.360 senza EAN dopo il Full Import. Decisione dell'utente: creare la
+        variante nella famiglia, spostarci la giacenza del manuale e
+        archiviare il manuale (vedi _merge_manual_into_variant).
+        """
+        manual = maps.by_barcode.get(ean) if ean else None
+        if not manual or manual.x_amazon_parent_asin:
+            return None, None
+        return manual, self._merge_blocker(manual)
+
+    def _merge_blocker(self, manual):
+        """Motivo per cui il prodotto semplice 'manual' non si può unire in
+        automatico in una variante (vedi _merge_manual_into_variant), o None."""
+        if len(manual.product_variant_ids) != 1:
+            return 'ha più varianti'
+        mv = manual.product_variant_id
+        if self.env['stock.quant'].sudo().search_count([
+            ('product_id', '=', mv.id), ('reserved_quantity', '!=', 0),
+        ]):
+            return 'ha giacenza riservata'
+        if self.env['stock.move'].sudo().search_count([
+            ('product_id', '=', mv.id), ('state', 'not in', ('done', 'cancel')),
+        ]):
+            return 'ha movimenti di magazzino aperti'
+        return None
+
+    def _merge_manual_into_variant(self, maps, manual, variant, merge_by='EAN'):
+        """
+        Unisce il prodotto semplice 'manual' nella variante Amazon 'variant'
+        (vedi _find_manual_by_ean): sposta la giacenza interna con lo stesso
+        meccanismo di _set_product_stock (_update_available_quantity, nessun
+        movimento — come la giacenza iniziale seedata alla creazione), passa
+        l'EAN alla variante, elimina i listing del manuale (altrimenti
+        add_listing_fallback continuerebbe a indicarlo come prodotto di
+        quello SKU) e lo archivia. In un savepoint: se qualcosa fallisce
+        non resta mai una giacenza spostata a metà. Ritorna i pezzi spostati.
+        """
+        Quant = self.env['stock.quant'].sudo()
+        mv = manual.product_variant_id
+        ean = mv.barcode
+        with self.env.cr.savepoint():
+            to_move = [
+                (q.location_id, q.quantity) for q in Quant.search([
+                    ('product_id', '=', mv.id),
+                    ('location_id.usage', '=', 'internal'),
+                    ('quantity', '!=', 0),
+                ])
+            ]
+            for location, qty in to_move:
+                Quant._update_available_quantity(variant, location, qty)
+                Quant._update_available_quantity(mv, location, -qty)
+            mv.write({'barcode': False})
+            # Mai sovrascrivere un EAN che la variante ha già (caso SKU).
+            if ean and not variant.barcode:
+                variant.write({'barcode': ean})
+            self.env['ke.amazon.listing'].sudo().search([('product_id', '=', manual.id)]).unlink()
+            moved = sum(qty for _loc, qty in to_move)
+            manual.message_post(body=(
+                f'Archiviato dal Full Import Amazon: unito nella variante '
+                f'{variant.default_code or variant.display_name} della famiglia '
+                f'"{variant.product_tmpl_id.name}" (stesso {merge_by}; EAN {ean or "-"}). '
+                f'Giacenza spostata sulla variante: {moved:g}.'
+            ))
+            variant.product_tmpl_id.message_post(body=(
+                f'Variante {variant.default_code or variant.display_name}: unito il prodotto '
+                f'{manual.default_code or manual.name} (EAN {ean or "-"}), giacenza spostata: {moved:g}. '
+                f'Il prodotto originale è archiviato.'
+            ))
+            manual.write({'active': False})
+        maps.forget(manual)
+        if ean:
+            maps.by_barcode.pop(ean, None)
+        return moved
 
     def _create_configurable_template(self, first_child, parent_asin, product_type_odoo):
         """Crea il product.template della famiglia (senza varianti ancora)."""

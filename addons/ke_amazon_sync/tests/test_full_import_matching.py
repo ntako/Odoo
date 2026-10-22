@@ -99,8 +99,10 @@ class TestFullImportMatching(TransactionCase):
     def test_family_with_sibling_conflict_is_skipped_not_merged(self):
         """
         Famiglia già creata da un fratello + un prodotto semplice separato
-        con lo stesso SKU: fondere automaticamente è troppo rischioso
-        (sposterebbe stock/ordini) -> deve solo segnalare, non toccare nulla.
+        con lo stesso SKU. Dal 2026-10-22 il semplice viene unito nella
+        variante (vedi test_simple_with_same_sku_merged_when_family_exists),
+        ma solo se è sicuro: con giacenza riservata deve ancora solo
+        segnalare, senza toccare nulla.
         """
         sku = 'ZZT-RARECASE-SKU'
         parent = 'B0ZZRAREPARENT'
@@ -113,6 +115,13 @@ class TestFullImportMatching(TransactionCase):
             'name': 'ZZT Semplice in conflitto', 'type': 'consu', 'is_storable': True,
             'default_code': sku, 'x_amazon_sku': sku,
         })
+        location = self.env.ref('stock.warehouse0').lot_stock_id
+        self.env['stock.quant'].sudo()._update_available_quantity(
+            conflicting_simple.product_variant_id, location, 3,
+        )
+        self.env['stock.quant'].sudo().search([
+            ('product_id', '=', conflicting_simple.product_variant_id.id), ('location_id', '=', location.id),
+        ]).reserved_quantity = 1
 
         eng = self.SyncEngine(self.env, FakeSpApiClient({'B0ZZRARECHILD': parent}))
         row = make_report_row(sku, asin='B0ZZRARECHILD')
@@ -130,7 +139,8 @@ class TestFullImportMatching(TransactionCase):
         res, msg = eng._process_variant_listing(product, parent, 'consu', maps, True)
 
         self.assertEqual(res, 'skipped')
-        self.assertIn('conflitto', msg.lower())
+        self.assertIn('serve fusione manuale', msg)
+        self.assertTrue(conflicting_simple.active)
         sibling_tmpl.invalidate_recordset()
         self.assertEqual(len(sibling_tmpl.product_variant_ids), 1, 'nessuna variante deve essere stata aggiunta alla famiglia del fratello')
 
@@ -502,3 +512,191 @@ class TestFullImportMatching(TransactionCase):
         self.assertEqual(len(tmpl), 1, 'il prodotto deve comunque essere creato, non bloccare l\'intero import')
         self.assertEqual(tmpl.name, 'Nome con lingua inattiva',
                           'il nome deve scriversi nella lingua di default, non andare perso')
+
+    # ------------------------------------------------------------------
+    # Prodotti "fantasma" dei marketplace secondari (2026-10-22): il report
+    # di ES/FR/UK contiene ancora il vecchio SKU senza '+' (spesso senza
+    # ASIN), e creava un prodotto nuovo accanto a quello vero.
+    # ------------------------------------------------------------------
+
+    def _make_simple(self, sku, asin):
+        return self.env['product.template'].create({
+            'name': f'ZZT {sku}', 'type': 'consu', 'is_storable': True,
+            'default_code': sku, 'x_amazon_sku': sku, 'x_amazon_asin': asin,
+        })
+
+    def test_old_sku_without_asin_skipped_when_plus_in_odoo(self):
+        real = self._make_simple('ZZT-GHOST1+', 'B0ZZGHOST1')
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        log = self._make_log('test fantasma senza asin')
+        self._run(eng, log, [make_report_row('ZZT-GHOST1', asin='')])
+
+        self.assertFalse(self.env['product.template'].search([('default_code', '=', 'ZZT-GHOST1')]),
+                         'il vecchio SKU senza + non deve creare un prodotto nuovo')
+        self.assertIn('sostituito da ZZT-GHOST1+ già in Odoo', log.log_lines)
+        self.assertEqual(real.x_amazon_sku, 'ZZT-GHOST1+')
+
+    def test_old_sku_with_asin_does_not_rename_plus_product(self):
+        """Report con solo il vecchio SKU (la versione '+' non è listata su
+        quel marketplace): il match per ASIN non deve riportare il prodotto
+        vero da 'X+' a 'X'."""
+        real = self._make_simple('ZZT-GHOST2+', 'B0ZZGHOST2')
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        log = self._make_log('test fantasma con asin')
+        self._run(eng, log, [make_report_row('ZZT-GHOST2', asin='B0ZZGHOST2')])
+
+        real.invalidate_recordset()
+        self.assertEqual(real.x_amazon_sku, 'ZZT-GHOST2+')
+        self.assertEqual(real.default_code, 'ZZT-GHOST2+')
+        self.assertFalse(self.env['product.template'].search([('default_code', '=', 'ZZT-GHOST2')]))
+
+    def test_variant_asin_not_recognised_as_variant_skips(self):
+        """ASIN di una variante esistente su una riga senza relationships
+        (Catalog API fallita o senza dati su quel marketplace): niente
+        prodotto semplice duplicato."""
+        fam = self.env['product.template'].create({
+            'name': 'ZZT Famiglia fantasma', 'type': 'consu', 'is_storable': True,
+            'x_amazon_parent_asin': 'B0ZZGHOSTPARENT',
+        })
+        fam.product_variant_id.write({
+            'x_amazon_sku': 'ZZT-GHOST3-V', 'x_amazon_asin': 'B0ZZGHOST3', 'default_code': 'ZZT-GHOST3-V',
+        })
+        eng = self.SyncEngine(self.env, FakeSpApiClient())  # nessuna relazione nota
+        log = self._make_log('test fantasma asin variante')
+        self._run(eng, log, [make_report_row('ZZT-GHOST3-OLD', asin='B0ZZGHOST3')])
+
+        self.assertFalse(self.env['product.template'].search([('default_code', '=', 'ZZT-GHOST3-OLD')]),
+                         "l'ASIN di una variante esistente non deve diventare un prodotto semplice")
+
+    # ------------------------------------------------------------------
+    # Prodotto manuale con lo stesso EAN di una variante Amazon
+    # (2026-10-22): decisione dell'utente — crea la variante nella famiglia,
+    # sposta la giacenza del manuale e archivia il manuale.
+    # ------------------------------------------------------------------
+
+    def _make_manual(self, code, ean, qty):
+        manual = self.env['product.template'].create({
+            'name': f'ZZT manuale {code}', 'type': 'consu', 'is_storable': True,
+            'default_code': code, 'barcode': ean,
+        })
+        location = self.env.ref('stock.warehouse0').lot_stock_id
+        if qty:
+            self.env['stock.quant'].sudo()._update_available_quantity(
+                manual.product_variant_id, location, qty,
+            )
+        return manual, location
+
+    def _qty(self, variant, location):
+        return sum(self.env['stock.quant'].sudo().search([
+            ('product_id', '=', variant.id), ('location_id', '=', location.id),
+        ]).mapped('quantity'))
+
+    def test_manual_product_with_same_ean_merged_into_variant(self):
+        manual, location = self._make_manual('ZZT-SVS-1', '5700000000017', 7)
+        manual_variant = manual.product_variant_id
+        client = FakeSpApiClient({'B0ZZMERGE1': 'B0ZZMERGEPARENT'}, {'B0ZZMERGE1': '5700000000017'})
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test unione manuale')
+        self._run(eng, log, [make_report_row('ZZT-SAV-1', asin='B0ZZMERGE1')])
+
+        fam = self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZMERGEPARENT')])
+        self.assertEqual(len(fam), 1)
+        variant = fam.product_variant_ids.filtered(lambda v: v.x_amazon_asin == 'B0ZZMERGE1')
+        self.assertEqual(len(variant), 1)
+        self.assertEqual(variant.barcode, '5700000000017', "l'EAN passa alla variante")
+        self.assertEqual(self._qty(variant, location), 7, 'la giacenza del manuale passa alla variante')
+        self.assertEqual(self._qty(manual_variant, location), 0)
+        manual.invalidate_recordset()
+        self.assertFalse(manual.active, 'il manuale viene archiviato')
+        self.assertFalse(manual_variant.barcode)
+
+    def test_existing_duplicate_variant_merged_on_next_run(self):
+        """Doppione già creato da un import precedente (variante senza EAN,
+        occupato dal manuale): il giro successivo lo unisce."""
+        fam = self.env['product.template'].create({
+            'name': 'ZZT famiglia doppione', 'type': 'consu', 'is_storable': True,
+            'x_amazon_parent_asin': 'B0ZZMERGEPARENT2',
+        })
+        fam.product_variant_id.write({
+            'x_amazon_sku': 'ZZT-SAV-2', 'x_amazon_asin': 'B0ZZMERGE2', 'default_code': 'ZZT-SAV-2',
+        })
+        manual, location = self._make_manual('ZZT-SVS-2', '5700000000024', 4)
+        client = FakeSpApiClient({'B0ZZMERGE2': 'B0ZZMERGEPARENT2'}, {'B0ZZMERGE2': '5700000000024'})
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test unione doppione esistente')
+        self._run(eng, log, [make_report_row('ZZT-SAV-2', asin='B0ZZMERGE2')])
+
+        variant = fam.product_variant_id
+        self.assertEqual(variant.barcode, '5700000000024')
+        self.assertEqual(self._qty(variant, location), 4)
+        manual.invalidate_recordset()
+        self.assertFalse(manual.active)
+
+    def test_manual_with_reserved_stock_not_merged(self):
+        """Giacenza riservata (ordine aperto): niente unione automatica e
+        nessuna famiglia vuota creata — riga saltata con 'serve fusione manuale'."""
+        manual, location = self._make_manual('ZZT-SVS-3', '5700000000031', 5)
+        quant = self.env['stock.quant'].sudo().search([
+            ('product_id', '=', manual.product_variant_id.id), ('location_id', '=', location.id),
+        ])
+        quant.reserved_quantity = 2
+        client = FakeSpApiClient({'B0ZZMERGE3': 'B0ZZMERGEPARENT3'}, {'B0ZZMERGE3': '5700000000031'})
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test unione bloccata')
+        self._run(eng, log, [make_report_row('ZZT-SAV-3', asin='B0ZZMERGE3')])
+
+        self.assertFalse(self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZMERGEPARENT3')]),
+                         'nessuna famiglia vuota deve restare')
+        self.assertTrue(manual.active)
+        self.assertEqual(self._qty(manual.product_variant_id, location), 5)
+        self.assertIn('serve fusione manuale', log.log_lines)
+
+    def test_same_attribute_value_different_asin_creates_distinct_variant(self):
+        """Due figli della stessa famiglia con lo stesso valore attributo
+        (es. due misure con lo stesso colore): prima il secondo riscriveva
+        SKU/ASIN della variante del primo, ora nasce una variante distinta."""
+        from odoo.addons.ke_amazon_sync.services.sync_engine import _MatchMaps
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        parent = 'B0ZZCLASHPARENT'
+
+        def process(sku, asin):
+            product = eng._parse_listing_report(make_report_row(sku, asin=asin))
+            product['parent_asin'] = parent
+            product['variation_attr'] = ('ZZT Colore', 'Lemon Back')
+            maps = _MatchMaps(self.env, eng._build_barcode_map())
+            return eng._process_variant_listing(product, parent, 'consu', maps, True)
+
+        with no_commit(self.env):
+            process('ZZT-CLASH-1', 'B0ZZCLASH01')
+            res, msg = process('ZZT-CLASH-2', 'B0ZZCLASH02')
+
+        fam = self.env['product.template'].search([('x_amazon_parent_asin', '=', parent)])
+        self.assertEqual(res, 'created', msg)
+        self.assertEqual(sorted(fam.product_variant_ids.mapped('x_amazon_asin')), ['B0ZZCLASH01', 'B0ZZCLASH02'],
+                         'ogni figlio Amazon deve avere la sua variante')
+
+    def test_simple_with_same_sku_merged_when_family_exists(self):
+        """Semplice con lo stesso SKU della riga, famiglia già creata da un
+        fratello: prima "serve fusione manuale", ora variante + unione."""
+        parent = 'B0ZZSKUMERGEPARENT'
+        fam = self.env['product.template'].create({
+            'name': 'ZZT famiglia unione sku', 'type': 'consu', 'is_storable': True,
+            'x_amazon_parent_asin': parent,
+        })
+        fam.product_variant_id.write({
+            'x_amazon_sku': 'ZZT-SKUM-SIB', 'x_amazon_asin': 'B0ZZSKUMSIB', 'default_code': 'ZZT-SKUM-SIB',
+        })
+        simple, location = self._make_manual('ZZT-SKUM-1', False, 6)
+        simple_variant = simple.product_variant_id
+        client = FakeSpApiClient({'B0ZZSKUM1': parent})
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test unione per sku')
+        self._run(eng, log, [make_report_row('ZZT-SKUM-1', asin='B0ZZSKUM1')])
+
+        variant = fam.product_variant_ids.filtered(lambda v: v.x_amazon_asin == 'B0ZZSKUM1')
+        self.assertEqual(len(variant), 1, log.log_lines)
+        self.assertEqual(self._qty(variant, location), 6)
+        self.assertEqual(self._qty(simple_variant, location), 0)
+        simple.invalidate_recordset()
+        self.assertFalse(simple.active)
+        self.assertNotIn('serve fusione manuale', log.log_lines)
