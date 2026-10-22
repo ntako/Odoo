@@ -19,6 +19,28 @@ class ProductProduct(models.Model):
         help='Ultimo SKU sostituito dalla riconciliazione quando Amazon riassegna lo '
              'SKU di questa variante (es. rifornimento). Solo indicazione informativa.',
     )
+    x_amazon_fnsku = fields.Char(
+        'FNSKU (variante)', index=True, copy=False,
+        help='FNSKU di questa specifica variante, per le famiglie con più varianti '
+             '(ogni variante ha un suo SKU e quindi un suo FNSKU). Per un prodotto '
+             'semplice resta vuoto: l\'FNSKU è quello del template. Popolato da '
+             '"Import FNSKU" per i marketplace con magazzino FBA condiviso (Pan-EU).',
+    )
+
+    def _get_amazon_fnsku(self):
+        """
+        FNSKU da stampare in etichetta per questa variante: il suo, se ce l'ha
+        (famiglia con più varianti), altrimenti quello del template — ma solo
+        se il template ha un'unica variante: su una famiglia l'FNSKU del
+        template non identifica nessuna variante precisa, meglio vuoto che
+        un'etichetta sbagliata su un'unità fisica reale.
+        """
+        self.ensure_one()
+        if self.x_amazon_fnsku:
+            return self.x_amazon_fnsku
+        if len(self.product_tmpl_id.product_variant_ids) <= 1:
+            return self.product_tmpl_id.x_amazon_fnsku or ''
+        return ''
 
     def get_amazon_sale_price(self):
         """

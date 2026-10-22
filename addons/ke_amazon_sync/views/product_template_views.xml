@@ -160,4 +160,28 @@
         </field>
     </record>
 
+    <!-- FNSKU per variante: form "Varianti" del template e lista varianti -->
+    <record id="view_product_variant_easy_edit_amazon" model="ir.ui.view">
+        <field name="name">product.product.variant.easy.edit.amazon</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_variant_easy_edit_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='codes']/field[@name='barcode']" position="after">
+                <field name="x_amazon_sku" readonly="1" invisible="not x_amazon_sku"/>
+                <field name="x_amazon_fnsku" invisible="not x_amazon_fnsku"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_product_tree_amazon" model="ir.ui.view">
+        <field name="name">product.product.tree.amazon</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_product_tree_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='barcode']" position="after">
+                <field name="x_amazon_fnsku" optional="hide" readonly="1"/>
+            </xpath>
+        </field>
+    </record>
+
 </odoo>

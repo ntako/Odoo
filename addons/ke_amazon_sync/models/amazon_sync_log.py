@@ -42,6 +42,13 @@ class AmazonSyncLog(models.Model):
     products_skipped = fields.Integer('Saltati')
     products_error = fields.Integer('Errori')
 
+    parent_log_id = fields.Many2one(
+        'ke.amazon.sync.log', string='Log principale', ondelete='set null', readonly=True,
+        help="Per un'operazione avviata in automatico alla fine di un'altra (es. Import "
+             "FNSKU dopo l'import completo): il log di quell'operazione, che resta "
+             "'In corso' finché anche questa non è terminata.",
+    )
+
     start_date = fields.Datetime('Inizio', default=fields.Datetime.now)
     end_date = fields.Datetime('Fine')
     duration = fields.Float('Durata (s)', compute='_compute_duration', store=True)
@@ -140,6 +147,12 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
             params.set_param('ke_amazon_sync.fnsku_import_marketplace_queue', '')
             params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
+            # Chiude anche l'import completo che l'ha avviato, altrimenti
+            # resterebbe 'In corso' per sempre (vedi _close_parent_log).
+            self._close_parent_log(
+                self, error=error_summary if state == 'error' else None,
+                note='Import FNSKU chiuso manualmente o dal controllo di igiene.',
+            )
         elif self.sync_type == 'apply_cat_mapping':
             # Cron a chunk (non un thread): qui bisogna anche disattivare il
             # cron esplicitamente, non solo liberare lo stato — a differenza
@@ -755,19 +768,67 @@ class AmazonSyncLog(models.Model):
         un'unica chiamata, vedi discussione precedente), ma ha senso
         incatenarli: i prodotti appena creati/aggiornati hanno SKU freschi,
         l'FNSKU va ri-abbinato di conseguenza — niente da ricordarsi di
-        lanciare a parte. Se l'avvio dell'import FNSKU fallisce (es. un altro
-        già in corso), non fa fallire il full import: resta comunque 'done',
-        l'FNSKU si può sempre lanciare a mano.
-        """
-        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
-        params = self.env['ir.config_parameter'].sudo()
-        params.set_param('ke_amazon_sync.import_state', 'idle')
-        self.env.cr.commit()
+        lanciare a parte.
 
+        Il log dell'import completo resta 'In corso' (e import_state
+        'running') finché non termina anche l'Import FNSKU incatenato — prima
+        passava a 'Completato' subito, mentre in background girava ancora
+        l'FNSKU, dando l'impressione che fosse tutto finito. Lo chiude poi
+        _close_parent_log, chiamata alla fine/errore dell'FNSKU. Se l'FNSKU
+        non parte (un altro già in corso, o un errore all'avvio), l'import
+        completo si chiude subito 'done' come prima: l'FNSKU si può sempre
+        lanciare a mano.
+        """
+        SyncLog = self.env['ke.amazon.sync.log']
+        SyncLog._append_log_line(log_rec, 'Import prodotti terminato. Avvio Import FNSKU...')
         try:
-            self.action_start_fnsku_import(name_prefix='Import FNSKU (dopo import completo)')
+            self.action_start_fnsku_import(
+                name_prefix='Import FNSKU (dopo import completo)', parent_log=log_rec,
+            )
+            fnsku_log = SyncLog.search([('parent_log_id', '=', log_rec.id)], limit=1)
+            if fnsku_log:
+                SyncLog._append_log_line(
+                    log_rec, f'Import FNSKU in corso (log #{fnsku_log.id}) — questo log si '
+                             f'chiude quando termina anche quello.',
+                )
+                return
+            note = 'Import FNSKU non avviato: un altro è già in corso.'
         except Exception as exc:
             _log.warning('Import FNSKU automatico non avviato dopo il full import: %s', exc)
+            note = f'Import FNSKU non avviato: {exc}'
+
+        SyncLog._append_log_line(log_rec, note)
+        log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.import_state', 'idle')
+        self.env.cr.commit()
+
+    def _close_parent_log(self, child_log, error=None, note=None):
+        """
+        Chiude il log principale (parent_log_id) di un'operazione incatenata
+        — oggi solo l'import completo che ha avviato l'Import FNSKU (vedi
+        _finish_full_import). 'error' se l'operazione incatenata è fallita:
+        i prodotti sono stati importati, ma a colpo d'occhio il log deve dire
+        che non è andato tutto a buon fine. Nessun effetto se il log
+        principale non c'è o non è più 'running' (es. già chiuso a mano).
+        """
+        parent = child_log.parent_log_id
+        if not parent or parent.state != 'running':
+            return
+        if note:
+            self._append_log_line(parent, note)
+        if error:
+            self._append_log_line(parent, f'Import FNSKU (log #{child_log.id}) fallito: {error}')
+            vals = {'state': 'error',
+                    'error_summary': f'Prodotti importati correttamente, ma l\'Import FNSKU '
+                                     f'(log #{child_log.id}) è fallito: {error}'}
+        else:
+            self._append_log_line(parent, f'Import FNSKU (log #{child_log.id}) completato.')
+            vals = {'state': 'done'}
+        vals['end_date'] = fields.Datetime.now()
+        parent.write(vals)
+        if parent.sync_type == 'full_import':
+            self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.import_state', 'idle')
+        self.env.cr.commit()
 
     def _cron_check_new_products(self):
         client = SpApiClient(self.env)
@@ -1676,7 +1737,7 @@ class AmazonSyncLog(models.Model):
     # Import FNSKU
     # ------------------------------------------------------------------
 
-    def action_start_fnsku_import(self, name_prefix='Import FNSKU'):
+    def action_start_fnsku_import(self, name_prefix='Import FNSKU', parent_log=None):
         """
         Avvia l'import FNSKU (report GET_FBA_MYI_ALL_INVENTORY_DATA), uno per
         ogni marketplace attivo — stessa coda del full import/riconciliazione/
@@ -1717,6 +1778,7 @@ class AmazonSyncLog(models.Model):
             'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'import_fnsku',
             'state': 'running',
+            'parent_log_id': parent_log.id if parent_log else False,
             'start_date': fields.Datetime.now(),
             'log_lines': f'Richiesta report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA) '
                          f'su {len(marketplaces)} marketplace: {", ".join(marketplaces.mapped("code"))}.',
@@ -1819,6 +1881,12 @@ class AmazonSyncLog(models.Model):
 
                     msg = f'Import FNSKU completato per {marketplace.name} ({marketplace.code}).'
                     SyncLog._append_log_line(log_rec, msg)
+                    if log_rec.parent_log_id:
+                        SyncLog._append_log_line(
+                            log_rec.parent_log_id,
+                            f'[{marketplace.code}] Import FNSKU: {matched} abbinati, '
+                            f'{not_found} SKU non trovati, {errors} errori.',
+                        )
                     params.set_param('ke_amazon_sync.fnsku_import_current_marketplace_id', '')
                     env.cr.commit()
 
@@ -1828,6 +1896,7 @@ class AmazonSyncLog(models.Model):
                 log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
                 env.cr.commit()
+                SyncLog._close_parent_log(log_rec, error=str(exc))
 
     def _fnsku_import_pop_marketplace(self, params):
         """
@@ -1853,3 +1922,4 @@ class AmazonSyncLog(models.Model):
         params.set_param('ke_amazon_sync.fnsku_import_state', 'idle')
         params.set_param('ke_amazon_sync.fnsku_import_log_id', '')
         self.env.cr.commit()
+        self._close_parent_log(log_rec)

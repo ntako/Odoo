@@ -3423,11 +3423,9 @@ class SyncEngine:
         x_amazon_fnsku. Abbina per SKU usando _find_amazon_product_variant (variante
         prima, poi template) — righe senza SKU riconosciuto in Odoo vengono segnalate
         come saltate, non è un errore (es. inventario storico/archiviato non più in
-        Odoo). x_amazon_fnsku è oggi un campo di template, condiviso da tutte le
-        varianti di una famiglia: se il variante trovato appartiene a un template con
-        PIÙ varianti, scriverlo lì sovrascriverebbe l'FNSKU (diverso) delle altre
-        varianti — in quel caso la riga viene saltata con un messaggio esplicito
-        invece di scrivere un dato sbagliato (limite noto, vedi TASK.md).
+        Odoo). Se la variante trovata appartiene a un template con PIÙ varianti,
+        l'FNSKU va sulla variante (product.product.x_amazon_fnsku), non sul
+        template, dove sovrascriverebbe quello delle varianti sorelle.
 
         Fase 3 multi-marketplace: "pooled" determinato da
         ke.amazon.marketplace.is_fba_pooled() (stesso meccanismo di
@@ -3470,19 +3468,27 @@ class SyncEngine:
 
                 product = variant.product_tmpl_id
                 if len(product.product_variant_ids) > 1:
-                    # x_amazon_fnsku (e, per lo stesso motivo, ke.amazon.listing.fnsku,
-                    # anch'esso a livello di template) è condiviso da tutte le
-                    # varianti — anche se QUESTA variante è stata identificata con
-                    # precisione, scriverlo qui sovrascriverebbe l'FNSKU (diverso)
-                    # delle varianti sorelle. Serve un campo per-variante per
-                    # gestire correttamente questo caso (non ancora implementato),
-                    # a prescindere da pooled/dedicato.
-                    not_found += 1
-                    lines.append(
-                        f'{mp_tag}SALTATO {sku}: appartiene a una famiglia con più varianti, '
-                        f"l'FNSKU è condiviso per template — richiede un campo "
-                        f'FNSKU per variante non ancora implementato'
-                    )
+                    # Famiglia: x_amazon_fnsku del template è condiviso da tutte
+                    # le varianti, si scrive invece quello della variante
+                    # (product.product.x_amazon_fnsku). Solo per i marketplace
+                    # pooled: per uno dedicato (es. UK) l'FNSKU può essere
+                    # diverso da quello del pool, e ke.amazon.listing.fnsku è a
+                    # livello di template — servirebbe un dato per variante E
+                    # per marketplace, non ancora implementato.
+                    if dedicated:
+                        not_found += 1
+                        lines.append(
+                            f'{mp_tag}SALTATO {sku}: variante di una famiglia su un marketplace '
+                            f'con magazzino FBA separato — FNSKU per variante e per '
+                            f'marketplace non ancora gestito'
+                        )
+                        continue
+                    if variant.x_amazon_fnsku != fnsku:
+                        variant.write({'x_amazon_fnsku': fnsku})
+                        lines.append(f'{mp_tag}OK {sku} → {fnsku} (variante)')
+                    else:
+                        lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku} (variante)')
+                    matched += 1
                     continue
 
                 listing = None
@@ -3763,6 +3769,7 @@ class SyncEngine:
                     if is_primary:
                         variant.write({
                             'x_amazon_sku': plus_sku, 'default_code': plus_sku,
+                            'x_amazon_fnsku': False,  # nuovo SKU → nuovo FNSKU, vedi sopra
                             'x_amazon_sku_previous': sku,  # solo indicazione informativa
                         })
                         tmpl_vals = {
@@ -3803,6 +3810,7 @@ class SyncEngine:
                         if is_primary:
                             variant.write({
                                 'x_amazon_sku': new_sku, 'default_code': new_sku,
+                                'x_amazon_fnsku': False,  # nuovo SKU → nuovo FNSKU, vedi sopra
                                 'x_amazon_sku_previous': sku,  # solo indicazione informativa
                             })
                             tmpl_vals_asin = {

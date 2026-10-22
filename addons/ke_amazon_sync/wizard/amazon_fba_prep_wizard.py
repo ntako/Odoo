@@ -72,20 +72,11 @@ class AmazonFbaPrepWizard(models.TransientModel):
 
         move = self._find_move(barcode)
         product = move.product_id
-        template = product.product_tmpl_id
 
-        # x_amazon_fnsku è un campo di template, condiviso da tutte le varianti
-        # di una famiglia (limite noto, vedi TASK.md) — per una famiglia con più
-        # varianti non possiamo fidarci che sia quello giusto per QUESTA variante:
-        # meglio bloccare che stampare un'etichetta con l'FNSKU sbagliato su
-        # un'unità fisica reale.
-        if len(template.product_variant_ids) > 1:
-            raise UserError(
-                f'{product.display_name}: appartiene a una famiglia con più varianti, '
-                f"l'FNSKU condiviso per template non è affidabile per questa variante "
-                f'— limite noto, non ancora gestito (vedi TASK.md).'
-            )
-        fnsku = template.x_amazon_fnsku
+        # FNSKU della variante per una famiglia, del template per un prodotto
+        # semplice — mai quello del template su una famiglia (vedi
+        # product.product._get_amazon_fnsku).
+        fnsku = product._get_amazon_fnsku()
         if not fnsku:
             raise UserError(f'{product.display_name}: FNSKU mancante. Esegui prima "Import FNSKU".')
 
