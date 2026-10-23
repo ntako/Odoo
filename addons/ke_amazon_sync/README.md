@@ -56,7 +56,7 @@ Legge le giacenze reali da Amazon (Inventory API) e aggiorna lo stock Odoo nel m
 - Aggiorna anche il campo informativo `x_amazon_qty` sul prodotto
 - Avviabile da **Magazzino → Amazon Sync → Sync Giacenze FBA**
 - Il cron può essere schedulato ogni N ore dalle impostazioni
-- **Marketplace Pan-EU pooled** (IT/DE/ES/FR): tutti condividono lo stesso magazzino FBA Odoo, stesso stock fisico. Un marketplace con **magazzino FBA dedicato** impostato (`ke.amazon.marketplace.fba_warehouse_id` — pensato per UK/US, inventario non pooled) usa invece quel magazzino e traccia la quantità su `ke.amazon.listing.qty` invece che su `x_amazon_qty` (che resta il valore del pool EU)
+- **Marketplace Pan-EU pooled** (IT/DE/ES/FR): tutti condividono lo stesso magazzino FBA Odoo, stesso stock fisico. Un marketplace con **magazzino FBA dedicato** impostato (`ke.amazon.marketplace.fba_warehouse_id` — pensato per UK/US, inventario non pooled) usa invece quel magazzino e traccia la quantità su `ke.amazon.listing.qty` invece che su `x_amazon_qty` (che resta il valore del pool EU). `ke.amazon.listing` è scoped per **variante** (`product.product`), non per template: ogni variante di una famiglia ha la propria riga SKU/ASIN/FNSKU/prezzo/quantità per marketplace (refactor 2026-10-23, vedi TASK.md) — per un prodotto semplice non cambia nulla in pratica.
 
 ### 6. Pubblicazione su Amazon (dal form prodotto)
 Crea o aggiorna un listing su Amazon direttamente dal form del prodotto Odoo.

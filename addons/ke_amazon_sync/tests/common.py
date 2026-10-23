@@ -51,7 +51,7 @@ class FakeSpApiClient:
     # finto in ogni test solo per non far esplodere _upsert_listing.
     marketplace_id = None
 
-    def __init__(self, parent_asin_by_asin=None, ean_by_asin=None):
+    def __init__(self, parent_asin_by_asin=None, ean_by_asin=None, marketplace_id=None):
         # {asin_figlio: parent_asin} — un ASIN non presente qui risulta
         # "nessuna relazione di variante" (prodotto standalone agli occhi
         # del Catalog API), stesso comportamento di un ASIN reale senza
@@ -61,6 +61,14 @@ class FakeSpApiClient:
         # l'unica fonte dell'EAN nel Full Import (il report listing ha solo
         # l'ASIN come product-id).
         self._ean_by_asin = ean_by_asin or {}
+        # Override di istanza del default di classe (None): serve ai test
+        # che hanno bisogno di un _current_marketplace() reale (es. un
+        # marketplace "dedicato", non pooled) — passare qui lo stesso valore
+        # del campo marketplace_id di un ke.amazon.marketplace creato nel
+        # test fa risolvere _upsert_listing/process_fnsku_report_rows/ecc.
+        # su quel marketplace invece che no-op.
+        if marketplace_id is not None:
+            self.marketplace_id = marketplace_id
 
     def get_catalog_items_batch(self, asins):
         out = {}
@@ -80,6 +88,29 @@ class FakeSpApiClient:
                     {'identifierType': 'EAN', 'identifier': ean},
                 ]}]
         return out
+
+
+def make_dedicated_marketplace(env, name='ZZT Dedicato', code='ZZTD',
+                                marketplace_id='ZZT_MKT_DEDICATO'):
+    """
+    Crea due ke.amazon.marketplace ATTIVI con magazzini FBA diversi e
+    ritorna quello "dedicato" (non pooled): is_fba_pooled() confronta i
+    magazzini FBA di tutti i marketplace attivi, ed essere l'unico attivo
+    conta come "pooled" per definizione (vedi AmazonMarketplace.
+    is_fba_pooled) — serve quindi un secondo marketplace attivo con un
+    magazzino diverso perché il primo risulti davvero dedicato.
+    """
+    Warehouse = env['stock.warehouse']
+    wh_pool = Warehouse.create({'name': 'ZZT WH Pool', 'code': 'ZZTWP'})
+    wh_dedicated = Warehouse.create({'name': 'ZZT WH Dedicato', 'code': 'ZZTWD'})
+    env['ke.amazon.marketplace'].create({
+        'name': 'ZZT Pool', 'code': 'ZZTP', 'marketplace_id': 'ZZT_MKT_POOL',
+        'active': True, 'fba_warehouse_id': wh_pool.id,
+    })
+    return env['ke.amazon.marketplace'].create({
+        'name': name, 'code': code, 'marketplace_id': marketplace_id,
+        'active': True, 'fba_warehouse_id': wh_dedicated.id,
+    })
 
 
 def make_report_row(sku, asin='', name='Test prodotto', price='9.99', qty='3',

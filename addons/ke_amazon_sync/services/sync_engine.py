@@ -455,10 +455,14 @@ class _MatchMaps:
         marketplace, a prescindere da quale sia primario.
         """
         for listing in listings:
+            # listing.product_id è la VARIANTE (ke.amazon.listing è scoped
+            # per variante, vedi amazon_listing.py) — qui serve il template,
+            # come tutti gli altri valori di by_sku/by_asin.
+            tmpl = listing.product_id.product_tmpl_id
             if listing.sku and listing.sku not in self.by_sku:
-                self.by_sku[listing.sku] = listing.product_id
+                self.by_sku[listing.sku] = tmpl
             if listing.asin and listing.asin not in self.by_asin:
-                self.by_asin[listing.asin] = listing.product_id
+                self.by_asin[listing.asin] = tmpl
 
     def find_simple(self, sku, asin, ean):
         """
@@ -616,12 +620,15 @@ class SyncEngine:
         primary_id = self.env['ir.config_parameter'].sudo().get_param('ke_amazon_sync.marketplace_id')
         return not primary_id or self.client.marketplace_id == primary_id
 
-    def _upsert_listing(self, product_tmpl, data):
+    def _upsert_listing(self, variant, data):
         """
-        Crea o aggiorna la riga ke.amazon.listing per (product_tmpl, marketplace
-        corrente della sync). Non fa nulla se il marketplace corrente non è
-        censito in ke.amazon.marketplace (non dovrebbe succedere durante un
-        import in coda, ma non deve bloccare l'import se capita).
+        Crea o aggiorna la riga ke.amazon.listing per (variant, marketplace
+        corrente della sync) — una riga per VARIANTE, non per template (vedi
+        amazon_listing.py): ogni variante di una famiglia ha il proprio
+        SKU/ASIN/FNSKU/prezzo/quantità per marketplace. Non fa nulla se il
+        marketplace corrente non è censito in ke.amazon.marketplace (non
+        dovrebbe succedere durante un import in coda, ma non deve bloccare
+        l'import se capita).
         """
         marketplace = self._current_marketplace()
         if not marketplace:
@@ -640,12 +647,12 @@ class SyncEngine:
             'browse_node_id': data.get('browse_node_id', ''),
         }
         listing = Listing.search([
-            ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+            ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
         ], limit=1)
         if listing:
             listing.write(vals)
         else:
-            vals.update({'product_id': product_tmpl.id, 'marketplace_id': marketplace.id})
+            vals.update({'product_id': variant.id, 'marketplace_id': marketplace.id})
             Listing.create(vals)
 
     # -----------------------------------------------------------------------
@@ -1243,7 +1250,11 @@ class SyncEngine:
                   AND (
                         (t.x_amazon_asin IS NOT NULL AND t.x_amazon_asin != '')
                      OR (t.x_amazon_parent_asin IS NOT NULL AND t.x_amazon_parent_asin != '')
-                     OR EXISTS (SELECT 1 FROM ke_amazon_listing l WHERE l.product_id = t.id)
+                     OR EXISTS (
+                            SELECT 1 FROM ke_amazon_listing l
+                            JOIN product_product pp ON pp.id = l.product_id
+                            WHERE pp.product_tmpl_id = t.id
+                        )
                   )
                 GROUP BY t.default_code
                 HAVING count(*) > 1
@@ -1269,7 +1280,12 @@ class SyncEngine:
             parts = []
             for t in templates:
                 tmpl_id = t['id']
-                listings = self.env['ke.amazon.listing'].sudo().search([('product_id', '=', tmpl_id)])
+                variant_ids = self.env['product.product'].sudo().search(
+                    [('product_tmpl_id', '=', tmpl_id)]
+                ).ids
+                listings = self.env['ke.amazon.listing'].sudo().search(
+                    [('product_id', 'in', variant_ids)]
+                )
                 marketplaces = ', '.join(listings.mapped('marketplace_id.code')) or '-'
                 kind = 'famiglia' if t['x_amazon_parent_asin'] else 'semplice'
                 parts.append(
@@ -1445,7 +1461,7 @@ class SyncEngine:
         self._init_product_warehouse_quant(
             template.product_variant_id, data['fulfillment'], data.get('qty_available') or 0,
         )
-        self._upsert_listing(template, data)
+        self._upsert_listing(template.product_variant_id, data)
         return template
 
     def _set_product_attributes(self, template, spec_attrs):
@@ -1560,7 +1576,7 @@ class SyncEngine:
                 except Exception as exc:
                     _log.warning('Impossibile assegnare barcode %s a %s: %s',
                                  data['ean'], data['sku'], exc)
-        self._upsert_listing(product, data)
+        self._upsert_listing(product.product_variant_id, data)
 
     # -----------------------------------------------------------------------
     # Gestione prodotti con varianti (famiglia Amazon)
@@ -1742,6 +1758,7 @@ class SyncEngine:
                                          product['ean'], sku, exc)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
+                self._upsert_listing(existing_variant, product)
                 msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}{merged_note}'
                 return 'updated', msg
             else:
@@ -1799,6 +1816,7 @@ class SyncEngine:
         variant = self._add_variant_to_template(tmpl, product, attr_label, attr_value)
         if variant:
             maps.register_variant(asin, sku, variant, tmpl)
+            self._upsert_listing(variant, product)
             if manual:
                 # Niente giacenza iniziale da Amazon: quella vera è sul
                 # manuale e viene spostata qui, seedarla la raddoppierebbe.
@@ -1897,7 +1915,7 @@ class SyncEngine:
             # Mai sovrascrivere un EAN che la variante ha già (caso SKU).
             if ean and not variant.barcode:
                 variant.write({'barcode': ean})
-            self.env['ke.amazon.listing'].sudo().search([('product_id', '=', manual.id)]).unlink()
+            self.env['ke.amazon.listing'].sudo().search([('product_id', '=', mv.id)]).unlink()
             moved = sum(qty for _loc, qty in to_move)
             manual.message_post(body=(
                 f'Archiviato dal Full Import Amazon: unito nella variante '
@@ -2425,6 +2443,10 @@ class SyncEngine:
         lines = []
 
         for listing in listings:
+            # listing.product_id è già la variante (ke.amazon.listing è
+            # scoped per variante) — prezzo/quantità letti/scritti su di
+            # essa direttamente, non più sul template (fix di un bug latente:
+            # ignorava eventuali regole di pricelist specifiche per variante).
             product = listing.product_id
             sku = listing.sku
             product_type = listing.product_type or 'PRODUCT'
@@ -2443,7 +2465,7 @@ class SyncEngine:
             if listing.sync_qty:
                 if listing.fulfillment == 'fbm':
                     try:
-                        qty = int(self._qty_in_warehouse(product.product_variant_id, fbm_warehouse))
+                        qty = int(self._qty_in_warehouse(product, fbm_warehouse))
                         self.client.patch_quantity(sku, product_type, qty)
                         ops_done.append(f'qty={qty}')
                     except Exception as exc:
@@ -3127,10 +3149,16 @@ class SyncEngine:
                 product_tmpl = variant.product_tmpl_id
 
             try:
+                # ke.amazon.listing è scoped per VARIANTE — la lookup usa
+                # sempre product_variant.id (la variante risolta per questa
+                # riga), mai product_tmpl.id, altrimenti due sorelle della
+                # stessa famiglia su un marketplace dedicato condividerebbero
+                # la stessa riga/quantità (stesso bug di clobbering già
+                # risolto altrove in questo refactor).
                 listing = None
                 if dedicated:
                     listing = self.env['ke.amazon.listing'].sudo().search([
-                        ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+                        ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
                     ], limit=1)
                     previous_qty = listing.qty if listing else 0
                 else:
@@ -3149,7 +3177,7 @@ class SyncEngine:
                     product_tmpl.write({'x_amazon_qty': int(fba_qty)})
                     if marketplace:
                         listing = self.env['ke.amazon.listing'].sudo().search([
-                            ('product_id', '=', product_tmpl.id), ('marketplace_id', '=', marketplace.id),
+                            ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
                         ], limit=1)
                         if listing:
                             listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
@@ -3693,22 +3721,12 @@ class SyncEngine:
                     continue
 
                 product = variant.product_tmpl_id
-                if len(product.product_variant_ids) > 1:
-                    # Famiglia: x_amazon_fnsku del template è condiviso da tutte
-                    # le varianti, si scrive invece quello della variante
-                    # (product.product.x_amazon_fnsku). Solo per i marketplace
-                    # pooled: per uno dedicato (es. UK) l'FNSKU può essere
-                    # diverso da quello del pool, e ke.amazon.listing.fnsku è a
-                    # livello di template — servirebbe un dato per variante E
-                    # per marketplace, non ancora implementato.
-                    if dedicated:
-                        not_found += 1
-                        lines.append(
-                            f'{mp_tag}SALTATO {sku}: variante di una famiglia su un marketplace '
-                            f'con magazzino FBA separato — FNSKU per variante e per '
-                            f'marketplace non ancora gestito'
-                        )
-                        continue
+                if len(product.product_variant_ids) > 1 and not dedicated:
+                    # Famiglia su marketplace POOLED: x_amazon_fnsku del
+                    # template è condiviso da tutte le varianti, si scrive
+                    # invece quello della variante (product.product.
+                    # x_amazon_fnsku) — l'FNSKU è lo stesso per tutto il pool,
+                    # niente a che fare con ke.amazon.listing qui.
                     if variant.x_amazon_fnsku != fnsku:
                         variant.write({'x_amazon_fnsku': fnsku})
                         lines.append(f'{mp_tag}OK {sku} → {fnsku} (variante)')
@@ -3717,10 +3735,17 @@ class SyncEngine:
                     matched += 1
                     continue
 
+                # Prodotto semplice, o famiglia su marketplace DEDICATO
+                # (es. UK): ke.amazon.listing è scoped per VARIANTE — la
+                # lookup è sempre su variant.id, mai su product.id
+                # (template), altrimenti due sorelle della stessa famiglia
+                # condividerebbero la stessa riga/FNSKU (bug di clobbering,
+                # lo stesso motivo per cui prima questo caso veniva saltato
+                # del tutto per i marketplace dedicati).
                 listing = None
                 if marketplace:
                     listing = self.env['ke.amazon.listing'].sudo().search([
-                        ('product_id', '=', product.id), ('marketplace_id', '=', marketplace.id),
+                        ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
                     ], limit=1)
 
                 if dedicated:
@@ -3876,9 +3901,13 @@ class SyncEngine:
         listing_sku_by_tmpl = {}
         listing_asin_by_tmpl = {}
         for listing in self.env['ke.amazon.listing'].sudo().search([('sku', '!=', False)]):
-            listing_sku_by_tmpl.setdefault(listing.product_id.id, listing.sku)
+            # listing.product_id è la VARIANTE (ke.amazon.listing è scoped
+            # per variante) — qui serve l'id template, come il resto di
+            # queste mappe/la ricerca simple_products sotto.
+            tmpl_id = listing.product_id.product_tmpl_id.id
+            listing_sku_by_tmpl.setdefault(tmpl_id, listing.sku)
             if listing.asin:
-                listing_asin_by_tmpl.setdefault(listing.product_id.id, listing.asin)
+                listing_asin_by_tmpl.setdefault(tmpl_id, listing.asin)
 
         simple_products = self.env['product.template'].search([
             '|', ('x_amazon_sku', '!=', False), ('id', 'in', list(listing_sku_by_tmpl.keys())),
@@ -3918,7 +3947,7 @@ class SyncEngine:
                             # Solo indicazione informativa, non usata per match.
                             'x_amazon_sku_previous': sku,
                         })
-                    self._upsert_listing(product, plus_data)
+                    self._upsert_listing(product.product_variant_id, plus_data)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -3935,7 +3964,7 @@ class SyncEngine:
                         updated += 1
                     elif not is_primary:
                         updated += 1
-                    self._upsert_listing(product, amazon_data)
+                    self._upsert_listing(product.product_variant_id, amazon_data)
                     msg = (f'[OK] {product.default_code or product.name} SKU={sku} '
                            f'stato={new_status} prezzo={new_price:.2f}€')
                 else:
@@ -3956,7 +3985,7 @@ class SyncEngine:
                                 'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
                                 'x_amazon_sku_previous': sku,  # solo indicazione informativa
                             })
-                        self._upsert_listing(product, amazon_data_by_asin)
+                        self._upsert_listing(product.product_variant_id, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1
@@ -4009,7 +4038,7 @@ class SyncEngine:
                         if len(tmpl.product_variant_ids) <= 1:
                             tmpl_vals['x_amazon_fnsku'] = False
                         tmpl.write(tmpl_vals)
-                    self._upsert_listing(tmpl, plus_data)
+                    self._upsert_listing(variant, plus_data)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -4021,7 +4050,7 @@ class SyncEngine:
                     new_price = amazon_data.get('price') or 0.0
                     if is_primary:
                         tmpl.write({'x_amazon_status': new_status, 'x_amazon_price': new_price})
-                    self._upsert_listing(tmpl, amazon_data)
+                    self._upsert_listing(variant, amazon_data)
                     updated += 1
                     msg = (f'[OK] variante {tmpl.default_code or tmpl.name} '
                            f'/ {variant.display_name} SKU={sku} stato={new_status}')
@@ -4047,7 +4076,7 @@ class SyncEngine:
                             if len(tmpl.product_variant_ids) <= 1:
                                 tmpl_vals_asin['x_amazon_fnsku'] = False
                             tmpl.write(tmpl_vals_asin)
-                        self._upsert_listing(tmpl, amazon_data_by_asin)
+                        self._upsert_listing(variant, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1

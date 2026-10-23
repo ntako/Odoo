@@ -142,9 +142,21 @@ class ProductTemplate(models.Model):
     # SyncEngine._is_primary_marketplace) — questo campo aggiunge solo la
     # visibilità sulle inserzioni degli ALTRI marketplace attivi, senza
     # sostituire né duplicare i campi esistenti.
-    x_amazon_listing_ids = fields.One2many(
-        'ke.amazon.listing', 'product_id', string='Inserzioni per marketplace',
+    # Non è più un One2many reale (ke.amazon.listing.product_id ora punta a
+    # product.product, non più a product.template, per avere un'inserzione
+    # per VARIANTE — vedi amazon_listing.py): qui si aggregano in sola
+    # lettura le inserzioni di tutte le varianti del template, solo per
+    # continuare a mostrare un riepilogo sulla scheda prodotto. L'editing
+    # reale (sync_price/sync_qty) vive sulla vista variante.
+    x_amazon_listing_ids = fields.Many2many(
+        'ke.amazon.listing', string='Inserzioni per marketplace',
+        compute='_compute_x_amazon_listing_ids',
     )
+
+    @api.depends('product_variant_ids.x_amazon_listing_ids')
+    def _compute_x_amazon_listing_ids(self):
+        for template in self:
+            template.x_amazon_listing_ids = template.product_variant_ids.x_amazon_listing_ids
 
     # --- Stato su Amazon ---
     x_amazon_status = fields.Selection([

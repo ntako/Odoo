@@ -272,14 +272,19 @@ class ResConfigSettings(models.TransientModel):
 
         Listing = self.env['ke.amazon.listing']
         products = self.env['product.template'].search([('x_amazon_sku', '!=', False)])
+        # ke.amazon.listing.product_id è scoped per VARIANTE (vedi
+        # amazon_listing.py) — questi sono tutti prodotti semplici
+        # (x_amazon_sku su product.template è scritto solo per quelli, mai
+        # per famiglie), quindi la variante è sempre l'unica del template.
+        variant_by_tmpl_id = {p.id: p.product_variant_id.id for p in products}
         already_ids = set(Listing.search([
             ('marketplace_id', '=', marketplace.id),
-            ('product_id', 'in', products.ids),
+            ('product_id', 'in', list(variant_by_tmpl_id.values())),
         ]).mapped('product_id').ids)
 
         vals_list = [
             {
-                'product_id': product.id,
+                'product_id': variant_by_tmpl_id[product.id],
                 'marketplace_id': marketplace.id,
                 'sku': product.x_amazon_sku,
                 'asin': product.x_amazon_asin,
@@ -300,7 +305,7 @@ class ResConfigSettings(models.TransientModel):
                 'last_sync': product.x_amazon_last_sync,
                 'sync_error': product.x_amazon_sync_error,
             }
-            for product in products if product.id not in already_ids
+            for product in products if variant_by_tmpl_id[product.id] not in already_ids
         ]
         if vals_list:
             Listing.create(vals_list)

@@ -6,14 +6,17 @@ class AmazonListing(models.Model):
     _description = 'Inserzione Amazon (prodotto × marketplace)'
     _rec_name = 'sku'
 
-    # Fase 1 (fondamenta multi-marketplace): questo modello affianca, non
-    # sostituisce ancora, i campi x_amazon_* su product.template — sync_engine.py
-    # e le viste esistenti continuano a leggere/scrivere quelli finché non
-    # vengono riscritti (fasi successive, vedi TASK.md). Le righe qui sono
-    # popolate dalla migrazione una tantum (Impostazioni → Amazon → Migra a
-    # modello multi-marketplace) e resteranno inutilizzate fino ad allora.
+    # Scoped per VARIANTE (product.product), non per template: ogni variante
+    # di una famiglia ha il proprio SKU/ASIN/FNSKU/prezzo/quantità per
+    # marketplace — un'unica riga per famiglia avrebbe fatto sovrascrivere
+    # silenziosamente i dati di una sorella dall'altra (bug reale corretto
+    # nel refactor del 2026-10-23, vedi TASK.md). Per i prodotti semplici
+    # (1 sola variante) non cambia nulla in pratica.
+    # ondelete='cascade': se Odoo elimina una variante (es. ricalcolo
+    # combinazioni attributi), la riga listing collegata sparisce con lei —
+    # comportamento corretto, nessun orfano.
     product_id = fields.Many2one(
-        'product.template', string='Prodotto', required=True, ondelete='cascade', index=True,
+        'product.product', string='Variante', required=True, ondelete='cascade', index=True,
     )
     marketplace_id = fields.Many2one(
         'ke.amazon.marketplace', string='Marketplace', required=True, index=True,

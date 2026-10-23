@@ -27,6 +27,14 @@ class ProductProduct(models.Model):
              '"Import FNSKU" per i marketplace con magazzino FBA condiviso (Pan-EU).',
     )
 
+    # Un'inserzione per variante × marketplace — vedi amazon_listing.py.
+    # Copre sia i marketplace "pooled" (via _upsert_listing, sku/asin/prezzo/
+    # stato) sia quelli "dedicati" come UK (anche fnsku/qty, non duplicabili
+    # sui campi condivisi x_amazon_fnsku/x_amazon_qty del pool).
+    x_amazon_listing_ids = fields.One2many(
+        'ke.amazon.listing', 'product_id', string='Inserzioni per marketplace',
+    )
+
     def _get_amazon_fnsku(self):
         """
         FNSKU da stampare in etichetta per questa variante: il suo, se ce l'ha

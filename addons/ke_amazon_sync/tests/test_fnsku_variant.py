@@ -12,7 +12,7 @@ stesso ramo "pooled" di IT/ES/FR, nessuna chiamata Amazon possibile.
 """
 from odoo.tests.common import TransactionCase, tagged
 
-from .common import no_commit
+from .common import FakeSpApiClient, make_dedicated_marketplace, no_commit
 
 
 @tagged('post_install', '-at_install', 'ke_amazon_sync_matching')
@@ -75,3 +75,52 @@ class TestFnskuVariant(TransactionCase):
         nessuna variante — meglio vuoto (il wizard blocca) che sbagliato."""
         tmpl, red, blue = self._make_family()
         self.assertEqual(red._get_amazon_fnsku(), '')
+
+    def test_family_variant_dedicated_marketplace_gets_own_listing_fnsku(self):
+        """
+        Refactor ke.amazon.listing → variante (2026-10-23): su un marketplace
+        DEDICATO (non pooled, es. UK) una famiglia non viene più saltata in
+        blocco — ogni variante riceve l'FNSKU sulla propria riga
+        ke.amazon.listing, senza toccare x_amazon_fnsku (quello resta per i
+        marketplace pooled).
+        """
+        tmpl, red, blue = self._make_family()
+        marketplace = make_dedicated_marketplace(self.env)
+        Listing = self.env['ke.amazon.listing']
+        listing_red = Listing.create({
+            'product_id': red.id, 'marketplace_id': marketplace.id, 'sku': 'ZZT-FNSKU-RED',
+        })
+        listing_blue = Listing.create({
+            'product_id': blue.id, 'marketplace_id': marketplace.id, 'sku': 'ZZT-FNSKU-BLUE',
+        })
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        client = FakeSpApiClient(marketplace_id=marketplace.marketplace_id)
+        engine = SyncEngine(self.env, client)
+        with no_commit(self.env):
+            matched, not_found, errors = engine.process_fnsku_report_rows(self.log, [
+                {'sku': 'ZZT-FNSKU-RED', 'fnsku': 'UK00RED'},
+                {'sku': 'ZZT-FNSKU-BLUE', 'fnsku': 'UK00BLUE'},
+            ])
+        self.assertEqual((matched, not_found, errors), (2, 0, 0))
+        self.assertEqual(listing_red.fnsku, 'UK00RED')
+        self.assertEqual(listing_blue.fnsku, 'UK00BLUE')
+        self.assertFalse(red.x_amazon_fnsku,
+                          "il marketplace dedicato non deve toccare il campo pooled")
+        self.assertFalse(blue.x_amazon_fnsku)
+        self.assertEqual(tmpl.x_amazon_fnsku, 'X00TEMPLATE')
+
+    def test_family_variant_dedicated_marketplace_without_listing_is_skipped(self):
+        """Senza una riga ke.amazon.listing già esistente per quella
+        variante+marketplace (nessun full import/riconciliazione ancora
+        passato di lì), si salta esplicitamente invece di indovinare."""
+        tmpl, red, blue = self._make_family()
+        marketplace = make_dedicated_marketplace(self.env)
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        client = FakeSpApiClient(marketplace_id=marketplace.marketplace_id)
+        engine = SyncEngine(self.env, client)
+        with no_commit(self.env):
+            matched, not_found, errors = engine.process_fnsku_report_rows(self.log, [
+                {'sku': 'ZZT-FNSKU-RED', 'fnsku': 'UK00RED'},
+            ])
+        self.assertEqual((matched, not_found, errors), (0, 1, 0))
+        self.assertFalse(red.x_amazon_fnsku)
