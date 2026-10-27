@@ -1,3 +1,5 @@
+import base64
+
 from odoo import api, fields, models
 
 
@@ -40,3 +42,21 @@ class AmazonFbaLabelLog(models.Model):
     def _compute_display_name(self):
         for rec in self:
             rec.display_name = f'{rec.product_id.display_name} — {rec.fnsku}'
+
+    def _get_barcode_data_uri(self):
+        """
+        Barcode Code128 del FNSKU come data URI PNG, generato qui in Python
+        (env['ir.actions.report'].barcode, nessuna chiamata HTTP) invece di
+        un <img src="/report/barcode/..."> nel template — quella forma
+        richiede che wkhtmltopdf raggiunga se stesso via web.base.url, che su
+        questa istanza punta al dominio pubblico e non è raggiungibile dal
+        processo di stampa locale (trovato dal vivo: "ProtocolUnknownError",
+        barcode assente dal PDF). Generare l'immagine qui elimina la
+        richiesta di rete del tutto, corretto a prescindere da come
+        web.base.url è configurato in qualunque ambiente.
+        """
+        self.ensure_one()
+        png = self.env['ir.actions.report'].barcode(
+            'Code128', self.fnsku, width=600, height=150, humanreadable=0, quiet=1,
+        )
+        return 'data:image/png;base64,%s' % base64.b64encode(png).decode()

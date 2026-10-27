@@ -11,7 +11,16 @@
         <field name="format">custom</field>
         <field name="page_height">25</field>
         <field name="page_width">50</field>
-        <field name="orientation">Landscape</field>
+        <!-- 'Portrait', non 'Landscape': page_width/page_height sopra già
+             descrivono la forma larga e bassa voluta (50x25mm). wkhtmltopdf
+             applica l'opzione di orientamento IN PIÙ rispetto alle dimensioni
+             pagina già date, ruotandole invece di usarle così come sono —
+             con 'Landscape' qui il risultato reale era un'etichetta alta e
+             stretta 25x50mm (verificato dal vivo via pdfinfo sul PDF
+             generato: "25 x 50mm", non "50 x 25mm"), con tutto il contenuto
+             tagliato per lo spazio insufficiente. 'Portrait' lascia
+             page_width/page_height come sono, nessuna rotazione aggiuntiva. -->
+        <field name="orientation">Portrait</field>
         <field name="margin_top">1</field>
         <field name="margin_bottom">1</field>
         <field name="margin_left">1</field>
@@ -21,24 +30,61 @@
         <field name="dpi">203</field>
     </record>
 
-    <template id="report_amazon_fba_label_document">
-        <t t-call="web.html_container">
-            <t t-foreach="docs" t-as="o">
-                <div class="page" style="width:50mm;height:25mm;padding:1mm;font-family:Arial,sans-serif;overflow:hidden;">
-                    <div style="text-align:center;">
-                        <img t-att-src="'/report/barcode/Code128/%s' % o.fnsku"
-                             style="max-width:48mm;max-height:12mm;"/>
-                    </div>
-                    <div style="text-align:center;font-size:9px;font-weight:bold;letter-spacing:1px;">
-                        <span t-esc="o.fnsku"/>
-                    </div>
-                    <div style="text-align:center;font-size:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                        <span t-esc="o.product_id.default_code or o.product_id.display_name"/>
-                        <t t-if="o.product_id.default_code"> | <span t-esc="o.product_id.name"/></t>
-                    </div>
-                </div>
-            </t>
-        </t>
+    <template id="report_amazon_fba_label_document">&lt;!DOCTYPE html&gt;
+        <!-- Documento HTML scritto a mano, NON tramite t-call="web.html_container":
+             quel layout include sempre (t-call-assets="web.report_assets_common")
+             un foglio di stile e uno script esterni via URL relativa — wkhtmltopdf
+             deve farsi una richiesta HTTP verso se stesso per risolverla (via
+             web.base.url/report.url). Trovato dal vivo: quando quella richiesta
+             fallisce (qui, perché web.base.url punta al dominio pubblico
+             gest.arundoitalia.com, irraggiungibile dal processo wkhtmltopdf
+             locale), il resto del testo della pagina viene corrotto in modo
+             riproducibile ("Sbirulino®" → "SbirulinoÂ®", UTF-8 reinterpretato
+             come Latin-1) — bug di questa build patchata di wkhtmltopdf quando
+             un fetch di rete fallisce a metà rendering, non dei nostri dati (il
+             valore in DB è corretto, verificato via query diretta). L'etichetta
+             non usa comunque nessuna classe Bootstrap né JavaScript: l'unica
+             cosa che serve da quel layout è il tag <main> richiesto da
+             ir.actions.report._prepare_html (root.xpath('//main')) per trovare
+             il contenuto — lo forniamo qui direttamente, senza alcuna richiesta
+             di rete, corretto a prescindere da come web.base.url/report.url
+             sono configurati in qualunque ambiente. -->
+        <html>
+            <head>
+                <meta charset="utf-8"/>
+            </head>
+            <body>
+                <main>
+                    <t t-foreach="docs" t-as="o">
+                        <!-- page-break-after solo se non è l'ultima: senza
+                             questa condizione, più 'doc' (più copie richieste)
+                             o producevano tutte sulla stessa pagina (nessun
+                             page-break-after: verificato dal vivo via pdfinfo,
+                             3 etichette → "Pages: 1") o, mettendolo sempre,
+                             un'ultima pagina vuota di troppo in coda (verificato:
+                             3 etichette → "Pages: 4") — uno spreco di
+                             un'etichetta fisica a ogni stampa su rotolo. -->
+                        <div t-attf-style="width:50mm;height:25mm;padding:1mm;font-family:Arial,sans-serif;overflow:hidden;page-break-inside:avoid;#{'page-break-after:always;' if not o_last else ''}">
+                            <div style="text-align:center;">
+                                <!-- Data URI generata in Python
+                                     (o._get_barcode_data_uri, vedi
+                                     amazon_fba_label_log.py), nessuna richiesta
+                                     di rete per il barcode stesso. -->
+                                <img t-att-src="o._get_barcode_data_uri()"
+                                     style="max-width:48mm;max-height:12mm;"/>
+                            </div>
+                            <div style="text-align:center;font-size:11px;font-weight:bold;letter-spacing:0.5px;">
+                                <span t-esc="o.fnsku"/>
+                            </div>
+                            <div style="text-align:center;font-size:8px;line-height:1.15;overflow:hidden;word-break:break-word;">
+                                <span t-esc="o.product_id.default_code or o.product_id.display_name"/>
+                                <t t-if="o.product_id.default_code"> | <span t-esc="o.product_id.name"/></t>
+                            </div>
+                        </div>
+                    </t>
+                </main>
+            </body>
+        </html>
     </template>
 
     <record id="action_report_amazon_fba_label" model="ir.actions.report">
