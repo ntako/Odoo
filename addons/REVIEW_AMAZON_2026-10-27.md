@@ -1,5 +1,51 @@
 # Analisi del connettore Amazon per Odoo 19 — 27 ottobre 2026
 
+## Ricontrollo dopo il commit c7995a0 — esito
+
+**I quattro casi specifici F1–F4 della verifica precedente risultano
+corretti nel codice e nelle riproduzioni isolate ripetute.** Nessun nuovo
+blocco individuato nel perimetro di questi fix, per la configurazione
+concordata con un unico pool FBA europeo. Questo esito aggiorna le sezioni
+storiche sotto; non chiude gli altri limiti della revisione generale.
+
+- **F1:** confronto con lo SKU precedente della listing corrente. Verificati
+  entrambi i casi: FR cambia B→A uguale al primario → FNSKU invalidato;
+  FR resta B diverso dal primario → FNSKU preservato. Il ramo varianti
+  applica lo stesso confronto separato da quello dei campi condivisi.
+- **F2:** sul cambio SKU di una famiglia con un solo figlio vengono
+  invalidati sia codice variante sia fallback template. Ripetuto il ramo
+  reale di aggiornamento variante e il resolver: codice stampabile vuoto.
+- **F3:** snapshot dedicati separati dai dati di visualizzazione e uno
+  snapshot condiviso per variante sul pool. Riprodotti aumento 10→15 su
+  IT+FR (consumo totale 5, non 10) e upsert qty=0 fra due sync a inventario
+  invariato (nessun nuovo consumo). I nuovi campi non sono scritti dagli
+  altri flussi di import/riconciliazione.
+- **F4:** il reinvio aggiorna sent_date anche per un lavoro già sent.
+  Ripetuti recupero dopo timeout e poll immediatamente successivo: un solo
+  invio, poi nessun lavoro restituito. Non è un test di concorrenza HTTP o
+  di crash/ack sulla stampante reale.
+
+I nuovi test Odoo coprono i casi principali. Miglioramento consigliato,
+non bloccante: nel test di contaminazione dello snapshot aggiungere anche
+qty report=0 (attualmente usa 999, che col vecchio codice avrebbe prodotto
+un delta negativo senza consumo). Il caso con 0 è stato comunque verificato
+qui con i metodi reali e dipendenze simulate.
+
+**Verifiche locali:** 52 Python validi via AST, 29 XML ben formati, file
+manifest presenti, `git diff --check` superato; 94 metodi di test presenti,
+non eseguiti qui perché Odoo non importabile. Script temporaneo:
+`/tmp/recheck_amazon_c7995a0.py`. Nessuna API Amazon, modifica al DB o al
+codice applicativo durante questo controllo.
+
+**Aggiornamento:** occorre `-u ke_amazon_sync` per creare i nuovi campi
+snapshot, oltre al caricamento del nuovo codice. Non è presente un
+backfill degli snapshot precedenti: i nuovi campi partono da zero e la
+prima sync FBA li inizializza. Se il transito contiene merce, il primo
+giro può trattare lo stock Amazon già esistente come aumento: prima di
+usarlo operativamente serve un'inizializzazione controllata. Non viene
+assunto che la giacenza attuale del transito sia zero. La futura attivazione
+esplicita del consumo inbound e la stampa fisica restano da collaudare.
+
 ## Verifica successiva dei fix — HEAD dda1b03
 
 Esaminati i sette commit da `f6f77af` a `dda1b03`: stampa autonoma,
