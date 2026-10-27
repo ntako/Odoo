@@ -665,7 +665,7 @@ class SyncEngine:
         primary_id = self.env['ir.config_parameter'].sudo().get_param('ke_amazon_sync.marketplace_id')
         return not primary_id or self.client.marketplace_id == primary_id
 
-    def _upsert_listing(self, variant, data):
+    def _upsert_listing(self, variant, data, invalidate_fnsku=False):
         """
         Crea o aggiorna la riga ke.amazon.listing per (variant, marketplace
         corrente della sync) — una riga per VARIANTE, non per template (vedi
@@ -674,6 +674,21 @@ class SyncEngine:
         marketplace corrente non è censito in ke.amazon.marketplace (non
         dovrebbe succedere durante un import in coda, ma non deve bloccare
         l'import se capita).
+
+        'fnsku' NON viene mai scritto da 'data' qui: tutti i chiamanti
+        (Full Import via _parse_listing_report, riconciliazione via lo
+        stesso parser) passano dizionari che non contengono mai quella
+        chiave — scriverla comunque (come faceva questa funzione fino al
+        2026-10-27) significava azzerare a ogni singolo Full Import/
+        riconciliazione l'FNSKU già confermato da un Import FNSKU
+        precedente, anche senza alcun cambio di SKU. L'FNSKU reale è di
+        competenza esclusiva di process_fnsku_report_rows (scrive
+        listing.fnsku direttamente) — qui si invalida soltanto, e solo su
+        richiesta esplicita del chiamante che sa che lo SKU è appena
+        cambiato (invalidate_fnsku=True): l'FNSKU è legato alla coppia
+        (SKU, venditore), un nuovo SKU rende quello vecchio potenzialmente
+        sbagliato finché non arriva un nuovo Import FNSKU. Vedi TASK.md
+        "FNSKU" per il bug trovato in revisione.
         """
         marketplace = self._current_marketplace()
         if not marketplace:
@@ -682,7 +697,6 @@ class SyncEngine:
         vals = {
             'sku': data.get('sku'),
             'asin': data.get('asin'),
-            'fnsku': data.get('fnsku'),
             'product_type': data.get('product_type', ''),
             'status': 'active' if 'BUYABLE' in (data.get('status') or '') else 'inactive',
             'fulfillment': data.get('fulfillment'),
@@ -691,6 +705,8 @@ class SyncEngine:
             'category': data.get('category', ''),
             'browse_node_id': data.get('browse_node_id', ''),
         }
+        if invalidate_fnsku:
+            vals['fnsku'] = False
         listing = Listing.search([
             ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
         ], limit=1)
@@ -1572,6 +1588,12 @@ class SyncEngine:
 
     def _update_product(self, product, data):
         new_sku = data['sku']
+        # Confrontato con lo SKU legacy (primario) a prescindere dal
+        # marketplace corrente: serve anche per invalidare l'FNSKU della
+        # listing di QUESTO marketplace sotto, che non deve dipendere da
+        # _is_primary_marketplace() come il resto dei campi legacy — vedi
+        # la chiamata a _upsert_listing in fondo alla funzione.
+        sku_changed = new_sku != (product.x_amazon_sku or '')
         # Attributi fisici del prodotto: sempre aggiornati, indipendentemente
         # dal marketplace (non sono dati di listing, sono lo stesso prodotto).
         vals = {}
@@ -1606,6 +1628,15 @@ class SyncEngine:
             # (non sovrascrivere codici impostati manualmente dall'utente)
             old_sku = product.x_amazon_sku or ''
             old_default_code = product.default_code or ''
+            if sku_changed:
+                # L'FNSKU è legato alla coppia (SKU, venditore): quando lo SKU
+                # cambia, Amazon ne genera uno nuovo — quello vecchio non è
+                # più valido. Prima questo ramo (prodotto semplice) non lo
+                # invalidava mai, a differenza di _do_reconcile che lo fa già
+                # — trovato in revisione, vedi TASK.md "FNSKU". Azzerarlo
+                # evita di stampare un'etichetta sbagliata finché non arriva
+                # il prossimo Import FNSKU (già incatenato al Full Import).
+                vals['x_amazon_fnsku'] = False
             if new_sku != old_sku and (not old_sku or product.default_code == old_sku):
                 vals['default_code'] = new_sku
                 # Indicazione informativa (non usata per nessun match): tiene
@@ -1643,7 +1674,7 @@ class SyncEngine:
                 except Exception as exc:
                     _log.warning('Impossibile assegnare barcode %s a %s: %s',
                                  data['ean'], data['sku'], exc)
-        self._upsert_listing(product.product_variant_id, data)
+        self._upsert_listing(product.product_variant_id, data, invalidate_fnsku=sku_changed)
 
     # -----------------------------------------------------------------------
     # Gestione prodotti con varianti (famiglia Amazon)
@@ -1801,10 +1832,19 @@ class SyncEngine:
                 msg = f'SALTATO (sostituito da {existing_variant.x_amazon_sku}): {sku}'
                 return 'skipped', msg
             if update_existing:
-                existing_variant.write({
-                    'x_amazon_sku': sku,
-                    'default_code': sku,
-                })
+                # L'FNSKU è legato alla coppia (SKU, venditore): quando lo
+                # SKU della variante cambia, quello vecchio non è più
+                # valido. Prima questo ramo (variante già esistente) non lo
+                # invalidava mai, a differenza di _do_reconcile che lo fa
+                # già per lo stesso caso — trovato in revisione, vedi
+                # TASK.md "FNSKU". Nessun rischio di perdere l'FNSKU di una
+                # sorella: x_amazon_fnsku qui è per-variante, non condiviso
+                # come sul template dei prodotti semplici.
+                sku_changed = (existing_variant.x_amazon_sku or '') != sku
+                variant_vals = {'x_amazon_sku': sku, 'default_code': sku}
+                if sku_changed:
+                    variant_vals['x_amazon_fnsku'] = False
+                existing_variant.write(variant_vals)
                 # Doppione già creato da un import precedente (variante senza
                 # EAN perché occupato da un prodotto manuale): unione ora.
                 # Se la variante ha già un barcode, blocca l'unione SOLO se è
@@ -1848,7 +1888,7 @@ class SyncEngine:
                         existing_variant.write({'image_variant_1920': img})
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
-                self._upsert_listing(existing_variant, product)
+                self._upsert_listing(existing_variant, product, invalidate_fnsku=sku_changed)
                 msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}{merged_note}'
                 return 'updated', msg
             else:
@@ -4120,7 +4160,12 @@ class SyncEngine:
                             # Solo indicazione informativa, non usata per match.
                             'x_amazon_sku_previous': sku,
                         })
-                    self._upsert_listing(product.product_variant_id, plus_data)
+                    # invalidate_fnsku=True anche qui: prima questa chiamata
+                    # riscriveva comunque fnsku=None perché _upsert_listing
+                    # lo leggeva (sempre assente) da 'data' — ora che non lo
+                    # fa più, va invalidato esplicitamente per coerenza con
+                    # x_amazon_fnsku sopra, vedi TASK.md "FNSKU".
+                    self._upsert_listing(product.product_variant_id, plus_data, invalidate_fnsku=True)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -4158,7 +4203,7 @@ class SyncEngine:
                                 'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
                                 'x_amazon_sku_previous': sku,  # solo indicazione informativa
                             })
-                        self._upsert_listing(product.product_variant_id, amazon_data_by_asin)
+                        self._upsert_listing(product.product_variant_id, amazon_data_by_asin, invalidate_fnsku=True)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1
@@ -4211,7 +4256,7 @@ class SyncEngine:
                         if len(tmpl.product_variant_ids) <= 1:
                             tmpl_vals['x_amazon_fnsku'] = False
                         tmpl.write(tmpl_vals)
-                    self._upsert_listing(variant, plus_data)
+                    self._upsert_listing(variant, plus_data, invalidate_fnsku=True)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -4249,7 +4294,7 @@ class SyncEngine:
                             if len(tmpl.product_variant_ids) <= 1:
                                 tmpl_vals_asin['x_amazon_fnsku'] = False
                             tmpl.write(tmpl_vals_asin)
-                        self._upsert_listing(variant, amazon_data_by_asin)
+                        self._upsert_listing(variant, amazon_data_by_asin, invalidate_fnsku=True)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1
