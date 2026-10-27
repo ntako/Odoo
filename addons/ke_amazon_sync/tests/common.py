@@ -51,7 +51,8 @@ class FakeSpApiClient:
     # finto in ogni test solo per non far esplodere _upsert_listing.
     marketplace_id = None
 
-    def __init__(self, parent_asin_by_asin=None, ean_by_asin=None, marketplace_id=None):
+    def __init__(self, parent_asin_by_asin=None, ean_by_asin=None, marketplace_id=None,
+                 image_url_by_asin=None):
         # {asin_figlio: parent_asin} — un ASIN non presente qui risulta
         # "nessuna relazione di variante" (prodotto standalone agli occhi
         # del Catalog API), stesso comportamento di un ASIN reale senza
@@ -61,6 +62,10 @@ class FakeSpApiClient:
         # l'unica fonte dell'EAN nel Full Import (il report listing ha solo
         # l'ASIN come product-id).
         self._ean_by_asin = ean_by_asin or {}
+        # {asin: url} — immagine MAIN restituita in 'images', stessa forma
+        # usata da _merge_catalog (sync_engine.py). Un ASIN non presente qui
+        # risulta senza immagine, come un ASIN reale senza quel blocco.
+        self._image_url_by_asin = image_url_by_asin or {}
         # Override di istanza del default di classe (None): serve ai test
         # che hanno bisogno di un _current_marketplace() reale (es. un
         # marketplace "dedicato", non pooled) — passare qui lo stesso valore
@@ -87,7 +92,18 @@ class FakeSpApiClient:
                 out[asin]['identifiers'] = [{'identifiers': [
                     {'identifierType': 'EAN', 'identifier': ean},
                 ]}]
+            image_url = self._image_url_by_asin.get(asin)
+            if image_url:
+                out[asin]['images'] = [{'images': [
+                    {'variant': 'MAIN', 'link': image_url},
+                ]}]
         return out
+
+    def get_catalog_item(self, asin):
+        """Versione singola di get_catalog_items_batch — usata da
+        download_missing_images (sync_engine.py), che chiama l'ASIN uno per
+        volta invece che a batch."""
+        return self.get_catalog_items_batch([asin]).get(asin, {})
 
 
 def make_dedicated_marketplace(env, name='ZZT Dedicato', code='ZZTD',

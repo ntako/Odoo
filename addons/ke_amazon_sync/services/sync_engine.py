@@ -1839,6 +1839,13 @@ class SyncEngine:
                         except Exception as exc:
                             _log.warning('Impossibile assegnare barcode %s a variante %s: %s',
                                          product['ean'], sku, exc)
+                # Backfill per varianti create prima del fix (2026-10-27) che
+                # ha introdotto image_variant_1920 in _add_variant_to_template
+                # — solo se manca ancora, non riscarica a ogni giro.
+                if not existing_variant.image_variant_1920 and product.get('image_url'):
+                    img = _fetch_image_b64(product['image_url'])
+                    if img:
+                        existing_variant.write({'image_variant_1920': img})
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
                 self._upsert_listing(existing_variant, product)
@@ -2148,6 +2155,17 @@ class SyncEngine:
                 except Exception as exc:
                     _log.warning('Impossibile assegnare barcode %s a nuova variante %s: %s',
                                  product['ean'], product['sku'], exc)
+        # image_variant_1920 (immagine PROPRIA della variante, non quella
+        # condivisa del template — vedi _create_configurable_template, che
+        # seeda image_1920 del template solo dal primo figlio processato):
+        # senza questo, ogni variante successiva alla prima di una famiglia
+        # restava senza foto propria, mostrando sempre e solo la foto del
+        # primo figlio anche per colori/taglie visibilmente diversi.
+        # Trovato dal vivo il 2026-10-27, segnalato dall'utente.
+        if product.get('image_url'):
+            img = _fetch_image_b64(product['image_url'])
+            if img:
+                variant.write({'image_variant_1920': img})
         return variant
 
     @staticmethod
@@ -2166,13 +2184,36 @@ class SyncEngine:
     # -----------------------------------------------------------------------
 
     def download_missing_images(self, log_rec):
-        """Downloads images from Amazon catalog for products without image_1920."""
-        domain = [
+        """
+        Scarica dal Catalog API l'immagine mancante per: prodotti semplici
+        (product.template, image_1920) e varianti di famiglia (product.product,
+        image_variant_1920 — la foto PROPRIA della variante, diversa da quella
+        condivisa del template). Prima copriva solo i semplici: una famiglia
+        non ha mai x_amazon_asin sul template (solo x_amazon_parent_asin, vedi
+        _create_configurable_template), quindi i suoi figli restavano fuori
+        da questo strumento anche come backfill manuale — trovato dal vivo il
+        2026-10-27, segnalato dall'utente (varianti senza immagine dopo
+        l'import, la causa in _add_variant_to_template è stata corretta a
+        parte, ma non recupera le varianti già create prima del fix).
+        """
+        simple_products = self.env['product.template'].search([
             ('x_amazon_asin', '!=', False),
             ('image_1920', '=', False),
-        ]
-        products = self.env['product.template'].search(domain)
-        total = len(products)
+        ])
+        family_variants = self.env['product.product'].search([
+            ('x_amazon_asin', '!=', False),
+            ('image_variant_1920', '=', False),
+            # product_variant_count non è stored (niente domain diretto) —
+            # x_amazon_parent_asin sul template sì, ed è vero per ogni
+            # famiglia (vedi _create_configurable_template), mai per un
+            # prodotto semplice: stesso filtro, campo diverso.
+            ('product_tmpl_id.x_amazon_parent_asin', '!=', False),
+        ])
+        # (record, campo immagine da scrivere) — stesso ciclo per entrambi,
+        # solo il campo di destinazione cambia a seconda del tipo di record.
+        targets = [(p, 'image_1920') for p in simple_products] \
+            + [(v, 'image_variant_1920') for v in family_variants]
+        total = len(targets)
         ok = errors = skipped = 0
         lines = []
         # Progresso scritto su log_rec periodicamente (non solo a fine ciclo):
@@ -2184,7 +2225,7 @@ class SyncEngine:
         log_rec.write({'products_total': total})
         self.env.cr.commit()
 
-        for idx, product in enumerate(products, start=1):
+        for idx, (product, image_field) in enumerate(targets, start=1):
             asin = product.x_amazon_asin
             try:
                 catalog = self.client.get_catalog_item(asin)
@@ -2196,7 +2237,7 @@ class SyncEngine:
                 url = main_images[0] if main_images else ''
                 img = _fetch_image_b64(url) if url else None
                 if img:
-                    product.write({'image_1920': img})
+                    product.write({image_field: img})
                     ok += 1
                     msg = f'OK {product.default_code or asin}: immagine scaricata'
                 else:
