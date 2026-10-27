@@ -392,6 +392,51 @@ def _resolve_product_type(env, requested):
     return next(iter(valid), 'consu')
 
 
+# Larghezze standard GTIN usate per confrontare EAN/UPC a prescindere dal
+# padding di zeri iniziali — vedi _normalize_ean.
+_GTIN_WIDTHS = (8, 12, 13, 14)
+
+
+def _normalize_ean(code):
+    """
+    Forma canonica di un EAN/UPC per il confronto (chiavi delle mappe di
+    matching): zeri iniziali tolti. Un UPC-A a 12 cifre e un EAN-13 con uno
+    zero di padding davanti sono lo stesso codice, solo rappresentati con
+    larghezze diverse — senza normalizzare, un confronto di stringa esatta
+    non li riconosce mai uguali. Trovato dal vivo il 2026-10-23: un prodotto
+    manuale con barcode '028632326992' (12 cifre) non si univa mai alla sua
+    variante Amazon reale con barcode '0028632326992' (13 cifre, stesso
+    codice) — 577 prodotti con l'esatto stesso pattern nel catalogo.
+    Un barcode non puramente numerico (codice interno, non EAN reale) passa
+    invariato: non è un GTIN, niente zeri di padding da normalizzare.
+    """
+    code = (code or '').strip()
+    if not code or not code.isdigit():
+        return code
+    return code.lstrip('0') or '0'
+
+
+def _ean_search_variants(code):
+    """
+    Rappresentazioni possibili di un EAN/UPC già memorizzate su un prodotto
+    Odoo, per una ricerca live sul DB (_barcode_free) dove non si può usare
+    la forma canonica di _normalize_ean su un campo già scritto in formati
+    diversi da prodotto a prodotto. Codice as-is + forma nuda (zeri tolti) +
+    ripadded alle larghezze GTIN standard.
+    """
+    code = (code or '').strip()
+    if not code:
+        return set()
+    if not code.isdigit():
+        return {code}
+    bare = _normalize_ean(code)
+    variants = {code, bare}
+    for width in _GTIN_WIDTHS:
+        if len(bare) <= width:
+            variants.add(bare.rjust(width, '0'))
+    return variants
+
+
 class _MatchMaps:
     """
     Raggruppa tutte le mappe di matching SKU/ASIN/EAN usate da full_import/
@@ -477,7 +522,7 @@ class _MatchMaps:
         match = (
             self.by_sku.get(sku)
             or self.by_asin.get(asin)
-            or (ean and self.by_barcode.get(ean))
+            or (ean and self.by_barcode.get(_normalize_ean(ean)))
             or self.by_default_code.get(sku)
         )
         if match and match.x_amazon_parent_asin:
@@ -564,7 +609,7 @@ class _MatchMaps:
         if asin:
             self.by_asin[asin] = tmpl
         if ean:
-            self.by_barcode[ean] = tmpl
+            self.by_barcode[_normalize_ean(ean)] = tmpl
         self.by_default_code[sku] = tmpl
 
     def register_family(self, parent_asin, tmpl):
@@ -1212,10 +1257,17 @@ class SyncEngine:
         return next_token
 
     def _barcode_free(self, ean, exclude_product_ids=()):
-        """Returns True if ean is not already assigned to another product.product."""
+        """
+        Returns True if ean is not already assigned to another product.product.
+        Confronta contro tutte le rappresentazioni equivalenti dell'EAN (vedi
+        _ean_search_variants) — senza questo, un barcode già presente su un
+        altro prodotto solo con un diverso padding di zeri (es. UPC-A 12 cifre
+        vs EAN-13) risulterebbe "libero" per errore e verrebbe assegnato due
+        volte allo stesso codice.
+        """
         if not ean:
             return False
-        domain = [('barcode', '=', ean)]
+        domain = [('barcode', 'in', list(_ean_search_variants(ean)))]
         if exclude_product_ids:
             domain.append(('id', 'not in', list(exclude_product_ids)))
         return not self.env['product.product'].sudo().search(domain, limit=1)
@@ -1236,6 +1288,14 @@ class SyncEngine:
         sul prodotto sbagliato (stesso principio già applicato al conflitto
         rilevato durante l'import, vedi _process_variant_listing).
 
+        Filtra su 'active' (su entrambi i lati, nella CTE e nel join finale):
+        un template con lo stesso default_code ma già archiviato (tipicamente
+        l'originale di una fusione EAN/SKU completata nello stesso Full
+        Import — vedi _merge_manual_into_variant, 'originale archiviato') non
+        richiede nessuna verifica, è rumore puro. Trovato dal vivo il
+        2026-10-27: 12 dei 14 gruppi segnalati su un Full Import reale erano
+        di questo tipo, solo 2 genuini (entrambi i lati ancora attivi).
+
         Chiamato una volta a fine Full Import (tutti i marketplace
         esauriti), sull'intero catalogo — non solo sui prodotti toccati da
         questo giro, così resta uno strumento di verifica anche per
@@ -1246,7 +1306,8 @@ class SyncEngine:
             WITH dups AS (
                 SELECT t.default_code
                 FROM product_template t
-                WHERE t.default_code IS NOT NULL AND t.default_code != ''
+                WHERE t.active
+                  AND t.default_code IS NOT NULL AND t.default_code != ''
                   AND (
                         (t.x_amazon_asin IS NOT NULL AND t.x_amazon_asin != '')
                      OR (t.x_amazon_parent_asin IS NOT NULL AND t.x_amazon_parent_asin != '')
@@ -1262,6 +1323,7 @@ class SyncEngine:
             SELECT t.id, t.default_code, t.x_amazon_asin, t.x_amazon_parent_asin
             FROM product_template t
             JOIN dups d ON d.default_code = t.default_code
+            WHERE t.active
             ORDER BY t.default_code, t.id
         """)
         rows = self.env.cr.dictfetchall()
@@ -1301,21 +1363,26 @@ class SyncEngine:
         return len(by_code)
 
     def _build_barcode_map(self):
-        """Mappa barcode -> product.template. Logga (senza bloccare) i barcode duplicati:
-        in caso di duplicato l'ultimo prodotto trovato sovrascrive il precedente nella mappa,
-        con effetto sul matching a valle (import via EAN)."""
+        """Mappa barcode (forma canonica, vedi _normalize_ean) -> product.template.
+        Logga (senza bloccare) i barcode duplicati: in caso di duplicato l'ultimo
+        prodotto trovato sovrascrive il precedente nella mappa, con effetto sul
+        matching a valle (import via EAN). Chiave normalizzata: un UPC-A a 12
+        cifre e un EAN-13 con uno zero di padding davanti sono lo stesso codice,
+        senza normalizzare non si riconoscerebbero mai uguali (577 prodotti col
+        pattern esatto trovati dal vivo il 2026-10-23)."""
         by_barcode = {}
         for product in self.env['product.template'].search([('barcode', '!=', False)]):
             if not product.barcode:
                 continue
-            previous = by_barcode.get(product.barcode)
+            key = _normalize_ean(product.barcode)
+            previous = by_barcode.get(key)
             if previous is not None:
                 _log.warning(
-                    'Barcode duplicato %s: %s (id=%d) sovrascrive %s (id=%d) nella mappa di matching import',
-                    product.barcode, product.display_name, product.id,
+                    'Barcode duplicato (equivalente a %s) %s: %s (id=%d) sovrascrive %s (id=%d) nella mappa di matching import',
+                    key, product.barcode, product.display_name, product.id,
                     previous.display_name, previous.id,
                 )
-            by_barcode[product.barcode] = product
+            by_barcode[key] = product
         return by_barcode
 
     def _net_price(self, gross):
@@ -1740,8 +1807,24 @@ class SyncEngine:
                 })
                 # Doppione già creato da un import precedente (variante senza
                 # EAN perché occupato da un prodotto manuale): unione ora.
+                # Se la variante ha già un barcode, blocca l'unione SOLO se è
+                # un EAN davvero diverso da quello del manuale — non se è lo
+                # STESSO EAN scritto in un formato diverso (es. un giro
+                # precedente a questo fix aveva assegnato l'EAN com'era,
+                # senza normalizzare: la variante aveva già 13 cifre con zero
+                # di padding, il manuale 12 — stesso codice, confronto
+                # bloccava l'unione per sempre anche dopo aver corretto
+                # _normalize_ean, perché "la variante ha già un barcode" era
+                # vero a prescindere da cosa rappresentasse davvero. Trovato
+                # dal vivo il 2026-10-23 rilanciando il Full Import dopo il
+                # fix: il prodotto rimaneva ancora doppione).
+                manual_ean = manual.product_variant_id.barcode if manual else ''
+                barcode_conflicts = (
+                    existing_variant.barcode and manual_ean
+                    and _normalize_ean(existing_variant.barcode) != _normalize_ean(manual_ean)
+                )
                 merged_note = ''
-                if (not existing_variant.barcode or merge_by == 'SKU') and manual and manual.id != tmpl.id:
+                if (not barcode_conflicts or merge_by == 'SKU') and manual and manual.id != tmpl.id:
                     if manual_reason:
                         merged_note = (f' — stesso {merge_by} del prodotto id={manual.id} che '
                                        f'{manual_reason}, serve fusione manuale')
@@ -1786,6 +1869,9 @@ class SyncEngine:
                 existing_val = product.get('spec_attrs', {}).get(existing_label)
                 if existing_val:
                     # Composito: agganciamo il nuovo valore alla dimensione esistente
+                    # (es. famiglia con "Variante"="Taglia – Colore" e questa riga
+                    # ha solo "Taglia" risolta: la completiamo con il colore che
+                    # già conosciamo per il resto della famiglia).
                     attr_value = f'{existing_val} – {attr_value}'
                     attr_label = existing_label
                     _log.info(
@@ -1793,13 +1879,30 @@ class SyncEngine:
                         'uso "%s=%s"', sku, asin, attr_label, attr_value
                     )
                 else:
-                    msg = (
-                        f'SALTATO {sku} / {asin}: dimensione variante "{attr_label}={attr_value}" '
-                        f'incompatibile con {sorted(existing_labels)} già usata dal template '
-                        f'"{tmpl.name[:40]}" e nessun valore per "{existing_label}" in spec_attrs'
+                    # Nessun valore per la dimensione esistente nei dati di
+                    # QUESTA riga (es. "Variante" è il composito Taglia+Colore
+                    # di famiglia, qui Amazon ha risolto solo "Taglia"): prima
+                    # si saltava del tutto, lasciando il prodotto scollegato
+                    # in attesa che un'altra riga (magari da un altro
+                    # marketplace, elaborato in una chiamata separata con
+                    # mappe di matching ricostruite da zero) portasse dati
+                    # migliori — non garantito, e nel frattempo l'ASIN restava
+                    # non scritto da nessuna parte (trovato dal vivo il
+                    # 2026-10-26 indagando l'inventario FBA: SASA-D2800261+ /
+                    # B07FPKVNPK mai collegato nonostante giacenza reale).
+                    # Il valore che QUESTA riga porta (es. "0,130 mm X 50 mt")
+                    # è già di per sé un valore distintivo valido — non serve
+                    # inventare nulla, basta rietichettarlo sulla dimensione
+                    # esistente della famiglia e lasciarlo com'è. Se per caso
+                    # collide con un valore già usato da un ASIN diverso, il
+                    # controllo _attr_value_taken subito sotto se ne accorge e
+                    # aggiunge lo SKU solo in quel caso, non sempre.
+                    attr_label = existing_label
+                    _log.info(
+                        'Variante %s / %s: variation_theme incoerente, nessun valore "%s" '
+                        'nei dati di questa riga — riuso "%s=%s" così com\'è',
+                        sku, asin, existing_label, attr_label, attr_value,
                     )
-                    _log.warning(msg)
-                    return 'skipped', msg
 
         # Valore attributo già usato da una variante con un ASIN diverso
         # (es. due misure della stessa famiglia con lo stesso "colore: Lemon
@@ -1865,7 +1968,7 @@ class SyncEngine:
         variante nella famiglia, spostarci la giacenza del manuale e
         archiviare il manuale (vedi _merge_manual_into_variant).
         """
-        manual = maps.by_barcode.get(ean) if ean else None
+        manual = maps.by_barcode.get(_normalize_ean(ean)) if ean else None
         if not manual or manual.x_amazon_parent_asin:
             return None, None
         return manual, self._merge_blocker(manual)
@@ -1931,7 +2034,7 @@ class SyncEngine:
             manual.write({'active': False})
         maps.forget(manual)
         if ean:
-            maps.by_barcode.pop(ean, None)
+            maps.by_barcode.pop(_normalize_ean(ean), None)
         return moved
 
     def _create_configurable_template(self, first_child, parent_asin, product_type_odoo):

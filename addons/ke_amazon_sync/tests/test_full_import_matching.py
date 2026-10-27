@@ -340,6 +340,34 @@ class TestFullImportMatching(TransactionCase):
         self.assertEqual(n, 0)
 
     # ------------------------------------------------------------------
+    # Trovato dal vivo il 2026-10-27 su un Full Import reale: 12 dei 14
+    # gruppi segnalati erano l'originale (già archiviato) di una fusione
+    # EAN/SKU completata nello stesso import, non un duplicato da verificare.
+    # ------------------------------------------------------------------
+
+    def test_detect_duplicate_skus_ignores_archived_merge_leftover(self):
+        sku = 'ZZT-DETECT-ARCHIVED'
+        t1 = self.env['product.template'].create({
+            'name': 'ZZT Archiviato', 'type': 'consu', 'is_storable': True,
+            'default_code': sku, 'x_amazon_asin': 'B0ZZARCHIVED1',
+        })
+        t2 = self.env['product.template'].create({
+            'name': 'ZZT Vivo', 'type': 'consu', 'is_storable': True,
+            'default_code': sku, 'x_amazon_parent_asin': 'B0ZZARCHIVEDPARENT',
+        })
+        t1.write({'active': False})
+        self.env.flush_all()
+
+        eng = self.SyncEngine(self.env, None)
+        log = self._make_log('test archiviato ignorato')
+        with no_commit(self.env):
+            n = eng.detect_duplicate_skus(log)
+
+        self.assertEqual(n, 0, 'un template archiviato non deve contare come duplicato da verificare')
+        self.assertTrue(t1.exists())
+        self.assertTrue(t2.exists())
+
+    # ------------------------------------------------------------------
     # Ottimizzazione Catalog API (2026-10-15, richiesta dall'utente): salta
     # la chiamata per ASIN già noti e completamente arricchiti — ma solo per
     # prodotti semplici, mai per famiglie/dati incompleti/ASIN nuovi.
@@ -610,6 +638,34 @@ class TestFullImportMatching(TransactionCase):
         self.assertFalse(manual.active, 'il manuale viene archiviato')
         self.assertFalse(manual_variant.barcode)
 
+    def test_manual_with_leading_zero_ean_mismatch_still_merges(self):
+        """
+        Bug reale trovato il 2026-10-23 (Full Import su DB resettato alla
+        baseline manuale, refactor ke.amazon.listing): manuale con barcode
+        UPC-A a 12 cifre '028632326992', Catalog API ritorna lo stesso EAN
+        come EAN-13 con zero di padding '0028632326992' — stesso codice, due
+        rappresentazioni. Senza normalizzare (_normalize_ean), il confronto
+        di stringa esatta non li riconosce uguali e il manuale non si unisce
+        mai alla variante Amazon reale (577 prodotti col pattern esatto nel
+        catalogo).
+        """
+        manual, location = self._make_manual('ZZT-SVS-EAN0', '028632326992', 5)
+        manual_variant = manual.product_variant_id
+        client = FakeSpApiClient(
+            {'B0ZZEAN0CHILD': 'B0ZZEAN0PARENT'}, {'B0ZZEAN0CHILD': '0028632326992'},
+        )
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test unione EAN zero padding')
+        self._run(eng, log, [make_report_row('ZZT-SAV-EAN0', asin='B0ZZEAN0CHILD')])
+
+        fam = self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZEAN0PARENT')])
+        self.assertEqual(len(fam), 1)
+        variant = fam.product_variant_ids.filtered(lambda v: v.x_amazon_asin == 'B0ZZEAN0CHILD')
+        self.assertEqual(len(variant), 1)
+        self.assertEqual(self._qty(variant, location), 5, 'la giacenza del manuale passa alla variante')
+        manual.invalidate_recordset()
+        self.assertFalse(manual.active, 'il manuale viene archiviato nonostante il mismatch di padding')
+
     def test_existing_duplicate_variant_merged_on_next_run(self):
         """Doppione già creato da un import precedente (variante senza EAN,
         occupato dal manuale): il giro successivo lo unisce."""
@@ -631,6 +687,40 @@ class TestFullImportMatching(TransactionCase):
         self.assertEqual(self._qty(variant, location), 4)
         manual.invalidate_recordset()
         self.assertFalse(manual.active)
+
+    def test_existing_variant_with_equivalent_padded_barcode_still_merges(self):
+        """
+        Bug reale trovato il 2026-10-23 rilanciando il Full Import DOPO il
+        fix di _normalize_ean: una variante già creata da un giro precedente
+        (quando il manuale non veniva ancora trovato per il mismatch di
+        padding) aveva già un barcode proprio — quello EAN-13 con zero di
+        padding ricevuto da Amazon. La guardia "non toccare una variante che
+        ha già un barcode" bloccava l'unione per sempre, anche dopo il fix,
+        perché non sapeva che era LO STESSO codice del manuale solo scritto
+        diverso. Deve unirsi comunque quando i due EAN normalizzati
+        coincidono.
+        """
+        fam = self.env['product.template'].create({
+            'name': 'ZZT famiglia barcode equivalente', 'type': 'consu', 'is_storable': True,
+            'x_amazon_parent_asin': 'B0ZZEANPADPARENT',
+        })
+        fam.product_variant_id.write({
+            'x_amazon_sku': 'ZZT-SAV-EANPAD', 'x_amazon_asin': 'B0ZZEANPADCHILD',
+            'default_code': 'ZZT-SAV-EANPAD', 'barcode': '0028632326992',
+        })
+        manual, location = self._make_manual('ZZT-SVS-EANPAD', '028632326992', 6)
+        client = FakeSpApiClient(
+            {'B0ZZEANPADCHILD': 'B0ZZEANPADPARENT'}, {'B0ZZEANPADCHILD': '0028632326992'},
+        )
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test unione con barcode equivalente già presente')
+        self._run(eng, log, [make_report_row('ZZT-SAV-EANPAD', asin='B0ZZEANPADCHILD')])
+
+        variant = fam.product_variant_id
+        self.assertEqual(variant.barcode, '0028632326992', 'il barcode della variante resta il suo')
+        self.assertEqual(self._qty(variant, location), 6, 'la giacenza del manuale si sposta comunque')
+        manual.invalidate_recordset()
+        self.assertFalse(manual.active, 'il manuale si archivia nonostante la variante avesse già un barcode')
 
     def test_manual_with_reserved_stock_not_merged(self):
         """Giacenza riservata (ordine aperto): niente unione automatica e
@@ -674,6 +764,78 @@ class TestFullImportMatching(TransactionCase):
         self.assertEqual(res, 'created', msg)
         self.assertEqual(sorted(fam.product_variant_ids.mapped('x_amazon_asin')), ['B0ZZCLASH01', 'B0ZZCLASH02'],
                          'ogni figlio Amazon deve avere la sua variante')
+
+    def test_incompatible_dimension_creates_reusing_value_instead_of_skipping(self):
+        """
+        Bug reale trovato il 2026-10-26 indagando l'inventario FBA
+        (SASA-D2800261+ / B07FPKVNPK mai collegato nonostante giacenza
+        reale): una riga con una dimensione variante diversa da quella già
+        usata dalla famiglia (es. "Taglia" invece di "Variante", composito
+        Taglia+Colore risolto su un fratello precedente) e senza un valore
+        per quella esistente nei suoi spec_attrs veniva SALTATA del tutto,
+        lasciando l'ASIN scollegato in attesa — mai garantita — di una riga
+        migliore da un altro marketplace/chunk (mappe di matching ricostruite
+        da zero ad ogni chiamata, nessuna memoria tra l'una e l'altra). Ora si
+        rietichetta sulla dimensione esistente della famiglia tenendo il
+        valore della riga così com'è (già di per sé distintivo) e si crea
+        comunque, subito — niente di inventato, a differenza di un fallback
+        con lo SKU.
+        """
+        from odoo.addons.ke_amazon_sync.services.sync_engine import _MatchMaps
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        parent = 'B0ZZDIMPARENT'
+
+        def process(sku, asin, variation_attr):
+            product = eng._parse_listing_report(make_report_row(sku, asin=asin))
+            product['parent_asin'] = parent
+            product['variation_attr'] = variation_attr
+            maps = _MatchMaps(self.env, eng._build_barcode_map())
+            return eng._process_variant_listing(product, parent, 'consu', maps, True)
+
+        with no_commit(self.env):
+            process('ZZT-DIM-1', 'B0ZZDIM01', ('Variante', 'Rosso'))
+            res, msg = process('ZZT-DIM-2', 'B0ZZDIM02', ('Taglia', '0,130 mm X 50 mt'))
+
+        self.assertEqual(res, 'created', msg)
+        fam = self.env['product.template'].search([('x_amazon_parent_asin', '=', parent)])
+        variant2 = fam.product_variant_ids.filtered(lambda v: v.x_amazon_asin == 'B0ZZDIM02')
+        self.assertEqual(len(variant2), 1, "l'ASIN deve essere collegato subito, non saltato")
+        self.assertEqual(variant2.x_amazon_sku, 'ZZT-DIM-2')
+        value = variant2.product_template_attribute_value_ids.mapped(
+            'product_attribute_value_id.name')
+        self.assertEqual(value, ['0,130 mm X 50 mt'],
+                         'il valore della riga resta pulito, nessun prefisso SKU')
+
+    def test_incompatible_dimension_value_collision_still_falls_back_to_sku(self):
+        """Caso raro: il valore riusato (senza prefisso) collide con uno già
+        esistente per un ASIN diverso — _attr_value_taken se ne accorge e
+        aggiunge lo SKU, stessa guardia già in uso per il caso simmetrico
+        (stesso valore attributo, ASIN diverso)."""
+        from odoo.addons.ke_amazon_sync.services.sync_engine import _MatchMaps
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        parent = 'B0ZZDIMCOLPARENT'
+
+        def process(sku, asin, variation_attr):
+            product = eng._parse_listing_report(make_report_row(sku, asin=asin))
+            product['parent_asin'] = parent
+            product['variation_attr'] = variation_attr
+            maps = _MatchMaps(self.env, eng._build_barcode_map())
+            return eng._process_variant_listing(product, parent, 'consu', maps, True)
+
+        with no_commit(self.env):
+            # Primo fratello: dimensione "Taglia" già uguale al valore che il
+            # secondo fratello riuserà da "Variante" più sotto.
+            process('ZZT-DIMCOL-1', 'B0ZZDIMCOL01', ('Taglia', '50 mt'))
+            res, msg = process('ZZT-DIMCOL-2', 'B0ZZDIMCOL02', ('Variante', '50 mt'))
+
+        self.assertEqual(res, 'created', msg)
+        fam = self.env['product.template'].search([('x_amazon_parent_asin', '=', parent)])
+        variant2 = fam.product_variant_ids.filtered(lambda v: v.x_amazon_asin == 'B0ZZDIMCOL02')
+        self.assertEqual(len(variant2), 1)
+        value = variant2.product_template_attribute_value_ids.mapped(
+            'product_attribute_value_id.name')
+        self.assertEqual(value, ['50 mt (ZZT-DIMCOL-2)'],
+                         'collisione di valore: _attr_value_taken aggiunge lo SKU per distinguerla')
 
     def test_simple_with_same_sku_merged_when_family_exists(self):
         """Semplice con lo stesso SKU della riga, famiglia già creata da un

@@ -1,6 +1,6 @@
 # ke_amazon_sync
 
-Addon Odoo 17.0 per la sincronizzazione bidirezionale tra il database prodotti e Amazon Seller Central (SP-API).
+Addon Odoo 19.0 per la sincronizzazione bidirezionale tra il database prodotti e Amazon Seller Central (SP-API).
 
 ## Funzionalità
 
