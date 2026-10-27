@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_print_job_list" model="ir.ui.view">
+        <field name="name">ke.amazon.print.job.list</field>
+        <field name="model">ke.amazon.print.job</field>
+        <field name="arch" type="xml">
+            <list string="Lavori di stampa ZPL" default_order="id desc" create="0" edit="0">
+                <field name="create_date" string="Creato"/>
+                <field name="station_id"/>
+                <field name="label_log_id"/>
+                <field name="state" widget="badge"
+                       decoration-success="state == 'done'"
+                       decoration-danger="state == 'error'"
+                       decoration-warning="state in ('queued', 'sent')"/>
+                <field name="sent_date"/>
+                <field name="done_date"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_print_job_search" model="ir.ui.view">
+        <field name="name">ke.amazon.print.job.search</field>
+        <field name="model">ke.amazon.print.job</field>
+        <field name="arch" type="xml">
+            <search string="Lavori di stampa ZPL">
+                <field name="station_id"/>
+                <field name="label_log_id"/>
+                <filter string="In coda" name="filter_queued" domain="[('state', '=', 'queued')]"/>
+                <filter string="In errore" name="filter_error" domain="[('state', '=', 'error')]"/>
+                <separator/>
+                <filter string="Postazione" name="groupby_station" context="{'group_by': 'station_id'}"/>
+                <filter string="Stato" name="groupby_state" context="{'group_by': 'state'}"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_amazon_print_job" model="ir.actions.act_window">
+        <field name="name">Lavori di stampa ZPL</field>
+        <field name="res_model">ke.amazon.print.job</field>
+        <field name="view_mode">list</field>
+        <field name="search_view_id" ref="view_amazon_print_job_search"/>
+    </record>
+</odoo>

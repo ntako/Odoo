@@ -69,6 +69,29 @@ class ResConfigSettings(models.TransientModel):
         help='Se attivo, durante l\'import completo aggiorna anche i prodotti già presenti in Odoo.',
     )
 
+    # --- Etichette FNSKU: stampa di rete (ZPL) al posto del PDF ---
+    # Letti da ke.amazon.print.station._get_configured_station(), usato dai
+    # due wizard di stampa (amazon_fba_prep_wizard, amazon_fba_standalone_
+    # label_wizard). Disattivo di default: comportamento invariato (PDF dal
+    # browser) finché qualcuno non attiva esplicitamente la stampa di rete
+    # E sceglie una postazione — vedi TASK.md "Agente di stampa Windows".
+    amazon_zpl_printing_enabled = fields.Boolean(
+        string='Usa stampa di rete (ZPL)',
+        config_parameter='ke_amazon_sync.zpl_printing_enabled',
+        default=False,
+        help="Se attivo, le etichette FNSKU (stampa autonoma e da spedizione FBA) vengono "
+             "accodate per l'agente di stampa Windows sulla postazione sotto, invece di "
+             "generare il PDF da stampare dal browser. Richiede l'agente collegato e "
+             "funzionante sulla postazione scelta — se non c'è, le etichette resteranno "
+             "in coda senza mai stamparsi.",
+    )
+    amazon_zpl_default_station_id = fields.Many2one(
+        'ke.amazon.print.station',
+        string='Postazione di stampa predefinita',
+        config_parameter='ke_amazon_sync.zpl_default_station_id',
+        help='Postazione a cui vengono accodate le etichette quando "Usa stampa di rete" è attivo.',
+    )
+
     # --- Controllo nuovi prodotti: cron + intervallo ---
     amazon_cron_check_active = fields.Boolean(
         string='Abilita controllo automatico',

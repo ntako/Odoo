@@ -148,6 +148,18 @@
                         </setting>
                     </block>
 
+                    <block title="Etichette FNSKU" name="amazon_labels">
+                        <setting string="Usa stampa di rete (ZPL)"
+                                 help="Se disattivo (default), le etichette si stampano in PDF dal browser come adesso. Se attivo, vengono accodate per l'agente di stampa Windows sulla postazione scelta qui sotto.">
+                            <field name="amazon_zpl_printing_enabled"/>
+                        </setting>
+                        <setting string="Postazione di stampa predefinita"
+                                 help="Obbligatoria se 'Usa stampa di rete' è attivo — vedi Magazzino → Amazon Sync → Postazioni agente di stampa per crearne una e generare la sua chiave API.">
+                            <field name="amazon_zpl_default_station_id"
+                                   invisible="not amazon_zpl_printing_enabled"/>
+                        </setting>
+                    </block>
+
                     <block title="Multi-marketplace (fase 1)" name="amazon_multimarketplace">
                         <setting string="Marketplace configurati"
                                  help="Elenco marketplace disponibili (IT/DE/FR/ES/UK/US). Nessuno attivo di default — usa 'Rileva marketplace attivi' qui sotto invece di attivarli a mano, se possibile.">

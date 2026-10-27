@@ -73,6 +73,19 @@ class AmazonFbaStandaloneLabelWizard(models.TransientModel):
             'fnsku': fnsku,
         } for _ in range(qty)])
 
+        # "Usa stampa di rete (ZPL)" (Impostazioni → Amazon): se attiva e con
+        # una postazione configurata, accoda invece di generare il PDF — vedi
+        # ke.amazon.print.station._get_configured_station(). Record vuoto
+        # (opzione disattivata, comportamento di sempre) non è un errore.
+        station = self.env['ke.amazon.print.station']._get_configured_station()
+        if station:
+            for log in logs:
+                self.env['ke.amazon.print.job']._enqueue_from_label_log(station, log)
+            self.last_scan_message = (
+                f'{qty} etichetta/e {product.display_name} in coda di stampa su "{station.name}".'
+            )
+            return True
+
         return self.env.ref('ke_amazon_sync.action_report_amazon_fba_label').report_action(
             logs, config=False,
         )

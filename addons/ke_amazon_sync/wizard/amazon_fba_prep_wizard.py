@@ -106,10 +106,20 @@ class AmazonFbaPrepWizard(models.TransientModel):
             'is_reprint': is_reprint,
         })
         self.force_reprint = False
+        status = "RISTAMPA" if is_reprint else "OK"
         self.last_scan_message = (
-            f'{"RISTAMPA" if is_reprint else "OK"} {product.display_name}: '
-            f'{labeled:g}/{move.product_uom_qty:g}'
+            f'{status} {product.display_name}: {labeled:g}/{move.product_uom_qty:g}'
         )
+
+        # "Usa stampa di rete (ZPL)" (Impostazioni → Amazon): se attiva e con
+        # una postazione configurata, accoda invece di generare il PDF — vedi
+        # ke.amazon.print.station._get_configured_station(). Record vuoto
+        # (opzione disattivata, comportamento di sempre) non è un errore.
+        station = self.env['ke.amazon.print.station']._get_configured_station()
+        if station:
+            self.env['ke.amazon.print.job']._enqueue_from_label_log(station, log)
+            self.last_scan_message += f' — in coda di stampa su "{station.name}"'
+            return True
 
         # config=False: salta il prompt "Configura il layout documento" che
         # Odoo mostra al primo report stampato su un'azienda mai configurata

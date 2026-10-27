@@ -109,6 +109,10 @@ Due flussi distinti, entrambi basati sullo stesso report (`ir.actions.report` `a
 
 In entrambi i casi l'FNSKU stampato è quello della variante se presente, altrimenti quello del template solo se il template ha un'unica variante (`product.product._get_amazon_fnsku()`) — mai l'FNSKU del template su una famiglia con più varianti, per non etichettare un'unità fisica con un codice che non la identifica univocamente. Se manca, va prima eseguito l'Import FNSKU.
 
+**Agente di stampa Windows (ZPL)**: lato Odoo esiste già la coda (`ke.amazon.print.station`/`ke.amazon.print.job`, **Magazzino → Amazon Sync → Postazioni agente di stampa** / **Lavori di stampa ZPL**) e l'API HTTP per un agente esterno (`/ke_amazon_sync/print_agent/poll` e `/ack`, autenticata con una chiave API dedicata alla postazione, non una password Odoo) — vedi `progetto-odoo-amazon-fba-etichettatura.md` §6/§8. L'agente Windows vero (il programma che gira sul PC del magazzino e parla con la stampante) non è ancora stato scritto.
+
+Un interruttore in **Impostazioni → Amazon Seller Central → Etichette FNSKU** ("Usa stampa di rete (ZPL)", **disattivo di default**) decide quale canale usano entrambi i wizard di stampa sopra: disattivo (default) → PDF dal browser come sempre; attivo + una postazione scelta → accoda un lavoro ZPL su quella postazione invece del PDF. Se attivo senza una postazione valida, i wizard segnalano l'errore invece di stampare in silenzio il PDF.
+
 ---
 
 ## Installazione

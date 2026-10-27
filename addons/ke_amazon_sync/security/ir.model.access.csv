@@ -22,5 +22,9 @@ access_ke_amazon_report_manager,ke.amazon.report manager,model_ke_amazon_report,
 access_ke_amazon_report_request_wizard,ke.amazon.report.request.wizard,model_ke_amazon_report_request_wizard,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_fba_prep_wizard,ke.amazon.fba.prep.wizard,model_ke_amazon_fba_prep_wizard,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_fba_standalone_label_wizard,ke.amazon.fba.standalone.label.wizard,model_ke_amazon_fba_standalone_label_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_print_station,ke.amazon.print.station,model_ke_amazon_print_station,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_print_station_show_key_wizard,ke.amazon.print.station.show.key,model_ke_amazon_print_station_show_key,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_print_job_user,ke.amazon.print.job user,model_ke_amazon_print_job,stock.group_stock_user,1,0,0,0
+access_ke_amazon_print_job_manager,ke.amazon.print.job manager,model_ke_amazon_print_job,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_fba_label_log_user,ke.amazon.fba.label.log user,model_ke_amazon_fba_label_log,stock.group_stock_user,1,0,0,0
 access_ke_amazon_fba_label_log_manager,ke.amazon.fba.label.log manager,model_ke_amazon_fba_label_log,stock.group_stock_manager,1,1,1,1

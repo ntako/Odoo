@@ -201,4 +201,20 @@
               parent="menu_amazon_sync_root"
               action="action_amazon_fba_label_log"
               sequence="42"/>
+
+    <!-- Agente di stampa ZPL (Windows) — vedi
+         progetto-odoo-amazon-fba-etichettatura.md §6/§8. Solo la coda/
+         configurazione lato Odoo per ora; l'agente vero gira sul PC del
+         magazzino e non è ancora scritto (vedi TASK.md). -->
+    <menuitem id="menu_amazon_print_station"
+              name="Postazioni agente di stampa"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_print_station"
+              sequence="43"/>
+
+    <menuitem id="menu_amazon_print_job"
+              name="Lavori di stampa ZPL"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_print_job"
+              sequence="44"/>
 </odoo>
