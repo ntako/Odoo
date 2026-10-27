@@ -27,6 +27,23 @@ class ProductProduct(models.Model):
              '"Import FNSKU" per i marketplace con magazzino FBA condiviso (Pan-EU).',
     )
 
+    # Uso esclusivo di sync_fba_quantities_page per il ramo POOLED (pool
+    # fisico unico condiviso da più marketplace, es. IT/DE/ES/FR Pan-EU):
+    # per decidere quanto consumare dal transito serve un "precedente" per
+    # VARIANTE E POOL FISICO, non per singolo marketplace — altrimenti due
+    # marketplace pooled sincronizzati nello stesso giro (stesso ASIN,
+    # stessa giacenza fisica reale) leggono ciascuno il proprio "precedente"
+    # mai aggiornato dall'altro e consumano ENTRAMBI lo stesso incremento
+    # reale dal transito (doppio consumo per una sola spedizione davvero
+    # ricevuta). Mai scritto da Full Import/riconciliazione, a differenza
+    # di ke.amazon.listing.qty. Trovato in revisione, vedi TASK.md
+    # "Giacenze".
+    x_amazon_fba_qty_snapshot = fields.Integer(
+        'Ultima giacenza FBA pooled sincronizzata (interno)', copy=False,
+        help='Uso interno di sync_fba_quantities_page (marketplace pooled) per il confronto '
+             'con il transito — condiviso fra tutti i marketplace dello stesso pool fisico.',
+    )
+
     # Un'inserzione per variante × marketplace — vedi amazon_listing.py.
     # Copre sia i marketplace "pooled" (via _upsert_listing, sku/asin/prezzo/
     # stato) sia quelli "dedicati" come UK (anche fnsku/qty, non duplicabili

@@ -43,6 +43,23 @@ class AmazonListing(models.Model):
 
     price = fields.Float('Prezzo Amazon (attuale)', readonly=True)
     qty = fields.Integer('Quantità Amazon (FBA)', readonly=True)
+    # Campo SEPARATO da 'qty', uso esclusivo di sync_fba_quantities_page
+    # (marketplace dedicato, non pooled) per decidere quanto consumare dal
+    # transito — mai scritto da Full Import/riconciliazione, a differenza
+    # di 'qty' che riflette invece l'ultimo dato Amazon visto da QUALSIASI
+    # sync (voluto, per la visualizzazione). Prima la sync FBA leggeva/
+    # scriveva 'qty' per questo stesso scopo: un Full Import nel frattempo
+    # lo sovrascriveva con la propria 'qty_available' (fonte e momento
+    # diversi dall'inventario FBA reale), facendo leggere alla sync FBA
+    # successiva un "precedente" che non rifletteva l'ultimo valore
+    # davvero sincronizzato da lei — causa di un consumo spurio o mancato
+    # dal transito indipendente dal bug fra sorelle già corretto. Trovato
+    # in revisione, vedi TASK.md "Giacenze".
+    fba_qty_snapshot = fields.Integer(
+        'Ultima giacenza FBA sincronizzata (interno)', readonly=True,
+        help="Uso interno di sync_fba_quantities_page per il confronto con il transito — "
+             "non toccato da nessun'altra sync, a differenza di 'Quantità Amazon (FBA)'.",
+    )
 
     category = fields.Char('Categoria Amazon')
     browse_node_id = fields.Char('Amazon Browse Node ID')

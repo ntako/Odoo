@@ -1628,11 +1628,17 @@ class SyncEngine:
 
     def _update_product(self, product, data):
         new_sku = data['sku']
-        # Confrontato con lo SKU legacy (primario) a prescindere dal
-        # marketplace corrente: serve anche per invalidare l'FNSKU della
-        # listing di QUESTO marketplace sotto, che non deve dipendere da
-        # _is_primary_marketplace() come il resto dei campi legacy — vedi
-        # la chiamata a _upsert_listing in fondo alla funzione.
+        # Confrontato con lo SKU legacy (primario): usato SOLO per
+        # invalidare x_amazon_fnsku più sotto (stesso campo condiviso,
+        # scritto solo sul marketplace primario — vedi _is_primary_
+        # marketplace). NON va riusato per l'FNSKU della listing di
+        # QUESTO marketplace: su un marketplace secondario x_amazon_sku
+        # riflette l'ultimo marketplace primario, non lo SKU precedente di
+        # QUESTA listing, che può differire in entrambe le direzioni
+        # (conserverebbe un FNSKU ormai sbagliato, o ne invaliderebbe uno
+        # ancora valido) — vedi listing_sku_changed più sotto, calcolato a
+        # parte dalla listing stessa. Trovato in revisione, vedi TASK.md
+        # "FNSKU".
         sku_changed = new_sku != (product.x_amazon_sku or '')
         # Attributi fisici del prodotto: sempre aggiornati, indipendentemente
         # dal marketplace (non sono dati di listing, sono lo stesso prodotto).
@@ -1714,7 +1720,18 @@ class SyncEngine:
                 except Exception as exc:
                     _log.warning('Impossibile assegnare barcode %s a %s: %s',
                                  data['ean'], data['sku'], exc)
-        self._upsert_listing(product.product_variant_id, data, invalidate_fnsku=sku_changed)
+        # L'FNSKU della LISTING di questo marketplace va invalidato in base
+        # al suo proprio SKU precedente, non a quello legacy (sku_changed
+        # sopra, gated sul marketplace primario) — vedi commento su
+        # sku_changed. Nessuna listing ancora (prima volta per questa
+        # variante su questo marketplace): tratta come "cambiato", innocuo,
+        # non c'è nulla da invalidare davvero.
+        marketplace = self._current_marketplace()
+        existing_listing = self.env['ke.amazon.listing'].sudo().search([
+            ('product_id', '=', product.product_variant_id.id), ('marketplace_id', '=', marketplace.id),
+        ], limit=1) if marketplace else self.env['ke.amazon.listing']
+        listing_sku_changed = new_sku != (existing_listing.sku or '')
+        self._upsert_listing(product.product_variant_id, data, invalidate_fnsku=listing_sku_changed)
 
     # -----------------------------------------------------------------------
     # Gestione prodotti con varianti (famiglia Amazon)
@@ -1877,14 +1894,27 @@ class SyncEngine:
                 # valido. Prima questo ramo (variante già esistente) non lo
                 # invalidava mai, a differenza di _do_reconcile che lo fa
                 # già per lo stesso caso — trovato in revisione, vedi
-                # TASK.md "FNSKU". Nessun rischio di perdere l'FNSKU di una
-                # sorella: x_amazon_fnsku qui è per-variante, non condiviso
-                # come sul template dei prodotti semplici.
-                sku_changed = (existing_variant.x_amazon_sku or '') != sku
+                # TASK.md "FNSKU". x_amazon_sku qui viene scritto da
+                # QUALUNQUE marketplace che tocca questa variante (non solo
+                # quello primario, a differenza del ramo prodotto-semplice)
+                # — "cambiato" è quindi rispetto all'ultimo marketplace che
+                # l'ha scritto, non necessariamente quello corrente: per
+                # l'FNSKU della LISTING di questo marketplace serve un
+                # confronto separato, vedi listing_sku_changed più sotto.
+                legacy_sku_changed = (existing_variant.x_amazon_sku or '') != sku
                 variant_vals = {'x_amazon_sku': sku, 'default_code': sku}
-                if sku_changed:
+                if legacy_sku_changed:
                     variant_vals['x_amazon_fnsku'] = False
                 existing_variant.write(variant_vals)
+                if legacy_sku_changed and len(tmpl.product_variant_ids) <= 1:
+                    # Famiglia con UNA sola variante: _get_amazon_fnsku()
+                    # (product_variant.py) ricade sul campo del TEMPLATE
+                    # quando quello della variante è vuoto — lasciarlo
+                    # stantio qui vanificherebbe l'azzeramento appena fatto
+                    # sopra, l'FNSKU vecchio resterebbe comunque recuperabile
+                    # e stampabile. Stesso principio già applicato in
+                    # _do_reconcile per lo stesso caso. Trovato in revisione.
+                    tmpl.write({'x_amazon_fnsku': False})
                 # Doppione già creato da un import precedente (variante senza
                 # EAN perché occupato da un prodotto manuale): unione ora.
                 # Se la variante ha già un barcode, blocca l'unione SOLO se è
@@ -1928,7 +1958,15 @@ class SyncEngine:
                         existing_variant.write({'image_variant_1920': img})
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
-                self._upsert_listing(existing_variant, product, invalidate_fnsku=sku_changed)
+                # L'FNSKU della LISTING di questo marketplace va invalidato
+                # in base al suo proprio SKU precedente, non a quello
+                # legacy (legacy_sku_changed sopra) — vedi commento lì.
+                marketplace = self._current_marketplace()
+                existing_listing = self.env['ke.amazon.listing'].sudo().search([
+                    ('product_id', '=', existing_variant.id), ('marketplace_id', '=', marketplace.id),
+                ], limit=1) if marketplace else self.env['ke.amazon.listing']
+                listing_sku_changed = sku != (existing_listing.sku or '')
+                self._upsert_listing(existing_variant, product, invalidate_fnsku=listing_sku_changed)
                 msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}{merged_note}'
                 return 'updated', msg
             else:
@@ -3316,21 +3354,31 @@ class SyncEngine:
         determinato da ke.amazon.marketplace.is_fba_pooled() — vero se questo
         marketplace condivide il magazzino FBA effettivo con almeno un altro
         marketplace attivo. Per un marketplace pooled, il magazzino FBA in
-        Odoo è condiviso: il campo legacy x_amazon_qty del template resta
-        scritto a ogni giro come riepilogo visibile (stesso stock fisico,
-        riconfermato — ridondante ma innocuo — da ognuno dei marketplace
-        pooled che il chiamante itera), ma la quantità PRECEDENTE usata per
-        decidere quanto consumare dal transito si legge sempre da
-        ke.amazon.listing.qty, per VARIANTE e per marketplace, mai dal campo
-        condiviso del template. Prima (fino al 2026-10-27) il ramo pooled
-        leggeva il precedente da x_amazon_qty: lo snapshot scritto per una
-        variante diventava il "precedente" di quella successiva nello stesso
-        ciclo, causando un consumo spurio dal transito ogni volta che due
-        sorelle avevano giacenze diverse — bug trovato in revisione, vedi
-        TASK.md "Giacenze". Per un marketplace NON pooled (inventario
-        davvero separato, es. UK/US fuori dal pool EU) il comportamento è lo
-        stesso di sempre: la quantità precedente/nuova si legge/scrive solo
+        Odoo è condiviso e x_amazon_qty del template resta scritto a ogni
+        giro come riepilogo visibile (stesso stock fisico, riconfermato —
+        ridondante ma innocuo — da ognuno dei marketplace pooled che il
+        chiamante itera). Per un marketplace NON pooled (inventario davvero
+        separato, es. UK/US fuori dal pool EU) la quantità nuova si scrive
         su ke.amazon.listing.qty, x_amazon_qty non viene toccato.
+
+        La quantità PRECEDENTE usata per decidere quanto consumare dal
+        transito NON si legge più da questi stessi campi di visualizzazione
+        (qty/x_amazon_qty) — un Full Import o una riconciliazione nel
+        frattempo li sovrascrivono con un dato di fonte e momento diversi
+        dall'inventario FBA reale, falsando il "precedente" del giro
+        successivo (bug trovato in revisione, vedi TASK.md "Giacenze").
+        Si legge invece da un campo dedicato, scritto SOLO da questa
+        funzione: ke.amazon.listing.fba_qty_snapshot per VARIANTE+
+        MARKETPLACE sul ramo dedicato (inventario davvero separato, un
+        proprio precedente corretto); product.product.x_amazon_
+        fba_qty_snapshot per VARIANTE sul ramo pooled, condiviso fra TUTTI
+        i marketplace dello stesso pool fisico — non per singolo
+        marketplace, altrimenti due marketplace pooled sincronizzati nello
+        stesso giro leggerebbero ciascuno un proprio "precedente" mai
+        aggiornato dall'altro e consumerebbero entrambi lo stesso
+        incremento reale dal transito (bug reale trovato in revisione,
+        distinto da quello — già corretto — del clobbering fra sorelle
+        sullo stesso marketplace).
         Ritorna il next_token per la pagina successiva, o None se era l'ultima
         (e la riconciliazione è già stata fatta).
         """
@@ -3393,24 +3441,31 @@ class SyncEngine:
                     ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
                 ], limit=1) if marketplace else self.env['ke.amazon.listing']
 
-                # La giacenza precedente per il confronto va SEMPRE letta
-                # per VARIANTE (dalla sua listing su questo marketplace),
-                # mai dal campo condiviso x_amazon_qty del template, anche
-                # sul ramo pooled — un primo tentativo di questo fix usava
-                # x_amazon_qty come fallback quando la listing non esisteva
-                # ancora, ma due sorelle sincronizzate per la prima volta
-                # nello STESSO giro si contaminavano a vicenda esattamente
-                # come nel bug originale (A scrive x_amazon_qty, B lo legge
-                # come proprio "precedente" prima ancora che B abbia una sua
-                # listing). 0 se manca la listing (stesso comportamento già
-                # corretto del ramo dedicato): sul primissimo sync di una
-                # variante prova a consumare dal transito fino al totale
-                # riportato da Amazon, poi la listing creata qui sotto la
-                # rende tracciata per i giri successivi. Bug reale trovato
-                # in revisione, vedi TASK.md "Giacenze" (2026-10-27): due
-                # sorelle A=10/B=20 con dati Amazon invariati tra un ciclo e
-                # l'altro causavano un consumo spurio dal transito.
-                previous_qty = listing.qty if listing else 0
+                # La giacenza precedente per il confronto NON va letta da
+                # 'listing.qty'/'x_amazon_qty' (i campi di VISUALIZZAZIONE,
+                # scritti anche da Full Import/riconciliazione con un dato
+                # di fonte e momento diversi dall'inventario FBA reale) ma
+                # da un campo dedicato, scritto solo da questa funzione —
+                # altrimenti un Full Import nel frattempo falsa il
+                # "precedente" del giro successivo. Bug reale trovato in
+                # revisione, vedi TASK.md "Giacenze".
+                if dedicated:
+                    # Inventario davvero separato per questo marketplace:
+                    # snapshot per VARIANTE+MARKETPLACE, su listing.
+                    previous_qty = listing.fba_qty_snapshot if listing else 0
+                else:
+                    # Pool fisico unico condiviso da più marketplace (es.
+                    # IT/ES/FR Pan-EU): snapshot per VARIANTE, non per
+                    # singolo marketplace, su un campo della variante
+                    # stessa — altrimenti due marketplace pooled
+                    # sincronizzati nello stesso giro (stesso ASIN, stessa
+                    # giacenza fisica reale) leggono ciascuno un proprio
+                    # "precedente" mai aggiornato dall'altro e consumano
+                    # ENTRAMBI lo stesso incremento reale dal transito
+                    # (doppio consumo per una spedizione ricevuta una volta
+                    # sola). Bug reale trovato in revisione, vedi TASK.md
+                    # "Giacenze".
+                    previous_qty = product_variant.x_amazon_fba_qty_snapshot
                 increase = fba_qty - previous_qty
                 moved = 0.0
                 if increase > 0:
@@ -3418,24 +3473,23 @@ class SyncEngine:
                         product_variant, transit_location, fba_location, increase,
                     )
                 self._set_product_stock(product_variant, fba_location, fba_qty)
+
+                # Scritture di VISUALIZZAZIONE: invariate, possono restare
+                # ridondanti con lo snapshot interno sopra senza alcun
+                # rischio — non sono più la fonte di 'previous_qty'.
                 if listing:
                     listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
                 elif marketplace:
-                    # Nessuna riga ancora per questa variante+marketplace
-                    # (prima sync FBA in assoluto per questo prodotto, o mai
-                    # toccato da un Full Import dopo il refactor per-
-                    # variante) — creata qui, minimale (solo i campi che
-                    # conosciamo), per avere uno storico PER VARIANTE da cui
-                    # leggere il "precedente" al prossimo giro. Senza questo
-                    # il fallback su x_amazon_qty (ramo pooled, vedi sopra)
-                    # si ripeterebbe a ogni sync invece di autocorreggersi
-                    # dal secondo giro in poi.
                     listing = self.env['ke.amazon.listing'].sudo().create({
                         'product_id': product_variant.id, 'marketplace_id': marketplace.id,
                         'asin': asin, 'qty': int(fba_qty), 'last_sync': datetime.now(),
                     })
-                if not dedicated:
+                if dedicated:
+                    if listing:
+                        listing.write({'fba_qty_snapshot': int(fba_qty)})
+                else:
                     product_tmpl.write({'x_amazon_qty': int(fba_qty)})
+                    product_variant.write({'x_amazon_fba_qty_snapshot': int(fba_qty)})
                 updated += 1
                 msg = (
                     f'{mp_tag}OK {asin} ({matched_on} #{product_tmpl.id}): '

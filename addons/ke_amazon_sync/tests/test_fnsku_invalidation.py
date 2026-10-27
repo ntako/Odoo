@@ -160,3 +160,132 @@ class TestFnskuInvalidation(TransactionCase):
         variant.invalidate_recordset()
         self.assertFalse(variant.x_amazon_fnsku,
                           "un cambio SKU sulla variante deve invalidare il suo FNSKU")
+
+
+@tagged('post_install', '-at_install', 'ke_amazon_sync_matching')
+class TestFnskuInvalidationSecondaryMarketplace(TransactionCase):
+    """
+    Bug trovato in revisione (2026-10-27): _update_product/
+    _process_variant_listing confrontavano lo SKU in arrivo con quello
+    LEGACY (primario, es. product.x_amazon_sku) per decidere se invalidare
+    l'FNSKU della LISTING del marketplace corrente — ma su un marketplace
+    secondario quel campo riflette l'ultimo marketplace primario, non lo
+    SKU precedente di QUESTA listing, che può differire in entrambe le
+    direzioni (conserva un FNSKU ormai sbagliato, o ne invalida uno ancora
+    valido).
+    """
+
+    def setUp(self):
+        super().setUp()
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        self.SyncEngine = SyncEngine
+        self.primary = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Primario', 'code': 'ZZTPR', 'marketplace_id': 'ZZT_PRIMARY_MKT', 'active': True,
+        })
+        self.secondary = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Secondario', 'code': 'ZZTSEC', 'marketplace_id': 'ZZT_SECONDARY_MKT', 'active': True,
+        })
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', 'ZZT_PRIMARY_MKT')
+
+    def _make_log(self, name):
+        return self.env['ke.amazon.sync.log'].create({'name': name, 'sync_type': 'full_import'})
+
+    def _run_secondary(self, rows):
+        client = FakeSpApiClient(marketplace_id='ZZT_SECONDARY_MKT')
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test fnsku marketplace secondario')
+        with no_commit(self.env):
+            eng.full_import_report_rows(log, rows, 0, 10, True)
+
+    def test_secondary_marketplace_unchanged_own_sku_preserves_fnsku_despite_different_primary_sku(self):
+        """Il campo legacy (primario) ha uno SKU diverso da quello di
+        QUESTA listing — ma per il marketplace secondario non è cambiato
+        nulla: l'FNSKU deve restare."""
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT prodotto multi-mkt', 'type': 'consu', 'is_storable': True,
+            'default_code': 'SECONDARY-OLD-SKU', 'x_amazon_sku': 'PRIMARY-SKU', 'x_amazon_asin': 'B0ZZMULTIMKT',
+        })
+        self.env['ke.amazon.listing'].create({
+            'product_id': tmpl.product_variant_id.id, 'marketplace_id': self.secondary.id,
+            'sku': 'SECONDARY-OLD-SKU', 'asin': 'B0ZZMULTIMKT', 'fnsku': 'X00SECONDARYVALID',
+        })
+        self._run_secondary([make_report_row('SECONDARY-OLD-SKU', asin='B0ZZMULTIMKT', price='12.00')])
+
+        listing = self.env['ke.amazon.listing'].search([
+            ('product_id', '=', tmpl.product_variant_id.id), ('marketplace_id', '=', self.secondary.id),
+        ])
+        self.assertEqual(listing.fnsku, 'X00SECONDARYVALID',
+                          "confrontare con lo SKU primario invece che con quello della listing "
+                          "invalidava un FNSKU ancora valido sul marketplace secondario")
+
+    def test_secondary_marketplace_real_sku_change_invalidates_fnsku_despite_matching_primary_sku(self):
+        """Il nuovo SKU coincide per caso con quello legacy (primario) — ma
+        per QUESTA listing è comunque un cambio reale: l'FNSKU va invalidato."""
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT prodotto multi-mkt 2', 'type': 'consu', 'is_storable': True,
+            'default_code': 'PRIMARY-SKU', 'x_amazon_sku': 'PRIMARY-SKU', 'x_amazon_asin': 'B0ZZMULTIMKT2',
+        })
+        self.env['ke.amazon.listing'].create({
+            'product_id': tmpl.product_variant_id.id, 'marketplace_id': self.secondary.id,
+            'sku': 'SECONDARY-OLD-SKU-2', 'asin': 'B0ZZMULTIMKT2', 'fnsku': 'X00SECONDARYSTALE',
+        })
+        # La riga del marketplace secondario porta il NUOVO sku, che
+        # coincide col primario solo per coincidenza testuale.
+        self._run_secondary([make_report_row('PRIMARY-SKU', asin='B0ZZMULTIMKT2', price='12.00')])
+
+        listing = self.env['ke.amazon.listing'].search([
+            ('product_id', '=', tmpl.product_variant_id.id), ('marketplace_id', '=', self.secondary.id),
+        ])
+        self.assertFalse(listing.fnsku,
+                          "confrontare con lo SKU primario (che per coincidenza combaciava) "
+                          "conservava un FNSKU ormai sbagliato sul marketplace secondario")
+
+
+@tagged('post_install', '-at_install', 'ke_amazon_sync_matching')
+class TestFnskuSingleVariantFamilyTemplateFallback(TransactionCase):
+    """
+    Bug trovato in revisione (2026-10-27): su una famiglia con UNA sola
+    variante, invalidare solo x_amazon_fnsku della variante non basta —
+    product.product._get_amazon_fnsku() ricade sul campo del TEMPLATE
+    quando quello della variante è vuoto, quindi un FNSKU stantio lì
+    restava comunque recuperabile e stampabile.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
+        self.SyncEngine = SyncEngine
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', '')
+
+    def _make_log(self, name):
+        return self.env['ke.amazon.sync.log'].create({'name': name, 'sync_type': 'full_import'})
+
+    def test_sku_change_on_single_variant_family_clears_template_fallback_too(self):
+        sku = 'ZZT-FNSKU-1VAR'
+        asin = 'B0ZZFNSKU1VAR'
+        parent = 'B0ZZFNSKU1VARPARENT'
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT famiglia a variante unica', 'type': 'consu', 'is_storable': True,
+            'x_amazon_parent_asin': parent,
+            # Stantio: scritto in passato da process_fnsku_report_rows sul
+            # ramo pooled-famiglia-a-variante-unica (scrive sul TEMPLATE in
+            # quel caso, non sulla variante — vedi process_fnsku_report_rows).
+            'x_amazon_fnsku': 'X00TEMPLATESTALE',
+        })
+        variant = tmpl.product_variant_id
+        variant.write({'x_amazon_sku': sku, 'x_amazon_asin': asin, 'default_code': sku})
+        self.assertEqual(variant._get_amazon_fnsku(), 'X00TEMPLATESTALE',
+                          'baseline: il fallback sul template funziona prima del cambio SKU')
+
+        client = FakeSpApiClient({asin: parent})
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test fallback template famiglia singola')
+        with no_commit(self.env):
+            eng.full_import_report_rows(log, [make_report_row(sku + '+', asin=asin)], 0, 10, True)
+
+        variant.invalidate_recordset()
+        tmpl.invalidate_recordset()
+        self.assertFalse(variant.x_amazon_fnsku)
+        self.assertFalse(tmpl.x_amazon_fnsku, 'il fallback sul template deve essere azzerato anche lui')
+        self.assertEqual(variant._get_amazon_fnsku(), '',
+                          "senza azzerare anche il template, l'FNSKU stantio resterebbe stampabile")

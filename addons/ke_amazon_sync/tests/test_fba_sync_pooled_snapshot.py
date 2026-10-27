@@ -133,3 +133,75 @@ class TestFbaSyncPooledSnapshot(TransactionCase):
         # il consumo transito) — qui l'ultimo processato è B.
         self.tmpl.invalidate_recordset()
         self.assertEqual(self.tmpl.x_amazon_qty, 20)
+
+    # ------------------------------------------------------------------
+    # Full Import/riconciliazione scrivono anche loro 'qty'/'x_amazon_qty'
+    # (per la visualizzazione) — non devono più poter falsare il
+    # "precedente" usato dalla sync FBA per decidere il consumo transito.
+    # Bug trovato in revisione, vedi TASK.md "Giacenze".
+    # ------------------------------------------------------------------
+
+    def test_full_import_rewriting_listing_qty_does_not_affect_fba_snapshot(self):
+        transit = self._seed_transit(self.variant_a, 50)
+
+        items = [{'sku': 'ZZT-POOL-A', 'asin': 'B0ZZPOOLA', 'qty': 10}]
+        self._sync(items)  # primo sync FBA: riceve 10, transito 50 -> 40
+
+        # Full Import (o riconciliazione) nel frattempo riscrive 'qty' con
+        # un dato proprio, non correlato all'inventario FBA reale — simulato
+        # chiamando _upsert_listing come farebbe quel percorso.
+        eng = self.SyncEngine(self.env, FakeSpApiClient(marketplace_id='ZZT_POOL_MKT'))
+        with no_commit(self.env):
+            eng._upsert_listing(self.variant_a, {
+                'sku': 'ZZT-POOL-A', 'asin': 'B0ZZPOOLA', 'status': 'BUYABLE',
+                'fulfillment': 'fba', 'price': 9.99, 'qty_available': 999,
+            })
+        listing_a = self.env['ke.amazon.listing'].search([
+            ('product_id', '=', self.variant_a.id), ('marketplace_id', '=', self.marketplace.id),
+        ])
+        self.assertEqual(listing_a.qty, 999, 'il Full Import deve comunque poter aggiornare qty per la visualizzazione')
+
+        # Secondo sync FBA: STESSA giacenza Amazon di prima (10), nessuna
+        # nuova spedizione — non deve consumare altro transito nonostante
+        # 'qty' sia stato alterato a 999 nel frattempo.
+        self._sync(items)
+
+        quant = self.env['stock.quant'].search([
+            ('product_id', '=', self.variant_a.id), ('location_id', '=', transit.id),
+        ], limit=1)
+        self.assertEqual(quant.quantity, 40.0,
+                          "il Full Import non deve poter falsare il 'precedente' della sync FBA")
+
+    # ------------------------------------------------------------------
+    # Due marketplace pooled sincronizzati nello stesso giro (stesso pool
+    # fisico, stessa giacenza reale) non devono consumare entrambi lo
+    # stesso incremento dal transito. Bug trovato in revisione.
+    # ------------------------------------------------------------------
+
+    def test_two_pooled_marketplaces_do_not_double_consume_transit(self):
+        # Secondo marketplace pooled: stesso magazzino FBA aziendale (nessun
+        # fba_warehouse_id proprio) => stesso pool fisico di quello di setUp.
+        self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Pooled 2', 'code': 'ZZTPL2', 'marketplace_id': 'ZZT_POOL_MKT_2', 'active': True,
+        })
+        self.assertTrue(self.marketplace.is_fba_pooled())
+
+        transit = self._seed_transit(self.variant_a, 50)
+        items = [{'sku': 'ZZT-POOL-A', 'asin': 'B0ZZPOOLA', 'qty': 10}]
+
+        # Primo marketplace pooled: riceve legittimamente 10 dal transito.
+        self._sync(items)
+
+        # Secondo marketplace pooled, STESSO giro logico, STESSA giacenza
+        # fisica reale (10, invariata): non deve consumare transito di nuovo.
+        client2 = FakeSpApiClient(marketplace_id='ZZT_POOL_MKT_2', inventory_items=items)
+        eng2 = self.SyncEngine(self.env, client2)
+        log2 = self._make_log()
+        with no_commit(self.env):
+            eng2.sync_fba_quantities_page(log2, page_token=None, asin_totals={})
+
+        quant = self.env['stock.quant'].search([
+            ('product_id', '=', self.variant_a.id), ('location_id', '=', transit.id),
+        ], limit=1)
+        self.assertEqual(quant.quantity, 40.0,
+                          'due marketplace pooled non devono consumare due volte lo stesso incremento reale')

@@ -1,5 +1,100 @@
 # Analisi del connettore Amazon per Odoo 19 — 27 ottobre 2026
 
+## Verifica successiva dei fix — HEAD dda1b03
+
+Esaminati i sette commit da `f6f77af` a `dda1b03`: stampa autonoma,
+coda agente, PDF, immagini varianti, snapshot FBA, invalidazione FNSKU e
+prezzo iniziale. **I fix migliorano i casi di base, ma la verifica rileva
+ancora i seguenti casi combinati non coperti dai nuovi test.** I rilievi
+nelle sezioni successive descrivono la situazione precedente ai fix e
+vanno letti insieme a questo aggiornamento.
+
+### F1 — P1: confronto SKU per invalidazione FNSKU non scoped al marketplace
+
+`services/sync_engine.py:1636` confronta il nuovo SKU con
+`product.x_amazon_sku` (primario), poi usa il risultato per invalidare
+l'FNSKU della listing corrente. Il confronto deve invece usare lo SKU
+precedente della specifica listing; i campi condivisi del prodotto hanno
+una responsabilità diversa.
+
+Riprodotto con i metodi reali `_update_product` e `_upsert_listing` e
+dipendenze simulate: primario A, listing FR B/FNSKU-B. Se FR cambia B→A,
+`sku_changed` è False e la listing finisce A/FNSKU-B. Se invece FR resta B,
+`sku_changed` è True e viene cancellato un codice locale ancora valido.
+Il ramo varianti confronta analogamente lo SKU globale della variante
+(`:1883`). Occorre coprire entrambi i casi con SKU diversi per marketplace;
+i nuovi test sui cambi SKU non verificano queste sequenze.
+
+### F2 — P1: FNSKU invalidato sulla variante recuperabile dal template
+
+`services/sync_engine.py:1883-1886` invalida soltanto il codice variante.
+`models/product_variant.py:49` permette però di usare quello del template
+quando rimane una sola variante. Su una famiglia promossa da prodotto
+semplice il vecchio FNSKU template può essere ancora valorizzato.
+
+Riprodotto il resolver reale con variante invalidata e template storico
+con un solo figlio: restituisce FNSKU-OLD e la stampa autonoma non blocca.
+Il collaudo completo ORM della promozione resta da eseguire, ma il percorso
+di lettura non distingue famiglia singola e prodotto semplice. Serve
+invalidare anche il fallback pertinente oppure impedirlo quando il
+template rappresenta una famiglia con identificativi sulla variante.
+
+### F3 — P1 quando si usa il transito: lo snapshot resta instabile e per marketplace
+
+Il precedente ora è per variante, correggendo la contaminazione fra
+sorelle. Restano però due problemi riprodotti con metodi reali simulati:
+
+- `_upsert_listing` (`services/sync_engine.py:704`) riscrive `listing.qty`
+  dalla quantità del report listing. La sync FBA (`:3413`) usa lo stesso
+  campo come precedente di inventario. Sequenza: sync=15, Full Import o
+  riconciliazione con qty listing=0, sync invariata=15 → nuovo consumo
+  richiesto dal transito di 15. Serve uno snapshot dedicato che non venga
+  modificato dagli aggiornamenti delle offerte.
+- Il precedente è distinto per marketplace (`:3393`), ma il pool fisico è
+  unico. IT e FR entrambi con precedente 10 e inventario nuovo 15 chiedono
+  ciascuno 5 dal medesimo transito: totale 10 anziché 5, se capiente.
+  Lo snapshot va riferito a variante + pool/magazzino fisico, oppure il
+  consumo deve essere eseguito una sola volta per pool.
+
+In entrambi i casi il quant FBA viene infine imposto al valore assoluto:
+il difetto riguarda il transito e la provenienza dei movimenti, non
+necessariamente il totale FBA finale. Se il transito è vuoto non perde
+pezzi; il processo inbound resta futuro secondo le priorità concordate.
+
+### F4 — P2, prima di attivare l'agente: retry stampa senza nuova scadenza
+
+`models/amazon_print_job.py:79-82` aggiorna sent_date solo sui lavori
+queued, non su quelli sent recuperati dopo il timeout. Un lavoro scaduto
+rimane quindi immediatamente selezionabile a ogni poll successivo fino
+all'ack; un batch lento o due poll sovrapposti possono ristamparlo più
+volte. Il test attuale verifica il primo recupero, non il poll immediato
+successivo. Serve rinnovare il lease a ogni assegnazione e proteggere la
+presa in carico concorrente. Questo è distinto dal compromesso già
+documentato della possibile ristampa dopo crash prima dell'ack.
+
+### Parti dei fix coerenti e verifiche
+
+- Stampa autonoma: nessuna scrittura di picking/move/quant nel wizard;
+  controlli su prodotto, FNSKU e numero copie presenti.
+- PDF: barcode incorporato, formato e separazione pagine affrontati nel
+  codice. Nessuna nuova verifica visuale/PDF o stampa Zebra in questa
+  sessione; le prove runtime descritte in TASK sono storiche.
+- Immagini: scrittura sul campo specifico variante e backfill aggiunti.
+- IVA: correzione solo alla creazione, senza riscrittura dei prezzi
+  esistenti. Controlli isolati riusciti per aliquota 10% esclusa e
+  convenzione IVA inclusa; non equivale al supporto a ogni struttura
+  fiscale o valuta.
+- Upsert: preservazione FNSKU quando assente nella sorgente e invalidazione
+  esplicita funzionano nei casi semplici; il problema è come viene decisa
+  l'invalidazione nei percorsi multi-marketplace/fallback.
+- AST: **52 Python** validi; **29 XML** ben formati; file manifest presenti.
+  **88 metodi test** nel codice, non eseguiti qui. I conteggi di test passati
+  in TASK appartengono alle sessioni precedenti, non a questa verifica.
+- Script di riproduzione isolata:
+  `/tmp/review_amazon_fixes_20261027.py`. Nessun DB/API Amazon utilizzato;
+  Odoo non importabile nel Python disponibile. Nessuna correzione al codice
+  applicativo applicata durante questa revisione.
+
 ## Ambito e metodo
 
 Revisione del codice presente nel working tree, comprese le modifiche non

@@ -64,9 +64,17 @@ class AmazonPrintJob(models.Model):
         """
         Lavori da restituire a questa postazione: quelli non ancora inviati,
         più quelli inviati da più di _PENDING_TIMEOUT_MINUTES senza una
-        conferma (vedi commento sulla costante) — marca come 'sent' i soli
-        lavori che erano ancora 'queued', senza toccare 'sent_date' di un
-        lavoro già in ripetizione (resta la prima volta che è stato inviato).
+        conferma (vedi commento sulla costante). 'sent_date' viene
+        aggiornata a ORA per OGNI lavoro restituito qui, non solo per quelli
+        appena passati da 'queued' — una prima versione la lasciava invariata
+        per i lavori già in ripetizione, così un lavoro scaduto UNA volta
+        veniva ripescato a OGNI poll successivo (anche a pochi secondi di
+        distanza, prima ancora che l'agente avesse finito di stamparlo),
+        rischiando ristampe ripetute dello stesso lavoro prima del suo primo
+        ack. Aggiornare 'sent_date' qui fa ripartire la finestra di grazia
+        da questo invio, non dal primo: ricompare solo se rimane senza ack
+        per un altro timeout intero. Trovato in revisione, vedi TASK.md
+        "Agente di stampa".
         """
         from datetime import timedelta
         cutoff = fields.Datetime.now() - timedelta(minutes=self._PENDING_TIMEOUT_MINUTES)
@@ -76,9 +84,8 @@ class AmazonPrintJob(models.Model):
                 ('state', '=', 'queued'),
                 '&', ('state', '=', 'sent'), ('sent_date', '<', cutoff),
         ], order='id asc', limit=limit)
-        newly_sent = jobs.filtered(lambda j: j.state == 'queued')
-        if newly_sent:
-            newly_sent.write({'state': 'sent', 'sent_date': fields.Datetime.now()})
+        if jobs:
+            jobs.write({'state': 'sent', 'sent_date': fields.Datetime.now()})
         return jobs
 
     def _mark_done(self):

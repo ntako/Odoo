@@ -76,6 +76,25 @@ class TestPrintStationAndJob(TransactionCase):
         jobs = self.env['ke.amazon.print.job']._poll_for_station(self.station)
         self.assertEqual(jobs.ids, [job.id], 'un lavoro mai confermato va riproposto dopo il timeout')
 
+    def test_poll_refreshes_sent_date_and_does_not_resend_immediately_again(self):
+        """Trovato in revisione (TASK.md 'Agente di stampa'): senza
+        aggiornare sent_date al reinvio, lo stesso lavoro scaduto
+        ricompariva a OGNI poll successivo, non solo dopo un altro timeout
+        intero — rischio di ristampe ripetute prima del primo ack."""
+        job = self.env['ke.amazon.print.job']._enqueue_from_label_log(self.station, self.label_log)
+        job.write({
+            'state': 'sent',
+            'sent_date': fields.Datetime.now() - timedelta(minutes=10),
+        })
+        first_poll = self.env['ke.amazon.print.job']._poll_for_station(self.station)
+        self.assertEqual(first_poll.ids, [job.id])
+        job.invalidate_recordset()
+        self.assertGreater(job.sent_date, fields.Datetime.now() - timedelta(minutes=1),
+                            'sent_date deve essere aggiornata a ora, non lasciata al primo invio')
+
+        second_poll = self.env['ke.amazon.print.job']._poll_for_station(self.station)
+        self.assertFalse(second_poll, 'appena reinviato, non deve ricomparire al poll immediatamente successivo')
+
     def test_poll_does_not_return_other_station_jobs(self):
         other_station = self.env['ke.amazon.print.station'].create({'name': 'ZZT Altra stazione'})
         self.env['ke.amazon.print.job']._enqueue_from_label_log(other_station, self.label_log)
