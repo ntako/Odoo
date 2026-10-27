@@ -6,3 +6,4 @@ from . import amazon_receive_from_fba_wizard
 from . import amazon_allocate_fbm_wizard
 from . import amazon_move_to_general_wizard
 from . import amazon_fba_prep_wizard
+from . import amazon_fba_standalone_label_wizard

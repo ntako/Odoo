@@ -7,11 +7,16 @@ class AmazonFbaLabelLog(models.Model):
     _order = 'create_date desc'
 
     picking_id = fields.Many2one(
-        'stock.picking', string='Spedizione', required=True, ondelete='cascade', index=True,
+        'stock.picking', string='Spedizione', ondelete='cascade', index=True,
+        help='Vuoto per una stampa autonoma (ke.amazon.fba.standalone.label.wizard), '
+             'non legata a una spedizione/trasferimento — vedi move_id.',
     )
     move_id = fields.Many2one(
-        'stock.move', string='Movimento', required=True, ondelete='cascade',
-        help='Riga della spedizione (un prodotto) a cui questa etichetta si riferisce.',
+        'stock.move', string='Movimento', ondelete='cascade',
+        help='Riga della spedizione (un prodotto) a cui questa etichetta si riferisce, '
+             'se stampata dal flusso di etichettatura spedizione. Vuoto per una stampa '
+             'autonoma per variante — non conta per la quantità etichettata di nessun '
+             'movimento e non richiede giacenza, trasferimento o spedizione aperta.',
     )
     product_id = fields.Many2one(
         'product.product', string='Prodotto', required=True, index=True,

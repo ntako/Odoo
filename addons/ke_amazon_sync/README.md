@@ -100,6 +100,15 @@ Importa gli ordini Amazon in `sale.order` di Odoo.
 - Gira su thread di background continuo, avviabile da **Magazzino → Amazon Sync → Import Ordini Amazon**
 - Gli ordini importati sono visibili in **Magazzino → Amazon Sync → Ordini Amazon**
 
+### 9. Stampa etichette FNSKU
+
+Due flussi distinti, entrambi basati sullo stesso report (`ir.actions.report` `action_report_amazon_fba_label`, un'etichetta per `ke.amazon.fba.label.log`):
+
+- **Legata a una spedizione** (`ke.amazon.fba.prep.wizard`, bottone "Etichetta FBA (FNSKU)" sul trasferimento): scansione EAN riga per riga, conta quanto è stato etichettato contro la quantità prevista del movimento, chiude la spedizione solo a etichettatura completa.
+- **Autonoma per variante** (`ke.amazon.fba.standalone.label.wizard`, **Magazzino → Amazon Sync → Stampa etichetta FNSKU**): nessuna spedizione/trasferimento coinvolto, nessuna giacenza toccata. Identifica il prodotto da EAN scansionato o da selezione diretta, mostra SKU/FNSKU per controllo visivo, poi stampa N copie a scelta. Pensata per ristampe, scorte di sicurezza o etichettatura preventiva fuori da un ciclo di spedizione FBA.
+
+In entrambi i casi l'FNSKU stampato è quello della variante se presente, altrimenti quello del template solo se il template ha un'unica variante (`product.product._get_amazon_fnsku()`) — mai l'FNSKU del template su una famiglia con più varianti, per non etichettare un'unità fisica con un codice che non la identifica univocamente. Se manca, va prima eseguito l'Import FNSKU.
+
 ---
 
 ## Installazione

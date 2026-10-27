@@ -28,6 +28,7 @@
         'wizard/amazon_move_to_general_wizard_views.xml',
         'report/amazon_fba_label_report.xml',
         'wizard/amazon_fba_prep_wizard_views.xml',
+        'wizard/amazon_fba_standalone_label_wizard_views.xml',
         'views/amazon_marketplace_views.xml',
         'views/res_config_settings_views.xml',
         'views/res_company_views.xml',
