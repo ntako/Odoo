@@ -3234,15 +3234,21 @@ class SyncEngine:
         determinato da ke.amazon.marketplace.is_fba_pooled() — vero se questo
         marketplace condivide il magazzino FBA effettivo con almeno un altro
         marketplace attivo. Per un marketplace pooled, il magazzino FBA in
-        Odoo è condiviso — qui non ha senso gating primario/secondario sul
-        campo legacy x_amazon_qty: rappresenta lo stesso stock fisico,
-        riconfermato (redundante ma innocuo, idempotente) da ognuno dei
-        marketplace pooled che il chiamante itera. Per un marketplace NON
-        pooled (inventario davvero separato, es. UK/US fuori dal pool EU),
-        la quantità precedente/nuova si legge/scrive su ke.amazon.listing.qty
-        (già scoped per marketplace) invece che sul campo condiviso
-        x_amazon_qty, per non farla interferire con la contabilità del pool
-        su cui questo marketplace non è più.
+        Odoo è condiviso: il campo legacy x_amazon_qty del template resta
+        scritto a ogni giro come riepilogo visibile (stesso stock fisico,
+        riconfermato — ridondante ma innocuo — da ognuno dei marketplace
+        pooled che il chiamante itera), ma la quantità PRECEDENTE usata per
+        decidere quanto consumare dal transito si legge sempre da
+        ke.amazon.listing.qty, per VARIANTE e per marketplace, mai dal campo
+        condiviso del template. Prima (fino al 2026-10-27) il ramo pooled
+        leggeva il precedente da x_amazon_qty: lo snapshot scritto per una
+        variante diventava il "precedente" di quella successiva nello stesso
+        ciclo, causando un consumo spurio dal transito ogni volta che due
+        sorelle avevano giacenze diverse — bug trovato in revisione, vedi
+        TASK.md "Giacenze". Per un marketplace NON pooled (inventario
+        davvero separato, es. UK/US fuori dal pool EU) il comportamento è lo
+        stesso di sempre: la quantità precedente/nuova si legge/scrive solo
+        su ke.amazon.listing.qty, x_amazon_qty non viene toccato.
         Ritorna il next_token per la pagina successiva, o None se era l'ultima
         (e la riconciliazione è già stata fatta).
         """
@@ -3296,17 +3302,33 @@ class SyncEngine:
                 # ke.amazon.listing è scoped per VARIANTE — la lookup usa
                 # sempre product_variant.id (la variante risolta per questa
                 # riga), mai product_tmpl.id, altrimenti due sorelle della
-                # stessa famiglia su un marketplace dedicato condividerebbero
-                # la stessa riga/quantità (stesso bug di clobbering già
-                # risolto altrove in questo refactor).
-                listing = None
-                if dedicated:
-                    listing = self.env['ke.amazon.listing'].sudo().search([
-                        ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
-                    ], limit=1)
-                    previous_qty = listing.qty if listing else 0
-                else:
-                    previous_qty = product_tmpl.x_amazon_qty or 0
+                # stessa famiglia condividerebbero la stessa riga/quantità
+                # (stesso bug di clobbering già risolto altrove in questo
+                # refactor). Un'unica ricerca per entrambi i rami
+                # dedicato/pooled: prima il ramo pooled ne faceva una seconda
+                # identica solo per scrivere, qui serve anche in lettura.
+                listing = self.env['ke.amazon.listing'].sudo().search([
+                    ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
+                ], limit=1) if marketplace else self.env['ke.amazon.listing']
+
+                # La giacenza precedente per il confronto va SEMPRE letta
+                # per VARIANTE (dalla sua listing su questo marketplace),
+                # mai dal campo condiviso x_amazon_qty del template, anche
+                # sul ramo pooled — un primo tentativo di questo fix usava
+                # x_amazon_qty come fallback quando la listing non esisteva
+                # ancora, ma due sorelle sincronizzate per la prima volta
+                # nello STESSO giro si contaminavano a vicenda esattamente
+                # come nel bug originale (A scrive x_amazon_qty, B lo legge
+                # come proprio "precedente" prima ancora che B abbia una sua
+                # listing). 0 se manca la listing (stesso comportamento già
+                # corretto del ramo dedicato): sul primissimo sync di una
+                # variante prova a consumare dal transito fino al totale
+                # riportato da Amazon, poi la listing creata qui sotto la
+                # rende tracciata per i giri successivi. Bug reale trovato
+                # in revisione, vedi TASK.md "Giacenze" (2026-10-27): due
+                # sorelle A=10/B=20 con dati Amazon invariati tra un ciclo e
+                # l'altro causavano un consumo spurio dal transito.
+                previous_qty = listing.qty if listing else 0
                 increase = fba_qty - previous_qty
                 moved = 0.0
                 if increase > 0:
@@ -3314,17 +3336,24 @@ class SyncEngine:
                         product_variant, transit_location, fba_location, increase,
                     )
                 self._set_product_stock(product_variant, fba_location, fba_qty)
-                if dedicated:
-                    if listing:
-                        listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
-                else:
+                if listing:
+                    listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
+                elif marketplace:
+                    # Nessuna riga ancora per questa variante+marketplace
+                    # (prima sync FBA in assoluto per questo prodotto, o mai
+                    # toccato da un Full Import dopo il refactor per-
+                    # variante) — creata qui, minimale (solo i campi che
+                    # conosciamo), per avere uno storico PER VARIANTE da cui
+                    # leggere il "precedente" al prossimo giro. Senza questo
+                    # il fallback su x_amazon_qty (ramo pooled, vedi sopra)
+                    # si ripeterebbe a ogni sync invece di autocorreggersi
+                    # dal secondo giro in poi.
+                    listing = self.env['ke.amazon.listing'].sudo().create({
+                        'product_id': product_variant.id, 'marketplace_id': marketplace.id,
+                        'asin': asin, 'qty': int(fba_qty), 'last_sync': datetime.now(),
+                    })
+                if not dedicated:
                     product_tmpl.write({'x_amazon_qty': int(fba_qty)})
-                    if marketplace:
-                        listing = self.env['ke.amazon.listing'].sudo().search([
-                            ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
-                        ], limit=1)
-                        if listing:
-                            listing.write({'qty': int(fba_qty), 'last_sync': datetime.now()})
                 updated += 1
                 msg = (
                     f'{mp_tag}OK {asin} ({matched_on} #{product_tmpl.id}): '

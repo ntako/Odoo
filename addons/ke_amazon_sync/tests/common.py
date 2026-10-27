@@ -52,7 +52,7 @@ class FakeSpApiClient:
     marketplace_id = None
 
     def __init__(self, parent_asin_by_asin=None, ean_by_asin=None, marketplace_id=None,
-                 image_url_by_asin=None):
+                 image_url_by_asin=None, inventory_items=None):
         # {asin_figlio: parent_asin} — un ASIN non presente qui risulta
         # "nessuna relazione di variante" (prodotto standalone agli occhi
         # del Catalog API), stesso comportamento di un ASIN reale senza
@@ -66,6 +66,12 @@ class FakeSpApiClient:
         # usata da _merge_catalog (sync_engine.py). Un ASIN non presente qui
         # risulta senza immagine, come un ASIN reale senza quel blocco.
         self._image_url_by_asin = image_url_by_asin or {}
+        # [{'sku':..., 'asin':..., 'qty':...}, ...] — stessa forma di
+        # SpApiClient.fetch_inventory_page, restituita tutta su una pagina
+        # sola (next_token sempre None): sufficiente per i test di
+        # sync_fba_quantities_page, che non ha bisogno di collaudare la
+        # paginazione reale qui.
+        self._inventory_items = inventory_items or []
         # Override di istanza del default di classe (None): serve ai test
         # che hanno bisogno di un _current_marketplace() reale (es. un
         # marketplace "dedicato", non pooled) — passare qui lo stesso valore
@@ -104,6 +110,9 @@ class FakeSpApiClient:
         download_missing_images (sync_engine.py), che chiama l'ASIN uno per
         volta invece che a batch."""
         return self.get_catalog_items_batch([asin]).get(asin, {})
+
+    def fetch_inventory_page(self, page_token=None):
+        return self._inventory_items, None
 
 
 def make_dedicated_marketplace(env, name='ZZT Dedicato', code='ZZTD',
