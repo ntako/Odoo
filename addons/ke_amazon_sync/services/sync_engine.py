@@ -1401,14 +1401,53 @@ class SyncEngine:
             by_barcode[key] = product
         return by_barcode
 
-    def _net_price(self, gross):
-        """Strip VAT from an Amazon gross price using the configured default VAT rate."""
-        rate = float(self.env['ir.config_parameter'].sudo().get_param(
-            'ke_amazon_sync.default_vat_rate', '22'
-        ))
+    def _net_price(self, gross, product=None):
+        """
+        Toglie l'IVA da un prezzo lordo Amazon. Con 'product' dato (già
+        creato, con taxes_id risolto da Odoo) usa la SUA aliquota di
+        vendita reale — stessa fonte di verità di compute_amazon_sale_price
+        (product_template.py, usata nel verso opposto Odoo→Amazon), invece
+        dell'unica aliquota di default configurata. Senza 'product' (i
+        chiamanti di creazione: il prodotto non esiste ancora, Odoo non gli
+        ha ancora potuto assegnare una tassa) ricade sull'aliquota di
+        default — un'approssimazione nota per categorie con IVA ridotta
+        (4%/10%), corretta subito dopo la creazione da
+        _correct_seeded_list_price. Trovato in revisione (TASK.md
+        "Prezzi"): prima questa funzione usava SEMPRE l'aliquota di default,
+        anche quando il prodotto aveva già una tassa reale diversa — a
+        differenza del calcolo inverso, che la legge correttamente.
+        """
+        if product:
+            from odoo.addons.ke_amazon_sync.models.product_template import _get_amazon_vat_info
+            rate, price_include = _get_amazon_vat_info(product)
+            if price_include:
+                # list_price per questo prodotto è già nella convenzione
+                # lorda (stessa lettura di compute_amazon_sale_price: con
+                # price_include=True il valore del campo include l'IVA) —
+                # 'gross' va scritto così com'è, nessuno scorporo.
+                return gross
+        else:
+            rate = float(self.env['ir.config_parameter'].sudo().get_param(
+                'ke_amazon_sync.default_vat_rate', '22'
+            ))
         if rate <= 0:
             return gross
         return gross / (1.0 + rate / 100.0)
+
+    def _correct_seeded_list_price(self, template, gross):
+        """
+        list_price viene seedato alla creazione con _net_price(gross) usando
+        l'aliquota di DEFAULT (il prodotto non esisteva ancora — vedi
+        _net_price). Appena creato, Odoo gli assegna una tassa di vendita
+        reale (dalla categoria/azienda): se è diversa da quella di default,
+        ricalcola subito list_price con l'aliquota vera, invece di lasciare
+        un'approssimazione nota per sempre. Nessuna scrittura se il prezzo
+        risultante è comunque lo stesso (nessuna tassa reale trovata, o
+        stessa aliquota del default).
+        """
+        corrected = self._net_price(gross, product=template)
+        if abs(corrected - template.list_price) > 0.001:
+            template.write({'list_price': corrected})
 
     def _marketplace_lang_context(self):
         """
@@ -1539,6 +1578,7 @@ class SyncEngine:
         template = self.env['product.template'].with_context(
             **self._marketplace_lang_context()
         ).create(vals)
+        self._correct_seeded_list_price(template, data['price'])
         if data.get('spec_attrs'):
             self._set_product_attributes(template, data['spec_attrs'])
         self._init_product_warehouse_quant(
@@ -2123,9 +2163,11 @@ class SyncEngine:
         img = _fetch_image_b64(first_child.get('image_url'))
         if img:
             vals['image_1920'] = img
-        return self.env['product.template'].with_context(
+        template = self.env['product.template'].with_context(
             **self._marketplace_lang_context()
         ).create(vals)
+        self._correct_seeded_list_price(template, first_child['price'])
+        return template
 
     def _add_variant_to_template(self, tmpl, product, attr_label, attr_value):
         """

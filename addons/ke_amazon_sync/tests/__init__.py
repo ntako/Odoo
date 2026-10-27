@@ -8,3 +8,4 @@ from . import test_label_report
 from . import test_variant_images
 from . import test_fba_sync_pooled_snapshot
 from . import test_fnsku_invalidation
+from . import test_amazon_price_vat
