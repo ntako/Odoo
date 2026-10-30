@@ -185,6 +185,7 @@ class FbaInboundService:
         }]
         resp = self.client.set_packing_information(plan.amazon_inbound_plan_id, groupings)
         self.client.poll_inbound_operation(resp['operationId'])
+        plan.write({'state': 'packing_info_sent'})
         self.env.cr.commit()
 
     def generate_and_list_placement_options(self, plan):

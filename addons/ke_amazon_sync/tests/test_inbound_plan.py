@@ -192,6 +192,7 @@ class TestInboundPlan(TransactionCase):
 
             self.plan.action_set_packing_information()
             self.assertEqual(client.last_package_groupings[0]['packingGroupId'], 'GROUP1')
+            self.assertEqual(self.plan.state, 'packing_info_sent')
 
             self.plan.action_generate_placement_options()
             self.assertEqual(self.plan.state, 'placement_options_ready')
@@ -457,3 +458,24 @@ class TestInboundPlan(TransactionCase):
             with self.assertRaises(UserError):
                 self.plan.action_copy_source_address_from_amazon()
         self.assertEqual(self.plan.state, 'draft', 'una lettura fallita non porta il piano in errore')
+
+    def test_placement_blocked_until_boxes_sent(self):
+        # 2026-10-30: "Genera opzioni collocazione" era disponibile anche
+        # senza aver mai inviato il contenuto dei colli.
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_create_plan()
+            self.plan.action_generate_packing_options()
+            self.plan.action_confirm_packing_option()
+            self.assertEqual(self.plan.state, 'packing_confirmed')
+            with self.assertRaises(UserError):
+                self.plan.action_generate_placement_options()
+        self.assertNotIn('generate_placement_options', client.calls)
+
+    def test_cancel_without_amazon_id_stays_local(self):
+        client = FakeInboundClient()
+        self.plan.write({'state': 'plan_created', 'amazon_inbound_plan_id': False})
+        with self._with_client(client):
+            self.plan.action_cancel_plan()
+        self.assertEqual(self.plan.state, 'cancelled')
+        self.assertNotIn('cancel_inbound_plan', client.calls, 'nessuna chiamata con inboundPlanId vuoto')

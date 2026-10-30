@@ -81,6 +81,12 @@ class AmazonInboundPlan(models.Model):
         ('draft', 'Bozza'),
         ('plan_created', 'Piano creato'),
         ('packing_confirmed', 'Imballaggio confermato'),
+        # Stato proprio per l'invio del contenuto colli (2026-10-30): prima
+        # setPackingInformation non cambiava stato, il bottone restava
+        # visibile dopo l'invio (impossibile capire se era andato) e
+        # "Genera opzioni collocazione" era già disponibile anche senza
+        # aver mai inviato i colli.
+        ('packing_info_sent', 'Contenuto colli inviato'),
         ('placement_options_ready', 'Opzioni di collocazione pronte'),
         ('placement_confirmed', 'Collocazione confermata (irreversibile)'),
         ('delivery_window_options_ready', 'Opzioni finestra di consegna pronte'),
@@ -299,7 +305,7 @@ class AmazonInboundPlan(models.Model):
 
     def action_generate_placement_options(self):
         self.ensure_one()
-        self._require_state('packing_confirmed')
+        self._require_state('packing_info_sent')
         try:
             self._service().generate_and_list_placement_options(self)
         except Exception as exc:
@@ -421,7 +427,12 @@ class AmazonInboundPlan(models.Model):
                 "l'annullamento ha una finestra a costo zero limitata (24h/1h), gestirlo "
                 'solo consapevolmente.'
             )
-        if self.state == 'draft':
+        # Mai creato su Amazon (bozza, o creazione rifiutata): niente da
+        # annullare lì. Prima solo 'draft' — un piano senza ID in un altro
+        # stato mandava cancelInboundPlan con inboundPlanId=False, rifiutato
+        # da Amazon ("Value 'False' at 'inboundPlanId'", visto nei log il
+        # 2026-10-30).
+        if self.state == 'draft' or not self.amazon_inbound_plan_id:
             self.write({'state': 'cancelled'})
             return
         try:

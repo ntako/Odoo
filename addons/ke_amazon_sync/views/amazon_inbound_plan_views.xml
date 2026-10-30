@@ -88,7 +88,7 @@
                     <button name="action_set_packing_information" string="Invia contenuto colli"
                             type="object" class="btn-primary" invisible="state != 'packing_confirmed'"/>
                     <button name="action_generate_placement_options" string="Genera opzioni collocazione"
-                            type="object" class="btn-primary" invisible="state != 'packing_confirmed'"/>
+                            type="object" class="btn-primary" invisible="state != 'packing_info_sent'"/>
                     <button name="action_confirm_placement_option" string="Conferma collocazione (IRREVERSIBILE)"
                             type="object" class="btn-danger" invisible="state != 'placement_options_ready'"
                             confirm="Confermare la collocazione è IRREVERSIBILE lato Amazon: non si può più annullare o cambiare dopo questo punto. Procedere solo con una spedizione reale pronta a partire."/>
