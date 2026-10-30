@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_sale_order_ps_form" model="ir.ui.view">
+        <field name="name">sale.order.ps.form</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='client_order_ref']" position="after">
+                <field name="ps_order_reference" readonly="1"
+                       invisible="not ps_order_id"/>
+                <field name="ps_order_state" readonly="1"
+                       invisible="not ps_order_id"/>
+                <field name="ps_order_id" readonly="1"
+                       invisible="not ps_order_id"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_sale_order_ps_search" model="ir.ui.view">
+        <field name="name">sale.order.ps.search</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_sales_order_filter"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <separator/>
+                <filter string="Da PrestaShop" name="from_prestashop"
+                        domain="[('ps_order_id', '>', 0)]"/>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

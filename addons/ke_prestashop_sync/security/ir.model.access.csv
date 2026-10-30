@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_ke_ps_sync_log_user,ke.prestashop.sync.log user,model_ke_prestashop_sync_log,stock.group_stock_user,1,0,0,0
+access_ke_ps_sync_log_manager,ke.prestashop.sync.log manager,model_ke_prestashop_sync_log,stock.group_stock_manager,1,1,1,1
+access_ke_ps_product_import_manager,ke.ps.product.import manager,model_ke_ps_product_import,stock.group_stock_manager,1,1,1,1
+access_ke_ps_product_export_manager,ke.ps.product.export manager,model_ke_ps_product_export,stock.group_stock_manager,1,1,1,1

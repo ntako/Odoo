@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- Menu principale PrestaShop sotto Inventario -->
+    <menuitem id="menu_prestashop_root"
+              name="PrestaShop"
+              parent="stock.menu_stock_root"
+              sequence="90"
+              groups="stock.group_stock_manager"/>
+
+    <menuitem id="menu_ps_log"
+              name="Log sincronizzazioni"
+              parent="menu_prestashop_root"
+              action="action_ps_sync_log"
+              sequence="10"/>
+
+    <menuitem id="menu_ps_import_products"
+              name="Import prodotti da PS"
+              parent="menu_prestashop_root"
+              action="action_ps_product_import"
+              sequence="20"/>
+
+    <menuitem id="menu_ps_export_products"
+              name="Export prodotti verso PS"
+              parent="menu_prestashop_root"
+              action="action_ps_product_export"
+              sequence="30"/>
+
+    <menuitem id="menu_ps_settings"
+              name="Impostazioni"
+              parent="menu_prestashop_root"
+              action="base_setup.action_general_configuration"
+              sequence="100"/>
+
+</odoo>

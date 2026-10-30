@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="res_config_settings_ps_view_form" model="ir.ui.view">
+        <field name="name">res.config.settings.ps.form</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base_setup.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//app[@name='general_settings']" position="before">
+                <app string="PrestaShop" name="ke_prestashop_sync"
+                     groups="stock.group_stock_manager">
+
+                    <!-- Connessione -->
+                    <block title="Connessione WebService">
+                        <setting string="URL Negozio"
+                                 help="Es: https://myshop.com  (senza slash finale)">
+                            <field name="ps_url" placeholder="https://myshop.com"/>
+                        </setting>
+                        <setting string="API Key WebService"
+                                 help="Generata in PS → Parametri Avanzati → WebService">
+                            <field name="ps_api_key" password="True"/>
+                        </setting>
+                        <setting string="ID Lingua PrestaShop" help="Di solito 1 per l'italiano">
+                            <field name="ps_default_lang_id"/>
+                        </setting>
+                        <setting string="Magazzino PrestaShop"
+                                 help="Sorgente delle quantità e magazzino degli ordini importati">
+                            <field name="ps_warehouse_id"/>
+                        </setting>
+                        <setting string="Filtra i prodotti per magazzino"
+                                 help="Sincronizza verso PS solo i prodotti con giacenza > 0 nel magazzino selezionato">
+                            <field name="ps_filter_by_warehouse"/>
+                        </setting>
+                        <setting string="ID Shop PrestaShop"
+                                 help="Multistore: ID dello shop usato per lo stock (1 di default)">
+                            <field name="ps_shop_id"/>
+                        </setting>
+                        <setting string="Categoria PS di default"
+                                 help="ID categoria assegnata ai prodotti creati dall'export">
+                            <field name="ps_category_id"/>
+                        </setting>
+                        <setting string="Gruppo regole IVA PS"
+                                 help="ID id_tax_rules_group assegnato ai prodotti creati dall'export">
+                            <field name="ps_tax_rules_group_id"/>
+                        </setting>
+                        <div class="mt8">
+                            <button name="action_test_connection" type="object"
+                                    string="Testa connessione" class="btn btn-sm btn-secondary"/>
+                        </div>
+                    </block>
+
+                    <!-- Sync stock -->
+                    <block title="Sync Quantità (Odoo → PS)">
+                        <setting string="Abilita cron automatico">
+                            <field name="ps_cron_sync_stock_active"/>
+                        </setting>
+                        <setting string="Intervallo (minuti)"
+                                 invisible="not ps_cron_sync_stock_active">
+                            <field name="ps_sync_stock_interval"/>
+                        </setting>
+                        <div class="mt8">
+                            <button name="action_run_sync_stock" type="object"
+                                    string="Sync stock adesso" class="btn btn-sm btn-secondary"/>
+                        </div>
+                    </block>
+
+                    <!-- Sync prezzi -->
+                    <block title="Sync Prezzi (Odoo → PS)">
+                        <setting string="Abilita cron automatico">
+                            <field name="ps_cron_sync_prices_active"/>
+                        </setting>
+                        <setting string="Intervallo (minuti)"
+                                 invisible="not ps_cron_sync_prices_active">
+                            <field name="ps_sync_prices_interval"/>
+                        </setting>
+                        <div class="mt8">
+                            <button name="action_run_sync_prices" type="object"
+                                    string="Sync prezzi adesso" class="btn btn-sm btn-secondary"/>
+                        </div>
+                    </block>
+
+                    <!-- Import ordini -->
+                    <block title="Import Ordini (PS → Odoo)">
+                        <setting string="Abilita cron automatico">
+                            <field name="ps_cron_import_orders_active"/>
+                        </setting>
+                        <setting string="Intervallo (minuti)"
+                                 invisible="not ps_cron_import_orders_active">
+                            <field name="ps_import_orders_interval"/>
+                        </setting>
+                        <setting string="Importa ordini delle ultime N ore"
+                                 help="Importa tutti gli ordini PS creati nelle ultime N ore">
+                            <field name="ps_import_orders_hours_back"/>
+                        </setting>
+                        <setting string="Conferma automatica ordini"
+                                 help="Conferma gli ordini importati invece di lasciarli come preventivo">
+                            <field name="ps_order_auto_confirm"/>
+                        </setting>
+                        <div class="mt8">
+                            <button name="action_run_import_orders" type="object"
+                                    string="Import ordini adesso" class="btn btn-sm btn-secondary"/>
+                        </div>
+                    </block>
+
+                    <!-- Sync immagini -->
+                    <block title="Sync Immagini (Odoo → PS)">
+                        <setting string="Abilita cron automatico">
+                            <field name="ps_cron_sync_images_active"/>
+                        </setting>
+                        <setting string="Intervallo (minuti)"
+                                 invisible="not ps_cron_sync_images_active">
+                            <field name="ps_sync_images_interval"/>
+                        </setting>
+                        <setting string="Upload immagini prodotti"
+                                 help="Carica l'immagine principale di ogni prodotto su PrestaShop. Salta i prodotti già sincronizzati (usa Re-upload per forzare).">
+                            <div>
+                                <button name="action_run_sync_images" type="object"
+                                        string="Sync immagini adesso"
+                                        class="btn btn-sm btn-secondary"/>
+                                <button name="action_run_sync_images_force" type="object"
+                                        string="Re-upload tutte le immagini"
+                                        class="btn btn-sm btn-warning ms-2"/>
+                            </div>
+                        </setting>
+                    </block>
+
+                    <!-- Manutenzione link PS -->
+                    <block title="Manutenzione">
+                        <setting string="Diagnostica link PS"
+                                 help="Mostra quanti prodotti Odoo hanno ps_product_id duplicato (più prodotti Odoo → stesso prodotto PS).">
+                            <div>
+                                <button name="action_diagnose_ps_links" type="object"
+                                        string="Diagnostica link PS"
+                                        class="btn btn-sm btn-secondary"/>
+                            </div>
+                        </setting>
+                        <setting string="Reset link orfani"
+                                 help="Azzera ps_product_id sui prodotti Odoo il cui prodotto PS è stato eliminato (verifica via API). Dopo il reset, riesegui l'export per ricrearli.">
+                            <div>
+                                <button name="action_reset_orphaned_ps_links" type="object"
+                                        string="Trova e azzera link orfani"
+                                        class="btn btn-sm btn-warning"/>
+                            </div>
+                        </setting>
+                        <setting string="Azzera tutti i collegamenti PS"
+                                 help="Azzera ps_product_id / ps_combination_id / immagine su TUTTI i prodotti, senza chiamare PrestaShop. Da usare dopo aver svuotato il catalogo su PS per ripartire da zero.">
+                            <div>
+                                <button name="action_reset_all_ps_links" type="object"
+                                        string="Azzera tutti i collegamenti"
+                                        class="btn btn-sm btn-danger"
+                                        confirm="Azzerare TUTTI i collegamenti PrestaShop su tutti i prodotti? Il prossimo export ricreerà l'intero catalogo su PS."/>
+                            </div>
+                        </setting>
+                    </block>
+
+                    <!-- Opzioni import prodotti -->
+                    <block title="Opzioni Import Prodotti">
+                        <setting string="Aggiorna prodotti esistenti durante import">
+                            <field name="ps_import_update_existing"/>
+                        </setting>
+                        <setting string="Tipo prodotto Odoo creato da PS">
+                            <field name="ps_import_product_type"/>
+                        </setting>
+                    </block>
+
+                </app>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

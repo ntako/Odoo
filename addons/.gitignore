@@ -4,6 +4,10 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+*.egg-info/
+dist/
+build/
+.eggs/
 
 # Virtual environments
 .venv/
@@ -11,11 +15,20 @@ venv/
 env/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Odoo
+*.log
+filestore/
+.odoo_artifacts/
+
+# Secrets
+.env
+.env.local
