@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_amazon" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.inherit.ke_amazon_sync</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base_setup.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//app[@name='general_settings']" position="after">
+                <app string="Amazon Seller Central" name="ke_amazon_sync">
+
+                    <block title="Credenziali SP-API" name="amazon_credentials">
+                        <setting string="Seller ID (Merchant Token)">
+                            <field name="amazon_seller_id"/>
+                        </setting>
+                        <setting string="Marketplace ID">
+                            <field name="amazon_marketplace_id"/>
+                        </setting>
+                        <setting string="LWA App ID">
+                            <field name="amazon_lwa_app_id"/>
+                        </setting>
+                        <setting string="LWA Client Secret">
+                            <field name="amazon_lwa_client_secret" password="True"/>
+                        </setting>
+                        <setting string="Refresh Token">
+                            <field name="amazon_refresh_token" password="True"/>
+                        </setting>
+                    </block>
+
+                    <block title="Impostazioni import" name="amazon_import">
+                        <setting string="Lingua catalogo"
+                                 help="Codice lingua per descrizioni/bullet points: it_IT, en_GB, de_DE, …">
+                            <field name="amazon_locale"/>
+                        </setting>
+                        <setting string="Tipo prodotto Odoo">
+                            <field name="amazon_product_type"/>
+                        </setting>
+                        <setting string="Limite prodotti per import"
+                                 help="0 = nessun limite. Usa un numero piccolo (es. 20) per testare l'import.">
+                            <field name="amazon_max_products"/>
+                        </setting>
+                        <setting string="Aggiorna prodotti esistenti durante import"
+                                 help="Se disattivo, i prodotti già presenti in Odoo non vengono toccati.">
+                            <field name="amazon_import_update_existing"/>
+                        </setting>
+                        <setting string="Immagini mancanti"
+                                 help="Scarica da Amazon le immagini dei prodotti già importati che non hanno ancora una foto.">
+                            <button name="action_run_download_images"
+                                    string="Scarica immagini mancanti"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Avvio il download delle immagini mancanti in background. Continuare?"/>
+                        </setting>
+                        <setting string="Famiglie rinominate da Amazon"
+                                 help="Rilegge l'ultimo Full Import e ripara le famiglie che Amazon ha solo rinominato (stesso gruppo di varianti, nuovo parent ASIN) — non tocca famiglie che Amazon ha diviso o unito con altre, quelle restano segnalate per una verifica manuale. Nessuna chiamata Amazon.">
+                            <button name="action_run_recover_renamed_families"
+                                    string="Ripara famiglie rinominate"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Rilegge l'ultimo Full Import e aggiorna il parent ASIN delle famiglie semplicemente rinominate da Amazon. Non tocca famiglie divise o unite. Continuare?"/>
+                        </setting>
+                    </block>
+
+                    <block title="Automazioni" name="amazon_crons">
+                        <setting string="Controllo automatico nuovi prodotti"
+                                 help="Controlla ogni N ore se i nuovi prodotti Odoo (con EAN) sono già listati su Amazon.">
+                            <field name="amazon_cron_check_active"/>
+                            <div class="row mt8 align-items-center">
+                                <label for="amazon_sync_check_interval" class="col-auto o_light_label"/>
+                                <field name="amazon_sync_check_interval"
+                                       class="col-auto"
+                                       readonly="not amazon_cron_check_active"/>
+                                <span class="col-auto text-muted">ore</span>
+                                <div class="col-auto ms-3">
+                                    <button name="action_run_check_new_products"
+                                            string="Esegui ora"
+                                            type="object"
+                                            class="btn btn-secondary btn-sm"
+                                            confirm="Avvio il controllo nuovi prodotti in background. Il risultato sarà visibile nel log. Continuare?"/>
+                                </div>
+                            </div>
+                        </setting>
+                        <setting string="Sync automatica prezzi e quantità"
+                                 help="Aggiorna automaticamente su Amazon prezzi e quantità (FBM) dei prodotti con sync attiva.">
+                            <field name="amazon_cron_price_qty_active"/>
+                            <div class="row mt8 align-items-center">
+                                <label for="amazon_sync_price_qty_interval" class="col-auto o_light_label"/>
+                                <field name="amazon_sync_price_qty_interval"
+                                       class="col-auto"
+                                       readonly="not amazon_cron_price_qty_active"/>
+                                <span class="col-auto text-muted">minuti</span>
+                                <div class="col-auto ms-3">
+                                    <button name="action_run_sync_prices_quantities"
+                                            string="Esegui ora"
+                                            type="object"
+                                            class="btn btn-secondary btn-sm"
+                                            confirm="Avvio la sincronizzazione prezzi/quantità in background. Il risultato sarà visibile nel log. Continuare?"/>
+                                </div>
+                            </div>
+                        </setting>
+                        <setting string="Riconciliazione store (sola lettura da Amazon)"
+                                 help="Legge i listing del tuo store Amazon senza modificarli. Aggiorna in Odoo lo stato e il prezzo dei prodotti collegati, e segnala nel log i prodotti presenti su Amazon ma non ancora importati.">
+                            <field name="amazon_cron_reconcile_active"/>
+                            <div class="row mt8 align-items-center">
+                                <label for="amazon_sync_reconcile_interval" class="col-auto o_light_label"/>
+                                <field name="amazon_sync_reconcile_interval"
+                                       class="col-auto"
+                                       readonly="not amazon_cron_reconcile_active"/>
+                                <span class="col-auto text-muted">ore</span>
+                                <div class="col-auto ms-3">
+                                    <button name="action_run_reconcile_store"
+                                            string="Esegui ora"
+                                            type="object"
+                                            class="btn btn-secondary btn-sm"
+                                            confirm="Avvio la riconciliazione store in background tramite report Amazon (nessun limite di prodotti, richiede qualche minuto). Il risultato sarà visibile nel log. Continuare?"/>
+                                </div>
+                            </div>
+                        </setting>
+                    </block>
+
+                    <block title="Import Ordini" name="amazon_orders">
+                        <setting string="Giorni da importare"
+                                 help="Numero di giorni nel passato da cui recuperare gli ordini Amazon ad ogni import manuale.">
+                            <field name="amazon_orders_days_back"/>
+                            <span class="ms-2 text-muted">giorni</span>
+                        </setting>
+                        <setting string="Aliquota IVA predefinita (%)"
+                                 help="Aliquota IVA usata per convertire i prezzi lordi Amazon in prezzi netti Odoo (IT: 22, DE: 19, FR: 20, ES: 21). Per le righe ordine viene usata l'imposta esatta fornita da Amazon.">
+                            <field name="amazon_default_vat_rate"/>
+                            <span class="ms-2 text-muted">%</span>
+                        </setting>
+                    </block>
+
+                    <block title="Magazzini" name="amazon_warehouses">
+                        <setting string="Magazzino FBA / FBM"
+                                 help="I magazzini FBA e FBM si configurano nel form dell'azienda (Impostazioni → Aziende → [azienda] → tab Amazon).">
+                            <button name="action_open_company_amazon"
+                                    string="Configura magazzini →"
+                                    type="object"
+                                    class="btn btn-secondary"/>
+                        </setting>
+                        <setting string="Recupero giacenza FBM da Amazon"
+                                 help="Operazione una tantum: imposta la giacenza dei prodotti FBM nel magazzino FBM configurato usando la quantità dichiarata su Amazon (x_amazon_qty). Usala solo se la sync automatica quantità non è mai stata attiva su questi prodotti, altrimenti il dato non è più affidabile.">
+                            <button name="action_run_seed_fbm_stock"
+                                    string="Recupera giacenza FBM ora"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Imposta la giacenza di tutti i prodotti FBM nel magazzino FBM configurato usando la quantità dichiarata su Amazon. Operazione da fare una sola volta, solo se la sync automatica quantità non è mai stata attiva su questi prodotti. Continuare?"/>
+                        </setting>
+                        <setting string="Magazzino FBA esplicito per marketplace pooled"
+                                 help="Operazione una tantum: imposta il Magazzino FBA qui sopra come Magazzino FBA esplicito su ogni marketplace attivo che ne è ancora privo (Magazzino → Amazon Sync → Marketplace). Non cambia il comportamento attuale (i marketplace vuoti già ricadevano su questo stesso magazzino) — rende solo esplicito chi appartiene al pool, cosa che decide se un marketplace entra/esce in futuro (basta cambiargli il magazzino, senza toccare codice). Salta i marketplace che hanno già un magazzino proprio, sicura da rilanciare più volte.">
+                            <button name="action_set_pooled_fba_warehouse_on_marketplaces"
+                                    string="Imposta magazzino pooled ora"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Imposta il Magazzino FBA aziendale come magazzino esplicito su ogni marketplace attivo che ne è ancora privo. Continuare?"/>
+                        </setting>
+                    </block>
+
+                    <block title="Etichette FNSKU" name="amazon_labels">
+                        <setting string="Usa stampa di rete (ZPL)"
+                                 help="Se disattivo (default), le etichette si stampano in PDF dal browser come adesso. Se attivo, vengono accodate per l'agente di stampa Windows sulla postazione scelta qui sotto.">
+                            <field name="amazon_zpl_printing_enabled"/>
+                        </setting>
+                        <setting string="Postazione di stampa predefinita"
+                                 help="Obbligatoria se 'Usa stampa di rete' è attivo — vedi Magazzino → Amazon Sync → Postazioni agente di stampa per crearne una e generare la sua chiave API.">
+                            <field name="amazon_zpl_default_station_id"
+                                   invisible="not amazon_zpl_printing_enabled"/>
+                        </setting>
+                    </block>
+
+                    <block title="Multi-marketplace (fase 1)" name="amazon_multimarketplace">
+                        <setting string="Marketplace configurati"
+                                 help="Elenco marketplace disponibili (IT/DE/FR/ES/UK/US). Nessuno attivo di default — usa 'Rileva marketplace attivi' qui sotto invece di attivarli a mano, se possibile.">
+                            <button name="%(action_amazon_marketplace)d"
+                                    string="Gestisci marketplace →"
+                                    type="action"
+                                    class="btn btn-secondary"/>
+                        </setting>
+                        <setting string="Rileva marketplace attivi"
+                                 help="Chiede direttamente ad Amazon (Sellers API) su quali marketplace sei realmente attivo, invece di doverlo sapere/impostare a mano. Attiva/crea i marketplace confermati; quelli già attivi ma non confermati da Amazon non vengono disattivati automaticamente, solo segnalati nel log. Da eseguire almeno una volta prima di usare l'import ordini o altre sync multi-marketplace.">
+                            <button name="action_run_detect_marketplaces"
+                                    string="Rileva ora"
+                                    type="object"
+                                    class="btn btn-primary"
+                                    confirm="Interroga Amazon per i marketplace realmente attivi e aggiorna l'elenco qui sopra. Continuare?"/>
+                        </setting>
+                        <setting string="Migra a modello multi-marketplace"
+                                 help="Operazione una tantum: crea le inserzioni (ke.amazon.listing) sul marketplace oggi configurato qui sopra, a partire dai campi Amazon già presenti sui prodotti. Non tocca i campi originali, sicura da rilanciare più volte. Non ancora usata dalle sync (fase successiva) — serve solo a preparare i dati.">
+                            <button name="action_migrate_to_amazon_listings"
+                                    string="Migra dati esistenti"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Crea una riga inserzione per ogni prodotto Amazon già presente, sul marketplace oggi configurato. Non modifica i dati originali. Continuare?"/>
+                        </setting>
+                    </block>
+
+                </app>
+            </xpath>
+        </field>
+    </record>
+</odoo>

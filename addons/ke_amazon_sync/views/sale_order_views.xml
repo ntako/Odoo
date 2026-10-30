@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Tab Amazon nel form ordine di vendita -->
+    <record id="view_order_form_amazon" model="ir.ui.view">
+        <field name="name">sale.order.amazon.tab</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Amazon" name="amazon_tab" invisible="not x_amazon_order_id">
+                    <group>
+                        <group string="Ordine Amazon">
+                            <field name="x_amazon_order_id" string="Numero ordine Amazon"/>
+                            <field name="x_amazon_order_status" string="Stato Amazon"/>
+                            <field name="x_amazon_fulfillment_channel" string="Fulfillment"/>
+                            <field name="x_amazon_marketplace_id" string="Marketplace"/>
+                        </group>
+                        <group string="Dettagli">
+                            <field name="x_amazon_purchase_date" string="Data acquisto Amazon"/>
+                            <field name="x_amazon_sales_channel" string="Canale di vendita"/>
+                            <field name="x_amazon_has_return" string="Ha resi" widget="boolean_toggle" readonly="1"/>
+                        </group>
+                    </group>
+                </page>
+            </xpath>
+            <xpath expr="//field[@name='order_line']/list" position="inside">
+                <field name="x_amazon_sku" string="SKU Amazon" optional="hide"/>
+                <field name="x_amazon_asin" string="ASIN" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Colonne Amazon nella lista ordini -->
+    <record id="view_order_tree_amazon" model="ir.ui.view">
+        <field name="name">sale.order.amazon.tree</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="x_amazon_order_id" string="N. ordine Amazon" optional="hide"/>
+                <field name="x_amazon_fulfillment_channel" string="Fulfillment" optional="hide"/>
+                <field name="x_amazon_marketplace_id" string="Marketplace" optional="hide"/>
+                <field name="x_amazon_sales_channel" string="Canale" optional="hide"/>
+                <field name="x_amazon_has_return" string="Ha resi" optional="hide" widget="boolean_toggle"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

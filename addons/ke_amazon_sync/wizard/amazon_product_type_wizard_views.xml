@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_product_type_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.product.type.wizard.form</field>
+        <field name="model">ke.amazon.product.type.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Cerca tipo prodotto Amazon">
+                <field name="product_id" invisible="1"/>
+                <div class="d-flex align-items-center mb-3 gap-2">
+                    <field name="keyword"
+                           class="flex-fill"
+                           placeholder="Es. scarpe, sport, elettronica..."
+                           nolabel="1"/>
+                    <button name="action_search"
+                            string="Cerca"
+                            type="object"
+                            class="btn btn-primary"/>
+                </div>
+                <field name="result_ids" nolabel="1">
+                    <list>
+                        <field name="type_name" string="Codice Amazon"/>
+                        <field name="type_label" string="Nome"/>
+                        <button name="action_select"
+                                string="Seleziona"
+                                type="object"
+                                class="btn btn-sm btn-primary"/>
+                    </list>
+                </field>
+                <footer>
+                    <button string="Annulla" class="btn btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_product_type_wizard" model="ir.actions.act_window">
+        <field name="name">Cerca tipo prodotto Amazon</field>
+        <field name="res_model">ke.amazon.product.type.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <!-- Wizard ricerca categoria / browse node -->
+    <record id="view_amazon_browse_node_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.browse.node.wizard.form</field>
+        <field name="model">ke.amazon.browse.node.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Cerca categoria Amazon">
+                <field name="product_id" invisible="1"/>
+                <div class="d-flex align-items-center mb-3 gap-2">
+                    <field name="keyword"
+                           class="flex-fill"
+                           placeholder="Es. scarpe, sport, elettronica..."
+                           nolabel="1"/>
+                    <button name="action_search"
+                            string="Cerca"
+                            type="object"
+                            class="btn btn-primary"/>
+                </div>
+                <field name="result_ids" nolabel="1">
+                    <list>
+                        <field name="classification_id" string="Browse Node ID"/>
+                        <field name="category_name" string="Categoria"/>
+                        <button name="action_select"
+                                string="Seleziona"
+                                type="object"
+                                class="btn btn-sm btn-primary"/>
+                    </list>
+                </field>
+                <footer>
+                    <button string="Annulla" class="btn btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_browse_node_wizard" model="ir.actions.act_window">
+        <field name="name">Cerca categoria Amazon</field>
+        <field name="res_model">ke.amazon.browse.node.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

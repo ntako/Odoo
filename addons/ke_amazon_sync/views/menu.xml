@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Server action import completo -->
+    <record id="action_amazon_full_import_server" model="ir.actions.server">
+        <field name="name">Import Completo da Amazon</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_full_import()</field>
+    </record>
+
+    <!-- Server action aggiornamento da Catalog API -->
+    <record id="action_apply_cat_mapping_server" model="ir.actions.server">
+        <field name="name">Aggiorna da Catalog API</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_apply_category_mapping()</field>
+    </record>
+
+    <!-- Menu sotto Inventario > Operazioni -->
+    <menuitem id="menu_amazon_sync_root"
+              name="Amazon Sync"
+              parent="stock.menu_stock_root"
+              sequence="99"/>
+
+    <!-- Il click diretto su "Import Completo" apriva prima l'import subito;
+         ora apre la vista dei report scaricati (gestione/selezione), così
+         si può controllare/riusare un report già scaricato invece di
+         richiederne sempre uno nuovo — vedi TASK.md. L'avvio vero e proprio
+         resta lo stesso action_start_full_import di sempre, ora raggiungibile
+         dal menu "Avvia Full Import" sotto. -->
+    <menuitem id="menu_amazon_full_import"
+              name="Report Amazon (Import Completo)"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_report"
+              sequence="10"/>
+
+    <menuitem id="menu_amazon_report_request"
+              name="Richiedi nuovo report"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_report_request_wizard"
+              sequence="11"/>
+
+    <menuitem id="menu_amazon_full_import_start"
+              name="Avvia Full Import"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_full_import_server"
+              sequence="12"/>
+
+    <menuitem id="menu_amazon_sync_log"
+              name="Log Sincronizzazioni"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_sync_log"
+              sequence="20"/>
+
+    <menuitem id="menu_amazon_apply_cat_mapping"
+              name="Aggiorna da Catalog API"
+              parent="menu_amazon_sync_root"
+              action="action_apply_cat_mapping_server"
+              sequence="25"/>
+
+    <!-- Server action import ordini -->
+    <record id="action_amazon_import_orders_server" model="ir.actions.server">
+        <field name="name">Import Ordini Amazon</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_import_orders()</field>
+    </record>
+
+    <record id="action_amazon_sale_orders" model="ir.actions.act_window">
+        <field name="name">Ordini Amazon</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('x_amazon_order_id', '!=', False)]</field>
+    </record>
+
+    <menuitem id="menu_amazon_import_orders"
+              name="Import Ordini Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_import_orders_server"
+              sequence="15"/>
+
+    <menuitem id="menu_amazon_sale_orders"
+              name="Ordini Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_sale_orders"
+              sequence="16"/>
+
+    <!-- Server action sync giacenze FBA -->
+    <record id="action_amazon_sync_fba_server" model="ir.actions.server">
+        <field name="name">Sync Giacenze FBA</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_sync_fba_quantities()</field>
+    </record>
+
+    <menuitem id="menu_amazon_sync_fba"
+              name="Sync Giacenze FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_sync_fba_server"
+              sequence="17"/>
+
+    <menuitem id="menu_amazon_ship_to_fba"
+              name="Spedisci rifornimento ad Amazon FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_ship_to_fba_wizard"
+              sequence="18"/>
+
+    <!-- Server action import resi -->
+    <record id="action_amazon_returns_server" model="ir.actions.server">
+        <field name="name">Import Resi Amazon</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_returns_report()</field>
+    </record>
+
+    <menuitem id="menu_amazon_returns"
+              name="Import Resi Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_returns_server"
+              sequence="19"/>
+
+    <menuitem id="menu_amazon_receive_from_fba"
+              name="Registra rientro scorte da Amazon FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_receive_from_fba_wizard"
+              sequence="20"/>
+
+    <menuitem id="menu_amazon_allocate_fbm"
+              name="Alloca giacenza per Amazon FBM"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_allocate_fbm_wizard"
+              sequence="21"/>
+
+    <menuitem id="menu_amazon_move_to_general"
+              name="Sposta giacenza esistente verso Magazzino Generale"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_move_to_general_wizard"
+              sequence="22"/>
+
+    <!-- Shortcut impostazioni: apre le Impostazioni direttamente sulla tab Amazon -->
+    <record id="action_amazon_config_settings" model="ir.actions.act_window">
+        <field name="name">Configurazione Amazon</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+        <field name="context">{'module': 'ke_amazon_sync'}</field>
+    </record>
+
+    <menuitem id="menu_amazon_sync_settings"
+              name="Configurazione Amazon"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_config_settings"
+              sequence="30"/>
+
+    <menuitem id="menu_amazon_product_inventory_list"
+              name="Vista Inventario"
+              parent="menu_amazon_sync_root"
+              action="action_product_inventory_list"
+              sequence="5"/>
+
+    <!-- Server action import FNSKU -->
+    <record id="action_amazon_fnsku_import_server" model="ir.actions.server">
+        <field name="name">Import FNSKU</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">action = env['ke.amazon.sync.log'].action_start_fnsku_import()</field>
+    </record>
+
+    <menuitem id="menu_amazon_fnsku_import"
+              name="Import FNSKU"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_fnsku_import_server"
+              sequence="23"/>
+
+    <!-- Stampa autonoma per variante e numero di copie, senza spedizione/
+         trasferimento — vedi TASK.md "Etichette" (priorità 2026-10-27) e
+         progetto-odoo-amazon-fba-etichettatura.md §7. Il flusso legato alla
+         spedizione (action_open_amazon_fba_prep_wizard) resta sul picking. -->
+    <menuitem id="menu_amazon_fba_standalone_label"
+              name="Stampa etichetta FNSKU"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_fba_standalone_label_wizard"
+              sequence="24"/>
+
+    <!-- Multi-marketplace: tutte le sync (fase 3, vedi TASK.md) leggono/scrivono
+         questi due modelli per ogni marketplace attivo. -->
+    <menuitem id="menu_amazon_marketplace"
+              name="Marketplace"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_marketplace"
+              sequence="40"/>
+
+    <menuitem id="menu_amazon_listing"
+              name="Inserzioni per marketplace"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_listing"
+              sequence="41"/>
+
+    <menuitem id="menu_amazon_fba_label_log"
+              name="Etichette FBA stampate"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_fba_label_log"
+              sequence="42"/>
+
+    <!-- Agente di stampa ZPL (Windows) — vedi
+         progetto-odoo-amazon-fba-etichettatura.md §6/§8. Solo la coda/
+         configurazione lato Odoo per ora; l'agente vero gira sul PC del
+         magazzino e non è ancora scritto (vedi TASK.md). -->
+    <menuitem id="menu_amazon_print_station"
+              name="Postazioni agente di stampa"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_print_station"
+              sequence="43"/>
+
+    <menuitem id="menu_amazon_print_job"
+              name="Lavori di stampa ZPL"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_print_job"
+              sequence="44"/>
+
+    <!-- Spedizioni inbound FBA (Fulfillment Inbound API v2024-03-20) — vedi
+         progetto-odoo-amazon-fba-etichettatura.md §10 Priorità 3 e
+         RICERCA_fulfillment_inbound_api_sandbox_2026-10-29.md per il confine
+         di sicurezza (confirmPlacementOption è irreversibile). -->
+    <menuitem id="menu_amazon_inbound_plan"
+              name="Piani inbound FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_inbound_plan"
+              sequence="45"/>
+</odoo>

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- List view -->
+    <record id="view_amazon_sync_log_list" model="ir.ui.view">
+        <field name="name">ke.amazon.sync.log.list</field>
+        <field name="model">ke.amazon.sync.log</field>
+        <field name="arch" type="xml">
+            <list string="Log sincronizzazione Amazon"
+                  decoration-danger="state == 'error'"
+                  decoration-success="state == 'done'" decoration-info="state == 'running'">
+                <field name="create_date" string="Data"/>
+                <field name="name"/>
+                <field name="sync_type"/>
+                <field name="state"/>
+                <field name="products_total"/>
+                <field name="products_created" string="Creati / Solo Amazon"/>
+                <field name="products_updated" string="Aggiornati"/>
+                <field name="products_skipped" string="Saltati / Solo Odoo"/>
+                <field name="products_error"/>
+                <field name="duration" string="Durata (s)"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Form view -->
+    <record id="view_amazon_sync_log_form" model="ir.ui.view">
+        <field name="name">ke.amazon.sync.log.form</field>
+        <field name="model">ke.amazon.sync.log</field>
+        <field name="arch" type="xml">
+            <form string="Log Amazon Sync" js_class="amazon_sync_log_form">
+                <header>
+                    <button name="action_refresh"
+                            string="Aggiorna"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state != 'running'"/>
+                    <button name="action_stop_import"
+                            string="Ferma import"
+                            type="object"
+                            class="btn-danger"
+                            invisible="state != 'running' or sync_type != 'full_import'"
+                            confirm="Vuoi fermare l'import? I prodotti già importati verranno mantenuti."/>
+                    <button name="action_mark_done"
+                            string="Ferma e segna terminato"
+                            type="object"
+                            class="btn-danger"
+                            invisible="state != 'running' or sync_type == 'full_import'"
+                            confirm="Ferma il processo e segna questo log come terminato."/>
+                    <button name="action_export_csv"
+                            string="Esporta CSV"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="sync_type not in ('reconcile', 'full_import') or state == 'running'"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="running,done,error"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name" readonly="1"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="sync_type"/>
+                            <field name="parent_log_id" invisible="not parent_log_id"/>
+                            <field name="start_date"/>
+                            <field name="end_date"/>
+                            <field name="duration" string="Durata (s)"/>
+                        </group>
+                        <!-- Contatori per import / check / price_qty / download_images -->
+                        <group invisible="sync_type == 'reconcile'">
+                            <field name="products_total" string="Prodotti processati"/>
+                            <field name="products_created" string="Creati"/>
+                            <field name="products_updated" string="Aggiornati"/>
+                            <field name="products_skipped" string="Saltati"/>
+                            <field name="products_error" string="Errori"/>
+                        </group>
+                        <!-- Contatori specifici per la riconciliazione -->
+                        <group invisible="sync_type != 'reconcile'">
+                            <field name="products_total" string="SKU Odoo processati"/>
+                            <field name="products_created" string="Solo su Amazon (non importati)"/>
+                            <field name="products_updated" string="Aggiornati (prezzi + SKU riforniti)"/>
+                            <field name="products_skipped" string="Solo in Odoo (non su Amazon)"/>
+                            <field name="products_error" string="Errori"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Log dettagliato">
+                            <field name="log_lines" widget="text" readonly="1"/>
+                        </page>
+                        <page string="Errori" invisible="not error_summary">
+                            <field name="error_summary" widget="text" readonly="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Action -->
+    <record id="action_amazon_sync_log" model="ir.actions.act_window">
+        <field name="name">Log Sincronizzazione Amazon</field>
+        <field name="res_model">ke.amazon.sync.log</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

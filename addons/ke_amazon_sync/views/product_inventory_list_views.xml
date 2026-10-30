@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_product_template_inventory_list" model="ir.ui.view">
+        <field name="name">product.template.inventory.list</field>
+        <field name="model">product.template</field>
+        <field name="arch" type="xml">
+            <list string="Inventario Amazon" create="0" default_order="name">
+                <field name="image_128" widget="image" class="oe_avatar" nolabel="1" string="Immagine"/>
+                <field name="name" string="Nome"/>
+                <field name="x_amazon_sku" string="SKU"/>
+                <field name="x_amazon_asin" string="ASIN"/>
+                <field name="x_amazon_sales_30d" string="Vendite (30gg)" sum="Totale"/>
+                <field name="x_amazon_stock_fba" string="Giacenza FBA" sum="Totale"/>
+                <field name="x_amazon_stock_fbm" string="Giacenza FBM" sum="Totale"/>
+                <field name="x_amazon_stock_generale" string="Giacenza Generale" sum="Totale"/>
+                <field name="x_amazon_qty" string="Quantità dichiarata su Amazon" sum="Totale"
+                       optional="show"/>
+                <field name="x_amazon_qty_diff" string="Differenza (Amazon - Odoo, solo FBM)"
+                       optional="show"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_product_template_inventory_search" model="ir.ui.view">
+        <field name="name">product.template.inventory.search</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <filter string="Con SKU Amazon" name="has_amazon_sku" domain="[('x_amazon_sku', '!=', False)]"/>
+                <filter string="Fulfillment Amazon" name="groupby_amazon_fulfillment_inv"
+                        context="{'group_by': 'x_amazon_fulfillment'}"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="action_product_inventory_list" model="ir.actions.act_window">
+        <field name="name">Vista Inventario</field>
+        <field name="res_model">product.template</field>
+        <field name="view_mode">list</field>
+        <field name="view_id" ref="view_product_template_inventory_list"/>
+        <field name="search_view_id" ref="view_product_template_inventory_search"/>
+        <field name="context">{'search_default_has_amazon_sku': 1}</field>
+    </record>
+</odoo>

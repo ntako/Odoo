@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- noupdate="1": creati solo alla prima installazione. L'utente potrà attivare/
+         disattivare marketplace dall'interfaccia, un aggiornamento del modulo non
+         deve sovrascrivere quella scelta. Nessuno attivo di default (nemmeno IT):
+         niente da "indovinare" quando esiste un modo per chiederlo direttamente ad
+         Amazon — vedi azione "Rileva marketplace attivi", va eseguita almeno una
+         volta prima di qualunque sync (import ordini incluso). -->
+    <data noupdate="1">
+    <record id="amazon_marketplace_it" model="ke.amazon.marketplace">
+        <field name="name">Italia</field>
+        <field name="code">IT</field>
+        <field name="marketplace_id">APJ6JRA9NG5V4</field>
+        <field name="currency_id" ref="base.EUR"/>
+        <field name="active">False</field>
+        <field name="sequence">10</field>
+    </record>
+    <record id="amazon_marketplace_de" model="ke.amazon.marketplace">
+        <field name="name">Germania</field>
+        <field name="code">DE</field>
+        <field name="marketplace_id">A1PA6795UKMFR9</field>
+        <field name="currency_id" ref="base.EUR"/>
+        <field name="active">False</field>
+        <field name="sequence">20</field>
+    </record>
+    <record id="amazon_marketplace_es" model="ke.amazon.marketplace">
+        <field name="name">Spagna</field>
+        <field name="code">ES</field>
+        <field name="marketplace_id">A1RKKUPIHCS9HS</field>
+        <field name="currency_id" ref="base.EUR"/>
+        <field name="active">False</field>
+        <field name="sequence">30</field>
+    </record>
+    <record id="amazon_marketplace_fr" model="ke.amazon.marketplace">
+        <field name="name">Francia</field>
+        <field name="code">FR</field>
+        <field name="marketplace_id">A13V1IB3VIYZZH</field>
+        <field name="currency_id" ref="base.EUR"/>
+        <field name="active">False</field>
+        <field name="sequence">40</field>
+    </record>
+    <record id="amazon_marketplace_uk" model="ke.amazon.marketplace">
+        <field name="name">Regno Unito</field>
+        <field name="code">UK</field>
+        <field name="marketplace_id">A1F83G8C2ARO7P</field>
+        <field name="currency_id" ref="base.GBP"/>
+        <field name="active">False</field>
+        <field name="sequence">50</field>
+    </record>
+    <record id="amazon_marketplace_us" model="ke.amazon.marketplace">
+        <field name="name">Stati Uniti</field>
+        <field name="code">US</field>
+        <field name="marketplace_id">ATVPDKIKX0DER</field>
+        <field name="currency_id" ref="base.USD"/>
+        <field name="active">False</field>
+        <field name="sequence">60</field>
+    </record>
+    </data>
+</odoo>

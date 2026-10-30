@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Collo: form proprio (bottoni di scansione/chiusura), apribile cliccando
+         una riga nella lista colli del piano (comportamento di default di Odoo
+         per un one2many non editabile con una form view disponibile). -->
+    <record id="view_amazon_inbound_plan_box_form" model="ir.ui.view">
+        <field name="name">ke.amazon.inbound.plan.box.form</field>
+        <field name="model">ke.amazon.inbound.plan.box</field>
+        <field name="arch" type="xml">
+            <form string="Collo">
+                <header>
+                    <button name="action_scan_items" string="Scansiona articoli" type="object"
+                            class="btn-primary" invisible="state != 'open'"/>
+                    <button name="action_close_box" string="Chiudi collo" type="object"
+                            class="btn-primary" invisible="state != 'open'"/>
+                    <button name="action_reopen_box" string="Riapri collo" type="object"
+                            class="btn-secondary" invisible="state != 'closed'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="sequence"/>
+                    </group>
+                    <group string="Dimensioni e peso">
+                        <field name="length_cm"/>
+                        <field name="width_cm"/>
+                        <field name="height_cm"/>
+                        <field name="weight_kg"/>
+                    </group>
+                    <field name="line_ids" readonly="state != 'open'">
+                        <list editable="bottom">
+                            <field name="product_id"/>
+                            <field name="quantity"/>
+                        </list>
+                    </field>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_amazon_inbound_plan_box_list" model="ir.ui.view">
+        <field name="name">ke.amazon.inbound.plan.box.list</field>
+        <field name="model">ke.amazon.inbound.plan.box</field>
+        <field name="arch" type="xml">
+            <list string="Colli">
+                <field name="sequence" widget="handle"/>
+                <field name="name"/>
+                <field name="state" widget="badge" decoration-success="state == 'closed'"/>
+                <field name="length_cm"/>
+                <field name="width_cm"/>
+                <field name="height_cm"/>
+                <field name="weight_kg"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_inbound_plan_shipment_list" model="ir.ui.view">
+        <field name="name">ke.amazon.inbound.plan.shipment.list</field>
+        <field name="model">ke.amazon.inbound.plan.shipment</field>
+        <field name="arch" type="xml">
+            <list string="Spedizioni" create="0" delete="0">
+                <field name="amazon_shipment_id"/>
+                <field name="shipment_confirmation_id"/>
+                <field name="destination_fc_name"/>
+                <field name="transportation_option_id"/>
+                <field name="delivery_window_option_id"/>
+                <field name="tracking_number"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_inbound_plan_form" model="ir.ui.view">
+        <field name="name">ke.amazon.inbound.plan.form</field>
+        <field name="model">ke.amazon.inbound.plan</field>
+        <field name="arch" type="xml">
+            <form string="Piano inbound FBA">
+                <header>
+                    <button name="action_create_plan" string="Crea piano" type="object"
+                            class="btn-primary" invisible="state != 'draft'"/>
+                    <button name="action_generate_packing_options" string="Genera opzioni imballaggio"
+                            type="object" class="btn-primary" invisible="state != 'plan_created' or packing_option_id"/>
+                    <button name="action_confirm_packing_option" string="Conferma imballaggio"
+                            type="object" class="btn-primary" invisible="state != 'plan_created' or not packing_option_id"/>
+                    <button name="action_set_packing_information" string="Invia contenuto colli"
+                            type="object" class="btn-primary" invisible="state != 'packing_confirmed'"/>
+                    <button name="action_generate_placement_options" string="Genera opzioni collocazione"
+                            type="object" class="btn-primary" invisible="state != 'packing_confirmed'"/>
+                    <button name="action_confirm_placement_option" string="Conferma collocazione (IRREVERSIBILE)"
+                            type="object" class="btn-danger" invisible="state != 'placement_options_ready'"
+                            confirm="Confermare la collocazione è IRREVERSIBILE lato Amazon: non si può più annullare o cambiare dopo questo punto. Procedere solo con una spedizione reale pronta a partire."/>
+                    <button name="action_generate_delivery_window_options" string="Genera finestre di consegna"
+                            type="object" class="btn-primary" invisible="state != 'placement_confirmed'"/>
+                    <button name="action_confirm_delivery_window_options" string="Conferma finestre di consegna"
+                            type="object" class="btn-primary" invisible="state != 'delivery_window_options_ready'"/>
+                    <button name="action_generate_transportation_options" string="Genera opzioni trasporto"
+                            type="object" class="btn-primary" invisible="state != 'delivery_window_confirmed'"/>
+                    <button name="action_confirm_transportation_options" string="Conferma trasporto"
+                            type="object" class="btn-primary" invisible="state != 'transport_options_ready'"
+                            confirm="Confermare il trasporto impegna il corriere e il relativo costo. Procedere?"/>
+                    <button name="action_get_labels" string="Scarica etichette collo"
+                            type="object" class="btn-primary" invisible="state != 'transport_confirmed'"/>
+                    <button name="action_mark_shipped" string="Segna come spedito"
+                            type="object" class="btn-primary" invisible="state != 'labels_ready'"/>
+                    <button name="action_cancel_plan" string="Annulla piano"
+                            type="object" class="btn-secondary"
+                            invisible="state in ('shipped', 'done', 'cancelled', 'error')"
+                            confirm="Annullare il piano? Prima della conferma del trasporto l'annullamento non è garantito a costo zero dalla documentazione Amazon."/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-danger" role="alert" invisible="not error_message">
+                        <field name="error_message" readonly="1" nolabel="1"/>
+                    </div>
+                    <div class="alert alert-warning" role="alert" invisible="state != 'placement_confirmed' or confirmed_date == False">
+                        Collocazione confermata il <field name="confirmed_date" readonly="1" nolabel="1"/>
+                        da <field name="confirmed_by" readonly="1" nolabel="1"/> — irreversibile.
+                    </div>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="picking_id" readonly="state != 'draft'"/>
+                            <field name="marketplace_id" readonly="state != 'draft'"/>
+                            <field name="amazon_inbound_plan_id"/>
+                        </group>
+                        <group>
+                            <field name="source_name"/>
+                            <field name="source_address_line1"/>
+                            <field name="source_city"/>
+                            <field name="source_state_code"/>
+                            <field name="source_postal_code"/>
+                            <field name="source_country_code"/>
+                            <field name="source_email"/>
+                            <field name="source_phone"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Colli">
+                            <field name="box_ids" readonly="state not in ('draft', 'plan_created')">
+                                <list>
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="name"/>
+                                    <field name="state" widget="badge" decoration-success="state == 'closed'"/>
+                                    <field name="length_cm"/>
+                                    <field name="width_cm"/>
+                                    <field name="height_cm"/>
+                                    <field name="weight_kg"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Spedizioni">
+                            <field name="shipment_ids" readonly="1">
+                                <list>
+                                    <field name="amazon_shipment_id"/>
+                                    <field name="shipment_confirmation_id"/>
+                                    <field name="destination_fc_name"/>
+                                    <field name="transportation_option_id"/>
+                                    <field name="delivery_window_option_id"/>
+                                    <field name="tracking_number"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Opzioni Amazon (grezzo)">
+                            <field name="last_options_raw" readonly="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_amazon_inbound_plan_list" model="ir.ui.view">
+        <field name="name">ke.amazon.inbound.plan.list</field>
+        <field name="model">ke.amazon.inbound.plan</field>
+        <field name="arch" type="xml">
+            <list string="Piani inbound FBA" default_order="id desc">
+                <field name="name"/>
+                <field name="picking_id"/>
+                <field name="marketplace_id"/>
+                <field name="state" widget="badge"
+                       decoration-success="state in ('shipped', 'done')"
+                       decoration-danger="state == 'error'"
+                       decoration-warning="state == 'placement_confirmed'"/>
+                <field name="create_date" string="Creato"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_amazon_inbound_plan" model="ir.actions.act_window">
+        <field name="name">Piani inbound FBA</field>
+        <field name="res_model">ke.amazon.inbound.plan</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

@@ -1,0 +1,39 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_ke_amazon_sync_log_user,ke.amazon.sync.log user,model_ke_amazon_sync_log,stock.group_stock_user,1,0,0,0
+access_ke_amazon_sync_log_manager,ke.amazon.sync.log manager,model_ke_amazon_sync_log,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_full_import,ke.amazon.full.import,model_ke_amazon_full_import,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_product_type_wizard,ke.amazon.product.type.wizard,model_ke_amazon_product_type_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_product_type_result,ke.amazon.product.type.result,model_ke_amazon_product_type_result,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_browse_node_wizard,ke.amazon.browse.node.wizard,model_ke_amazon_browse_node_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_browse_node_result,ke.amazon.browse.node.result,model_ke_amazon_browse_node_result,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_ship_wizard,ke.amazon.ship.wizard,model_ke_amazon_ship_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_ship_wizard_line,ke.amazon.ship.wizard.line,model_ke_amazon_ship_wizard_line,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_receive_wizard,ke.amazon.receive.wizard,model_ke_amazon_receive_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_receive_wizard_line,ke.amazon.receive.wizard.line,model_ke_amazon_receive_wizard_line,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_allocate_fbm_wizard,ke.amazon.allocate.fbm.wizard,model_ke_amazon_allocate_fbm_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_allocate_fbm_wizard_line,ke.amazon.allocate.fbm.wizard.line,model_ke_amazon_allocate_fbm_wizard_line,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_move_to_general_wizard,ke.amazon.move.to.general.wizard,model_ke_amazon_move_to_general_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_marketplace_user,ke.amazon.marketplace user,model_ke_amazon_marketplace,stock.group_stock_user,1,0,0,0
+access_ke_amazon_marketplace_manager,ke.amazon.marketplace manager,model_ke_amazon_marketplace,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_listing_user,ke.amazon.listing user,model_ke_amazon_listing,stock.group_stock_user,1,0,0,0
+access_ke_amazon_listing_manager,ke.amazon.listing manager,model_ke_amazon_listing,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_report_user,ke.amazon.report user,model_ke_amazon_report,stock.group_stock_user,1,0,0,0
+access_ke_amazon_report_manager,ke.amazon.report manager,model_ke_amazon_report,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_report_request_wizard,ke.amazon.report.request.wizard,model_ke_amazon_report_request_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_fba_prep_wizard,ke.amazon.fba.prep.wizard,model_ke_amazon_fba_prep_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_fba_standalone_label_wizard,ke.amazon.fba.standalone.label.wizard,model_ke_amazon_fba_standalone_label_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_print_station,ke.amazon.print.station,model_ke_amazon_print_station,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_print_station_show_key_wizard,ke.amazon.print.station.show.key,model_ke_amazon_print_station_show_key,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_print_job_user,ke.amazon.print.job user,model_ke_amazon_print_job,stock.group_stock_user,1,0,0,0
+access_ke_amazon_print_job_manager,ke.amazon.print.job manager,model_ke_amazon_print_job,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_fba_label_log_user,ke.amazon.fba.label.log user,model_ke_amazon_fba_label_log,stock.group_stock_user,1,0,0,0
+access_ke_amazon_fba_label_log_manager,ke.amazon.fba.label.log manager,model_ke_amazon_fba_label_log,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_user,ke.amazon.inbound.plan user,model_ke_amazon_inbound_plan,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_manager,ke.amazon.inbound.plan manager,model_ke_amazon_inbound_plan,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_box_user,ke.amazon.inbound.plan.box user,model_ke_amazon_inbound_plan_box,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_box_manager,ke.amazon.inbound.plan.box manager,model_ke_amazon_inbound_plan_box,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_box_line_user,ke.amazon.inbound.plan.box.line user,model_ke_amazon_inbound_plan_box_line,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_box_line_manager,ke.amazon.inbound.plan.box.line manager,model_ke_amazon_inbound_plan_box_line,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_shipment_user,ke.amazon.inbound.plan.shipment user,model_ke_amazon_inbound_plan_shipment,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_shipment_manager,ke.amazon.inbound.plan.shipment manager,model_ke_amazon_inbound_plan_shipment,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_box_scan_wizard,ke.amazon.inbound.box.scan.wizard,model_ke_amazon_inbound_box_scan_wizard,stock.group_stock_manager,1,1,1,1

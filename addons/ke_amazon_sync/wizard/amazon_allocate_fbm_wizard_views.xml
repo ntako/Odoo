@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_allocate_fbm_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.allocate.fbm.wizard.form</field>
+        <field name="model">ke.amazon.allocate.fbm.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Alloca giacenza per Amazon FBM">
+                <group>
+                    <field name="source_warehouse_id"/>
+                </group>
+                <field name="line_ids">
+                    <list editable="bottom">
+                        <field name="product_id"/>
+                        <field name="quantity"/>
+                    </list>
+                </field>
+                <footer>
+                    <button name="action_confirm"
+                            string="Conferma allocazione"
+                            type="object"
+                            class="btn btn-primary"/>
+                    <button string="Annulla" class="btn btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_allocate_fbm_wizard" model="ir.actions.act_window">
+        <field name="name">Alloca giacenza per Amazon FBM</field>
+        <field name="res_model">ke.amazon.allocate.fbm.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

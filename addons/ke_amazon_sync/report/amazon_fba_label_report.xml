@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Formato carta piccolo per etichette FNSKU: stampa dal browser via
+         driver Windows della Zebra (nessun agente/coda ZPL in questa fase,
+         vedi progetto-odoo-amazon-fba-etichettatura.md). Dimensioni indicative
+         50x25mm dal documento di progetto — da regolare quando si conosce la
+         dimensione esatta del rotolo montato sulla stampante. -->
+    <record id="paperformat_amazon_fba_label" model="report.paperformat">
+        <field name="name">Etichetta FNSKU Amazon (50x25mm)</field>
+        <field name="default" eval="False"/>
+        <field name="format">custom</field>
+        <field name="page_height">25</field>
+        <field name="page_width">50</field>
+        <!-- 'Portrait', non 'Landscape': page_width/page_height sopra già
+             descrivono la forma larga e bassa voluta (50x25mm). wkhtmltopdf
+             applica l'opzione di orientamento IN PIÙ rispetto alle dimensioni
+             pagina già date, ruotandole invece di usarle così come sono —
+             con 'Landscape' qui il risultato reale era un'etichetta alta e
+             stretta 25x50mm (verificato dal vivo via pdfinfo sul PDF
+             generato: "25 x 50mm", non "50 x 25mm"), con tutto il contenuto
+             tagliato per lo spazio insufficiente. 'Portrait' lascia
+             page_width/page_height come sono, nessuna rotazione aggiuntiva. -->
+        <field name="orientation">Portrait</field>
+        <field name="margin_top">1</field>
+        <field name="margin_bottom">1</field>
+        <field name="margin_left">1</field>
+        <field name="margin_right">1</field>
+        <field name="header_line" eval="False"/>
+        <field name="header_spacing">0</field>
+        <!-- dpi=0 (NON assente dalla definizione): era 203 (il valore reale
+             della testina Zebra), impostarlo faceva rendere wkhtmltopdf il
+             contenuto CSS molto più piccolo della pagina fisica, lasciando
+             gran parte dell'etichetta vuota — verificato dal vivo generando
+             lo stesso PDF con/senza questo campo e confrontando il risultato
+             (pdftoppm) pixel per pixel: con dpi=203 il contenuto riempiva
+             solo ~35% di ogni lato, con dpi=0 quasi tutta la pagina.
+             Segnalato dall'utente il 2026-10-29 ("contenuto non esteso per
+             tutta la pagina"). Va scritto esplicitamente a 0, non solo tolto
+             dalla definizione: un -u su un record XML già esistente aggiorna
+             solo i campi PRESENTI nel file, un campo assente lascia il
+             valore vecchio già salvato in DB invariato (verificato dal vivo:
+             la prima versione di questo fix toglieva solo la riga, il
+             record restava a 203 anche dopo -u). Questo campo serve alla
+             RASTERIZZAZIONE del PDF (che qui va bene al valore di default),
+             non alla risoluzione reale di stampa: la stampa oggi passa dal
+             PDF via browser/driver Windows, non da un percorso ZPL raster
+             diretto (quello userebbe services/zpl_builder.py, un codice
+             completamente separato). -->
+        <field name="dpi">0</field>
+    </record>
+
+    <template id="report_amazon_fba_label_document">&lt;!DOCTYPE html&gt;
+        <!-- Documento HTML scritto a mano, NON tramite t-call="web.html_container":
+             quel layout include sempre (t-call-assets="web.report_assets_common")
+             un foglio di stile e uno script esterni via URL relativa — wkhtmltopdf
+             deve farsi una richiesta HTTP verso se stesso per risolverla (via
+             web.base.url/report.url). Trovato dal vivo: quando quella richiesta
+             fallisce (qui, perché web.base.url punta al dominio pubblico
+             gest.arundoitalia.com, irraggiungibile dal processo wkhtmltopdf
+             locale), il resto del testo della pagina viene corrotto in modo
+             riproducibile ("Sbirulino®" → "SbirulinoÂ®", UTF-8 reinterpretato
+             come Latin-1) — bug di questa build patchata di wkhtmltopdf quando
+             un fetch di rete fallisce a metà rendering, non dei nostri dati (il
+             valore in DB è corretto, verificato via query diretta). L'etichetta
+             non usa comunque nessuna classe Bootstrap né JavaScript: l'unica
+             cosa che serve da quel layout è il tag <main> richiesto da
+             ir.actions.report._prepare_html (root.xpath('//main')) per trovare
+             il contenuto — lo forniamo qui direttamente, senza alcuna richiesta
+             di rete, corretto a prescindere da come web.base.url/report.url
+             sono configurati in qualunque ambiente. -->
+        <html>
+            <head>
+                <meta charset="utf-8"/>
+            </head>
+            <body>
+                <main>
+                    <t t-foreach="docs" t-as="o">
+                        <!-- page-break-after solo se non è l'ultima: senza
+                             questa condizione, più 'doc' (più copie richieste)
+                             o producevano tutte sulla stessa pagina (nessun
+                             page-break-after: verificato dal vivo via pdfinfo,
+                             3 etichette → "Pages: 1") o, mettendolo sempre,
+                             un'ultima pagina vuota di troppo in coda (verificato:
+                             3 etichette → "Pages: 4") — uno spreco di
+                             un'etichetta fisica a ogni stampa su rotolo. -->
+                        <div t-attf-style="width:50mm;height:25mm;padding:1mm;box-sizing:border-box;font-family:Arial,sans-serif;overflow:hidden;page-break-inside:avoid;#{'page-break-after:always;' if not o_last else ''}">
+                            <div style="text-align:center;line-height:0;">
+                                <!-- Data URI generata in Python
+                                     (o._get_barcode_data_uri, vedi
+                                     amazon_fba_label_log.py), nessuna richiesta
+                                     di rete per il barcode stesso. Larghezza
+                                     FISSA (non max-width): con solo max-width,
+                                     wkhtmltopdf non scalava l'immagine fino al
+                                     vincolo come atteso, rendendola molto più
+                                     piccola della pagina (verificato dal vivo
+                                     via pdftoppm — segnalato dall'utente il
+                                     2026-10-29, "contenuto non esteso per
+                                     tutta la pagina"). Una larghezza fissa
+                                     forza sempre la stessa scala, indipendente
+                                     da quella resa non lineare. -->
+                                <img t-att-src="o._get_barcode_data_uri()" style="width:48mm;"/>
+                            </div>
+                            <div style="text-align:center;font-size:22px;font-weight:bold;letter-spacing:0.5px;line-height:1.25;margin-top:1mm;">
+                                <span t-esc="o.fnsku"/>
+                            </div>
+                            <!-- Una sola riga, troncata con ellissi se troppo
+                                 lunga (non più a capo su più righe): richiesto
+                                 dall'utente il 2026-10-29, a favore di più
+                                 spazio per il barcode. -->
+                            <div style="text-align:center;font-size:12px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                                <span t-esc="o.product_id.default_code or o.product_id.display_name"/>
+                                <t t-if="o.product_id.default_code"> | <span t-esc="o.product_id.name"/></t>
+                            </div>
+                        </div>
+                    </t>
+                </main>
+            </body>
+        </html>
+    </template>
+
+    <record id="action_report_amazon_fba_label" model="ir.actions.report">
+        <field name="name">Etichetta FNSKU Amazon</field>
+        <field name="model">ke.amazon.fba.label.log</field>
+        <field name="report_type">qweb-pdf</field>
+        <field name="report_name">ke_amazon_sync.report_amazon_fba_label_document</field>
+        <field name="report_file">amazon_fba_label</field>
+        <field name="paperformat_id" ref="paperformat_amazon_fba_label"/>
+        <field name="print_report_name">'Etichetta FNSKU - %s' % (object.fnsku)</field>
+    </record>
+</odoo>

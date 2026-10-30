@@ -15,10 +15,27 @@ venv/
 env/
 
 # IDE
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDEs
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
@@ -32,3 +49,23 @@ filestore/
 # Secrets
 .env
 .env.local
+sessions/
+import_amazon_*
+
+# Credenziali reali (mai in git)
+ke_amazon_sync/_D_REFRESH_TOKEN.py
+
+resoconto.*
+
+# Script di test manuali contro l'account Amazon reale (via SpApiClient/
+# credenziali Odoo) e i dump di risposta che producono — mai in git, stesso
+# principio delle credenziali sopra: anche se gli script stessi non
+# contengono segreti hardcoded, le risposte salvate potrebbero.
+AMZ_TESTS/
+
+AGENTS.md
+CLAUDE.md
+TASK.md
+progetto-odoo-amazon-fba-etichettatura.md
+REVIEW_AMAZON.md
+full_export.xlsx

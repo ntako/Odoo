@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Funzione 1 (RIMOSSA): il full import ora gira su thread di background
+         continuo (_thread_full_import in amazon_sync_log.py), non più su
+         questo cron a tick — vedi progetto-sync-thread-invece-di-cron.md.
+         <delete> invece di togliere semplicemente il <record>: senza,
+         un'installazione già aggiornata terrebbe il record ir.cron orfano
+         nel DB (punterebbe a _cron_full_import_chunk, che non esiste più). -->
+    <delete id="cron_full_import_chunk" model="ir.cron"/>
+
+    <!-- Funzione 2: Controllo nuovi prodotti ogni N ore -->
+    <record id="cron_check_new_products" model="ir.cron">
+        <field name="name">Amazon Sync: Controllo nuovi prodotti</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_check_new_products()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 3: Sync prezzi e quantità ogni N minuti -->
+    <record id="cron_sync_prices_quantities" model="ir.cron">
+        <field name="name">Amazon Sync: Prezzi e Quantità</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_sync_prices_quantities()</field>
+        <field name="interval_number">60</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 4: Riconciliazione store ogni N ore (avvia il processo — solo
+         l'avvio resta a cron periodico, l'elaborazione vera e propria gira su
+         thread di background, vedi _thread_reconcile in amazon_sync_log.py) -->
+    <record id="cron_reconcile_store" model="ir.cron">
+        <field name="name">Amazon Sync: Riconciliazione Store</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log'].action_start_reconcile()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 5: Applica mapping categorie sito (attivato manualmente) -->
+    <record id="cron_apply_category_mapping" model="ir.cron">
+        <field name="name">Amazon Sync: Mapping Categorie Sito</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_apply_category_mapping()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 6 (RIMOSSA): l'elaborazione import ordini ora gira su thread
+         di background continuo (_thread_import_orders in amazon_sync_log.py),
+         non più su questo cron a tick — stesso motivo di cron_full_import_chunk
+         sopra, vedi anche progetto-sync-ordini-report.md. -->
+    <delete id="cron_import_orders_chunk" model="ir.cron"/>
+
+    <!-- Funzione 6b: Avvio automatico periodico import ordini -->
+    <record id="cron_import_orders_store" model="ir.cron">
+        <field name="name">Amazon Sync: Import Ordini (automatico)</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_import_orders_store()</field>
+        <field name="interval_number">60</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 7: Avvio automatico periodico sync giacenze FBA -->
+    <record id="cron_sync_fba_quantities" model="ir.cron">
+        <field name="name">Amazon Sync: Giacenze FBA</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_sync_fba_quantities_store()</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 4b (RIMOSSA): l'elaborazione riconciliazione ora gira su
+         thread di background continuo (_thread_reconcile in
+         amazon_sync_log.py), non più su questo cron a tick — stesso motivo
+         di cron_full_import_chunk sopra. <delete> invece di togliere
+         semplicemente il <record>, per non lasciare un record ir.cron
+         orfano su un'installazione già aggiornata. -->
+    <delete id="cron_reconcile_chunk" model="ir.cron"/>
+
+    <!-- Funzione 8 (RIMOSSA): l'elaborazione resi ora gira su thread di
+         background continuo (_thread_returns in amazon_sync_log.py), non più
+         su questo cron a tick — stesso motivo di cron_full_import_chunk sopra. -->
+    <delete id="cron_returns_chunk" model="ir.cron"/>
+
+    <!-- Funzione 8b: Avvio automatico periodico download immagini mancanti -->
+    <record id="cron_download_images_store" model="ir.cron">
+        <field name="name">Amazon Sync: Download Immagini Mancanti</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_download_images_store()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 8c: Avvio automatico periodico import FNSKU. Intervallo allineato
+         a cron_reconcile_store: è la riconciliazione a riassegnare lo SKU (quindi
+         a invalidare l'FNSKU) al rifornimento, ha senso ririfare l'import subito dopo. -->
+    <record id="cron_fnsku_import_store" model="ir.cron">
+        <field name="name">Amazon Sync: Import FNSKU</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_fnsku_import_store()</field>
+        <field name="interval_number">24</field>
+        <field name="interval_type">hours</field>
+        <field name="active">False</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 8d (RIMOSSA): l'elaborazione import FNSKU ora gira su thread
+         di background continuo (_thread_fnsku_import in amazon_sync_log.py),
+         non più su questo cron a tick — stesso motivo di cron_full_import_chunk
+         sopra. -->
+    <delete id="cron_fnsku_import_chunk" model="ir.cron"/>
+
+    <!-- Funzione 9: Aggiorna le colonne (memorizzate) della Vista Inventario:
+         giacenza per magazzino e vendite 30gg, non hanno un trigger @api.depends
+         affidabile (dati esterni/tempo che scorre), vanno ricalcolate a intervalli. -->
+    <record id="cron_refresh_inventory_view_stats" model="ir.cron">
+        <field name="name">Amazon Sync: Aggiorna Vista Inventario</field>
+        <field name="model_id" ref="product.model_product_template"/>
+        <field name="state">code</field>
+        <field name="code">env['product.template']._cron_refresh_inventory_view_stats()</field>
+        <field name="interval_number">4</field>
+        <field name="interval_type">hours</field>
+        <field name="active">True</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+
+    <!-- Funzione 10: watchdog di igiene — log rimasti 'running' senza
+         aggiornamenti da troppo tempo (thread interrotto da un riavvio, cron
+         bloccato, ecc.). Non chiama mai Amazon, sicuro attivo di default. -->
+    <record id="cron_sync_log_watchdog" model="ir.cron">
+        <field name="name">Amazon Sync: Watchdog log bloccati</field>
+        <field name="model_id" ref="ke_amazon_sync.model_ke_amazon_sync_log"/>
+        <field name="state">code</field>
+        <field name="code">env['ke.amazon.sync.log']._cron_watchdog_stale_syncs()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">hours</field>
+        <field name="active">True</field>
+        <field name="user_id" ref="base.user_root"/>
+    </record>
+</odoo>

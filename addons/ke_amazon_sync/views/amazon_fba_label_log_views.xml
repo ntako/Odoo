@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_fba_label_log_list" model="ir.ui.view">
+        <field name="name">ke.amazon.fba.label.log.list</field>
+        <field name="model">ke.amazon.fba.label.log</field>
+        <field name="arch" type="xml">
+            <list string="Etichette FNSKU stampate" default_order="create_date desc" create="0" edit="0">
+                <field name="create_date" string="Data/ora"/>
+                <field name="picking_id"/>
+                <field name="product_id"/>
+                <field name="fnsku"/>
+                <field name="user_id"/>
+                <field name="is_reprint" widget="boolean_toggle"/>
+                <field name="is_own_brand_no_label" string="Marchio proprio" widget="boolean_toggle"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_fba_label_log_search" model="ir.ui.view">
+        <field name="name">ke.amazon.fba.label.log.search</field>
+        <field name="model">ke.amazon.fba.label.log</field>
+        <field name="arch" type="xml">
+            <search string="Etichette FNSKU stampate">
+                <field name="picking_id"/>
+                <field name="product_id"/>
+                <field name="fnsku"/>
+                <field name="user_id"/>
+                <filter string="Solo ristampe" name="filter_reprint" domain="[('is_reprint', '=', True)]"/>
+                <filter string="Solo marchio proprio (nessuna etichetta)" name="filter_own_brand"
+                        domain="[('is_own_brand_no_label', '=', True)]"/>
+                <separator/>
+                <filter string="Spedizione" name="groupby_picking" context="{'group_by': 'picking_id'}"/>
+                <filter string="Prodotto" name="groupby_product" context="{'group_by': 'product_id'}"/>
+                <filter string="Operatore" name="groupby_user" context="{'group_by': 'user_id'}"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_amazon_fba_label_log" model="ir.actions.act_window">
+        <field name="name">Etichette FBA stampate</field>
+        <field name="res_model">ke.amazon.fba.label.log</field>
+        <field name="view_mode">list</field>
+        <field name="search_view_id" ref="view_amazon_fba_label_log_search"/>
+    </record>
+</odoo>

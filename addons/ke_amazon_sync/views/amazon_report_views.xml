@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_report_list" model="ir.ui.view">
+        <field name="name">ke.amazon.report.list</field>
+        <field name="model">ke.amazon.report</field>
+        <field name="arch" type="xml">
+            <list string="Report Amazon" create="false">
+                <field name="marketplace_id"/>
+                <field name="state" widget="badge"
+                       decoration-success="state == 'downloaded'"
+                       decoration-danger="state == 'error'"
+                       decoration-info="state in ('requested', 'ready')"/>
+                <field name="request_date"/>
+                <field name="download_date" optional="show"/>
+                <field name="row_count"/>
+                <field name="selected_for_import" widget="boolean_toggle"
+                       string="Usa nel prossimo Full Import"/>
+                <button name="action_download" type="object" string="Scarica"
+                        icon="fa-download" invisible="state != 'downloaded'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_report_search" model="ir.ui.view">
+        <field name="name">ke.amazon.report.search</field>
+        <field name="model">ke.amazon.report</field>
+        <field name="arch" type="xml">
+            <search string="Report Amazon">
+                <field name="marketplace_id"/>
+                <filter string="Scaricati" name="filter_downloaded" domain="[('state', '=', 'downloaded')]"/>
+                <filter string="In errore" name="filter_error" domain="[('state', '=', 'error')]"/>
+                <filter string="Selezionati per il prossimo import" name="filter_selected"
+                        domain="[('selected_for_import', '=', True)]"/>
+                <separator/>
+                <filter string="Marketplace" name="groupby_marketplace" context="{'group_by': 'marketplace_id'}"/>
+                <filter string="Stato" name="groupby_state" context="{'group_by': 'state'}"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_amazon_report" model="ir.actions.act_window">
+        <field name="name">Report Amazon</field>
+        <field name="res_model">ke.amazon.report</field>
+        <field name="view_mode">list</field>
+        <field name="search_view_id" ref="view_amazon_report_search"/>
+        <field name="context">{'search_default_groupby_marketplace': 1}</field>
+    </record>
+
+    <record id="view_amazon_report_request_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.report.request.wizard.form</field>
+        <field name="model">ke.amazon.report.request.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Richiedi nuovo report Amazon">
+                <sheet>
+                    <group>
+                        <field name="marketplace_id"/>
+                    </group>
+                </sheet>
+                <footer>
+                    <button name="action_request" string="Richiedi" type="object" class="btn-primary"/>
+                    <button string="Annulla" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_report_request_wizard" model="ir.actions.act_window">
+        <field name="name">Richiedi nuovo report Amazon</field>
+        <field name="res_model">ke.amazon.report.request.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

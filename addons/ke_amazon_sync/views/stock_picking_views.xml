@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_picking_form_amazon_fba_label" model="ir.ui.view">
+        <field name="name">stock.picking.form.amazon.fba.label</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <button name="action_open_amazon_fba_prep_wizard"
+                        string="Etichetta FBA (FNSKU)"
+                        type="object"
+                        class="btn-primary"
+                        invisible="not x_amazon_is_fba_shipment or state in ('done', 'cancel')"/>
+                <button name="action_open_amazon_inbound_plan"
+                        string="Piano inbound FBA"
+                        type="object"
+                        class="btn-secondary"
+                        invisible="not x_amazon_is_fba_shipment or state != 'done'"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

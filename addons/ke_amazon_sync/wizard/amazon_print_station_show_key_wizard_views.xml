@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_print_station_show_key_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.print.station.show.key.form</field>
+        <field name="model">ke.amazon.print.station.show.key</field>
+        <field name="arch" type="xml">
+            <form string="Chiave API postazione">
+                <field name="station_id" invisible="1"/>
+                <div class="alert alert-warning" role="alert">
+                    Copia subito questa chiave nella configurazione dell'agente Windows:
+                    non sarà più visibile dopo aver chiuso questa finestra.
+                </div>
+                <group>
+                    <field name="raw_key"/>
+                </group>
+                <footer>
+                    <button string="Chiudi" class="btn btn-primary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

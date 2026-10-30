@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Tab Amazon nel form prodotto -->
+    <record id="view_product_template_amazon_tab" model="ir.ui.view">
+        <field name="name">product.template.amazon.tab</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <!-- Le dimensioni fisiche (lunghezza/larghezza/altezza) e il volume
+                 sono forniti dal modulo condiviso ke_product_dimensions, non
+                 specifici di Amazon: qui vengono solo scritti durante la sync. -->
+            <xpath expr="//notebook" position="inside">
+                <page string="Amazon" name="amazon_tab">
+                    <div class="mb-3">
+                        <button name="action_amazon_publish"
+                                string="Pubblica su Amazon"
+                                type="object"
+                                class="btn btn-primary me-2"
+                                confirm="Pubblica o aggiorna questo prodotto su Amazon. Continuare?"/>
+                        <button name="action_amazon_get_asin"
+                                string="Verifica ASIN"
+                                type="object"
+                                class="btn btn-secondary me-2"
+                                invisible="x_amazon_publish_state != 'pending'"
+                                confirm="Recupera l'ASIN assegnato da Amazon dopo la pubblicazione. Continuare?"/>
+                        <button name="action_amazon_refresh_from_catalog"
+                                string="Aggiorna da Amazon"
+                                type="object"
+                                class="btn btn-secondary me-2"
+                                invisible="not x_amazon_asin"
+                                confirm="Aggiorna nome, descrizione, EAN e immagine dal catalogo Amazon. Continuare?"/>
+                        <button name="action_amazon_sync_price_qty"
+                                string="Sync prezzo/quantità"
+                                type="object"
+                                class="btn btn-secondary me-2"
+                                invisible="not x_amazon_sync_price and not x_amazon_sync_qty"
+                                confirm="Invia prezzo e/o quantità aggiornati ad Amazon. Continuare?"/>
+                        <button name="action_amazon_download_image"
+                                string="Scarica immagine"
+                                type="object"
+                                class="btn btn-secondary"
+                                invisible="not x_amazon_asin"/>
+                    </div>
+                    <group>
+                        <group string="Identificatori">
+                            <field name="x_amazon_asin"/>
+                            <field name="x_amazon_sku"/>
+                            <field name="x_amazon_sku_previous" invisible="not x_amazon_sku_previous"/>
+                            <field name="x_amazon_fnsku"/>
+                            <field name="x_amazon_product_type" widget="char"/>
+                            <div class="o_field_widget" invisible="x_amazon_product_type">
+                                <button name="action_amazon_search_product_type"
+                                        string="Cerca tipo prodotto..."
+                                        type="object"
+                                        class="btn btn-link p-0"/>
+                            </div>
+                            <field name="x_amazon_brand" string="Brand"/>
+                        </group>
+                        <group string="Stato">
+                            <field name="x_amazon_status"/>
+                            <field name="x_amazon_fulfillment"/>
+                            <field name="x_amazon_warehouse_id" readonly="1"/>
+                            <field name="x_amazon_condition" string="Condizione"/>
+                            <field name="x_amazon_publish_state"
+                                   string="Stato pubblicazione"
+                                   widget="badge"
+                                   decoration-success="x_amazon_publish_state == 'published'"
+                                   decoration-warning="x_amazon_publish_state == 'pending'"
+                                   decoration-danger="x_amazon_publish_state == 'error'"
+                                   decoration-muted="x_amazon_publish_state == 'not_published'"/>
+                            <field name="x_amazon_found_by_manufacturer" widget="boolean_toggle"/>
+                            <field name="x_amazon_last_sync"/>
+                            <field name="x_amazon_publish_error"
+                                   invisible="not x_amazon_publish_error"
+                                   string="Errore pubblicazione"/>
+                        </group>
+                    </group>
+                    <group string="Dati Amazon (sola lettura)">
+                        <group>
+                            <field name="x_amazon_price" string="Prezzo attuale su Amazon"/>
+                            <field name="x_amazon_qty" string="Quantità dichiarata su Amazon"/>
+                            <field name="x_amazon_category" string="Categoria Amazon"/>
+                            <field name="x_amazon_browse_node_id" string="Browse Node ID"/>
+                            <div class="o_field_widget" invisible="x_amazon_browse_node_id">
+                                <button name="action_amazon_search_browse_node"
+                                        string="Cerca categoria..."
+                                        type="object"
+                                        class="btn btn-link p-0"/>
+                            </div>
+                        </group>
+                    </group>
+                    <group string="Sincronizzazione automatica">
+                        <group>
+                            <field name="x_amazon_sync_price" widget="boolean_toggle"/>
+                            <field name="x_amazon_sync_qty" widget="boolean_toggle"/>
+                        </group>
+                        <group>
+                            <field name="x_amazon_sync_error" invisible="not x_amazon_sync_error"/>
+                        </group>
+                    </group>
+                    <separator string="Inserzioni per marketplace"/>
+                    <p class="text-muted">
+                        I campi sopra sono quelli del marketplace primario (Impostazioni → Amazon).
+                        Questa lista è un riepilogo in sola lettura di TUTTE le varianti di
+                        questo prodotto — per modificare sync_price/sync_qty di una
+                        variante specifica, apri la sua scheda da "Varianti".
+                    </p>
+                    <field name="x_amazon_listing_ids" nolabel="1" readonly="1">
+                        <list create="0" delete="0" edit="0">
+                            <field name="product_id" readonly="1" string="Variante"/>
+                            <field name="marketplace_id" readonly="1"/>
+                            <field name="sku" readonly="1"/>
+                            <field name="asin" readonly="1"/>
+                            <field name="fnsku" readonly="1"/>
+                            <field name="status" readonly="1" widget="badge"
+                                   decoration-success="status == 'active'"
+                                   decoration-danger="status == 'error'"
+                                   decoration-muted="status in ('inactive', 'not_listed')"/>
+                            <field name="fulfillment" readonly="1"/>
+                            <field name="price" readonly="1"/>
+                            <field name="qty" readonly="1"/>
+                            <field name="sync_price" readonly="1"/>
+                            <field name="sync_qty" readonly="1"/>
+                            <field name="last_sync" readonly="1"/>
+                        </list>
+                    </field>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Colonna e filtro magazzino Amazon nella lista prodotti -->
+    <record id="view_product_template_tree_amazon" model="ir.ui.view">
+        <field name="name">product.template.amazon.tree</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_tree_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="x_amazon_warehouse_id" string="Magazzino Amazon" optional="hide"/>
+                <field name="x_amazon_sync_qty" string="Sync quantità" optional="hide" widget="boolean_toggle"/>
+                <field name="x_amazon_sync_price" string="Sync prezzo" optional="hide" widget="boolean_toggle"/>
+                <field name="x_amazon_qty" string="Quantità Amazon (dichiarata)" optional="hide"/>
+                <field name="x_amazon_odoo_fbm_qty" string="Giacenza Odoo (FBM)" optional="hide"/>
+                <field name="x_amazon_qty_diff" string="Differenza Amazon/Odoo" optional="hide"
+                       decoration-danger="x_amazon_qty_diff != 0"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_template_search_amazon" model="ir.ui.view">
+        <field name="name">product.template.amazon.search</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <filter string="Magazzino Amazon" name="groupby_amazon_warehouse"
+                        context="{'group_by': 'x_amazon_warehouse_id'}"/>
+                <filter string="Discrepanza giacenza FBM/Amazon" name="filter_amazon_qty_diff"
+                        domain="[('x_amazon_qty_diff', '!=', 0)]"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- FNSKU per variante: form "Varianti" del template e lista varianti -->
+    <record id="view_product_variant_easy_edit_amazon" model="ir.ui.view">
+        <field name="name">product.product.variant.easy.edit.amazon</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_variant_easy_edit_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='codes']/field[@name='barcode']" position="after">
+                <field name="x_amazon_sku" readonly="1" invisible="not x_amazon_sku"/>
+                <field name="x_amazon_fnsku" invisible="not x_amazon_fnsku"/>
+            </xpath>
+            <!-- Inserzioni per marketplace di QUESTA variante — editing reale
+                 di sync_price/sync_qty vive qui, non più sul form template
+                 (quello mostra solo un riepilogo in sola lettura aggregato
+                 tra tutte le varianti, vedi product_template.py). -->
+            <xpath expr="//group[@name='codes']" position="after">
+                <separator string="Inserzioni Amazon per marketplace"/>
+                <field name="x_amazon_listing_ids" nolabel="1">
+                    <list editable="bottom" create="0" delete="0">
+                        <field name="marketplace_id" readonly="1"/>
+                        <field name="sku" readonly="1"/>
+                        <field name="asin" readonly="1"/>
+                        <field name="fnsku" readonly="1"/>
+                        <field name="status" readonly="1" widget="badge"
+                               decoration-success="status == 'active'"
+                               decoration-danger="status == 'error'"
+                               decoration-muted="status in ('inactive', 'not_listed')"/>
+                        <field name="fulfillment" readonly="1"/>
+                        <field name="price" readonly="1"/>
+                        <field name="qty" readonly="1"/>
+                        <field name="sync_price" widget="boolean_toggle"/>
+                        <field name="sync_qty" widget="boolean_toggle"/>
+                        <field name="last_sync" readonly="1"/>
+                    </list>
+                </field>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_product_tree_amazon" model="ir.ui.view">
+        <field name="name">product.product.tree.amazon</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_product_tree_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='barcode']" position="after">
+                <field name="x_amazon_fnsku" optional="hide" readonly="1"/>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>
