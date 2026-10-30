@@ -138,6 +138,12 @@
                             <field name="source_country_code"/>
                             <field name="source_email"/>
                             <field name="source_phone"/>
+                            <!-- Solo lettura su Amazon (listInboundPlans): indirizzo,
+                                 telefono ed email dell'ultimo piano già creato. -->
+                            <button name="action_copy_source_address_from_amazon"
+                                    string="Copia indirizzo dall'ultimo piano Amazon"
+                                    type="object" class="btn-link" icon="fa-download"
+                                    invisible="state != 'draft'" colspan="2"/>
                         </group>
                     </group>
                     <notebook>

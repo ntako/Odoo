@@ -373,6 +373,27 @@ class AmazonInboundPlan(models.Model):
         self._require_state('labels_ready')
         self.write({'state': 'shipped'})
 
+    def action_copy_source_address_from_amazon(self):
+        """
+        Riprende l'indirizzo di origine dall'ultimo piano inbound già
+        presente su Amazon (es. creato da Seller Central): l'unica fonte
+        Amazon con telefono ed email del mittente, che mancavano sul
+        contatto aziendale in Odoo (richiesto dall'utente il 2026-10-30).
+        Solo lettura (listInboundPlans), solo in bozza. Scrive solo i campi
+        che Amazon restituisce valorizzati: un campo vuoto lì non cancella
+        quello già compilato dal contatto in Odoo.
+        """
+        self.ensure_one()
+        self._require_state('draft')
+        try:
+            vals = self._service().latest_source_address(exclude_plan_id=self.amazon_inbound_plan_id)
+        except Exception as exc:
+            raise UserError(f'Lettura dei piani Amazon non riuscita: {exc}')
+        vals = {field: value for field, value in vals.items() if value}
+        if not vals:
+            raise UserError('Nessun piano inbound con un indirizzo di origine trovato su Amazon.')
+        self.write(vals)
+
     def action_reset_to_draft(self):
         """
         Da 'Errore' a 'Bozza', solo se il piano non è mai stato creato su

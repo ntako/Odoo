@@ -114,6 +114,34 @@ class FbaInboundService:
     # Step del workflow
     # ------------------------------------------------------------------
 
+    def latest_source_address(self, exclude_plan_id=None):
+        """
+        Indirizzo di origine dell'ultimo piano inbound già presente
+        sull'account (anche creato da Seller Central con "Send to Amazon"),
+        come valori dei campi source_* del piano Odoo — solo lettura, nessun
+        impegno. Ritorna {} se nessun piano ha un indirizzo. 'exclude_plan_id'
+        salta il piano stesso, se fosse già stato creato.
+        """
+        payload = self.client.list_inbound_plans()
+        for summary in payload.get('inboundPlans') or []:
+            if exclude_plan_id and summary.get('inboundPlanId') == exclude_plan_id:
+                continue
+            address = summary.get('sourceAddress') or {}
+            if not address.get('addressLine1'):
+                continue
+            line1 = ', '.join(filter(None, [address.get('addressLine1'), address.get('addressLine2')]))
+            return {
+                'source_name': address.get('name') or address.get('companyName') or '',
+                'source_address_line1': line1,
+                'source_city': address.get('city') or '',
+                'source_state_code': address.get('stateOrProvinceCode') or '',
+                'source_country_code': address.get('countryCode') or '',
+                'source_postal_code': address.get('postalCode') or '',
+                'source_email': address.get('email') or '',
+                'source_phone': address.get('phoneNumber') or '',
+            }
+        return {}
+
     def create_plan(self, plan):
         items = self._build_items(plan)
         source_address = self._build_source_address(plan)

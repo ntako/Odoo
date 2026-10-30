@@ -925,6 +925,19 @@ class SpApiClient:
         )
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def list_inbound_plans(self, page_size=10):
+        """
+        Piani inbound dell'account, i più recenti per primi — solo lettura.
+        Usato per riprendere l'indirizzo di origine (sourceAddress, con
+        telefono ed email) da un piano già esistente: nessun endpoint espone
+        gli indirizzi "ship from" salvati in Seller Central (verificato sul
+        modello ufficiale il 2026-10-30). pageSize 1-30 (default Amazon 10).
+        """
+        return self._inbound_api().list_inbound_plans(
+            pageSize=page_size, sortBy='CREATION_TIME', sortOrder='DESC',
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def create_inbound_plan(self, name, source_address, destination_marketplace_ids, items):
         """
         Crea un nuovo piano inbound. 'items': lista di

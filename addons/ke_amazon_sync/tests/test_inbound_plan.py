@@ -35,6 +35,10 @@ class FakeInboundClient:
     def poll_inbound_operation(self, operation_id, poll_interval_s=10, poll_max_minutes=2):
         return {'operationStatus': 'SUCCESS'}
 
+    def list_inbound_plans(self, page_size=10):
+        self._maybe_fail('list_inbound_plans')
+        return {'inboundPlans': getattr(self, 'existing_plans', [])}
+
     def create_inbound_plan(self, name, source_address, destination_marketplace_ids, items):
         self._maybe_fail('create_inbound_plan')
         self.last_items = items
@@ -425,3 +429,31 @@ class TestInboundPlan(TransactionCase):
         self.plan.write({'state': 'error', 'amazon_inbound_plan_id': 'PLAN_ESISTENTE'})
         with self.assertRaises(UserError):
             self.plan.action_reset_to_draft()
+
+    def test_copy_source_address_from_latest_amazon_plan(self):
+        # Richiesto dall'utente il 2026-10-30: telefono/email del mittente
+        # da un piano già fatto su Seller Central (l'unica fonte Amazon).
+        client = FakeInboundClient()
+        client.existing_plans = [
+            {'inboundPlanId': 'PLAN_SENZA_INDIRIZZO', 'sourceAddress': {}},
+            {'inboundPlanId': 'PLAN_SC', 'sourceAddress': {
+                'name': 'Arundo Magazzino', 'addressLine1': 'Via Amazon 1', 'addressLine2': 'Int. 2',
+                'city': 'Cavallino', 'stateOrProvinceCode': 'LE', 'postalCode': '73020',
+                'countryCode': 'IT', 'phoneNumber': '+39 000 0000', 'email': '',
+            }},
+        ]
+        self.plan.source_email = 'gia@compilata.it'
+        with self._with_client(client):
+            self.plan.action_copy_source_address_from_amazon()
+        self.assertEqual(self.plan.source_address_line1, 'Via Amazon 1, Int. 2')
+        self.assertEqual(self.plan.source_state_code, 'LE')
+        self.assertEqual(self.plan.source_phone, '+39 000 0000')
+        self.assertEqual(self.plan.source_email, 'gia@compilata.it', 'un campo vuoto su Amazon non cancella quello in Odoo')
+        self.assertNotIn('create_inbound_plan', client.calls, 'solo lettura')
+
+    def test_copy_source_address_without_amazon_plans(self):
+        client = FakeInboundClient()
+        with self._with_client(client):
+            with self.assertRaises(UserError):
+                self.plan.action_copy_source_address_from_amazon()
+        self.assertEqual(self.plan.state, 'draft', 'una lettura fallita non porta il piano in errore')
