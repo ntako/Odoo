@@ -21,10 +21,9 @@ DELAY_SELLERS_S = 60.0    # getMarketplaceParticipations: rate ufficiale 0.016 r
 # ufficiale verificato il 2026-10-29, pagina per pagina, per OGNI operazione
 # usata sotto — tutte 2 richieste/secondo (burst diverso, 2/6/30 secondo
 # l'operazione, irrilevante qui: ogni chiamata è singola e sequenziale
-# dentro un'azione utente, non un ciclo/pagina). Eccezione onesta: getLabels
-# — la pagina di riferimento trovata documenta solo la v0 (non la
-# v2024-03-20 realmente usata dalla libreria installata); stesso delay
-# prudente per coerenza, da riverificare se si rivela insufficiente.
+# dentro un'azione utente, non un ciclo/pagina). getLabels è della v0
+# (nessuna operazione etichette nella v2024-03-20, verificato sul modello
+# ufficiale il 2026-10-30): 2 req/s, burst 30 — stesso delay.
 DELAY_INBOUND_S = 0.5
 RETRY_MAX = 5
 RETRY_BACKOFF_S = 60
@@ -976,8 +975,11 @@ class SpApiClient:
         return self._inbound_api().generate_placement_options(inbound_plan_id).payload
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
-    def list_placement_options(self, inbound_plan_id):
-        return self._inbound_api().list_placement_options(inbound_plan_id).payload
+    def list_placement_options(self, inbound_plan_id, pagination_token=None):
+        kwargs = {'pageSize': 20}
+        if pagination_token:
+            kwargs['paginationToken'] = pagination_token
+        return self._inbound_api().list_placement_options(inbound_plan_id, **kwargs).payload
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def confirm_placement_option(self, inbound_plan_id, placement_option_id):
@@ -1010,10 +1012,19 @@ class SpApiClient:
         ).payload
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
-    def list_transportation_options(self, inbound_plan_id, placement_option_id):
-        return self._inbound_api().list_transportation_options(
-            inbound_plan_id, placementOptionId=placement_option_id,
-        ).payload
+    def list_transportation_options(self, inbound_plan_id, placement_option_id, pagination_token=None):
+        kwargs = {'placementOptionId': placement_option_id, 'pageSize': 20}
+        if pagination_token:
+            kwargs['paginationToken'] = pagination_token
+        return self._inbound_api().list_transportation_options(inbound_plan_id, **kwargs).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def list_shipment_boxes(self, inbound_plan_id, shipment_id, pagination_token=None):
+        """Colli assegnati da Amazon a una spedizione (boxId per getLabels, contenuto)."""
+        kwargs = {'pageSize': 1000}
+        if pagination_token:
+            kwargs['paginationToken'] = pagination_token
+        return self._inbound_api().list_shipment_boxes(inbound_plan_id, shipment_id, **kwargs).payload
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def confirm_transportation_options(self, inbound_plan_id, transportation_selections):
@@ -1043,17 +1054,36 @@ class SpApiClient:
         ).payload
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
-    def get_labels(self, shipment_id, **kwargs):
+    def get_labels(self, shipment_confirmation_id, page_type, box_ids):
         """
-        Etichetta/e del collo per 'shipment_id'. Shape della risposta non
-        verificata in questa sessione per la v2024-03-20 (la pagina di
-        riferimento ufficiale trovata documenta solo la v0, con un
-        'DownloadURL' valido 15 secondi — la libreria installata usa
-        comunque un path v2024-03-20 per questo metodo). Verificare il
-        payload reale restituito prima di collegare automaticamente il
-        download/stampa — vedi ke.amazon.inbound.plan.action_get_labels.
+        Etichette dei colli di una spedizione, come PDF (bytes). Operazione
+        della v0 anche nel flusso v2024-03-20, che non ne ha una propria
+        (verificato sul modello ufficiale il 2026-10-30; la libreria espone
+        un get_labels v2024 su un percorso che il modello non contiene):
+        - shipmentId = shipmentConfirmationId (FBA…), quello sulle etichette;
+        - PackageLabelsToPrint = boxId di listShipmentBoxes, separati da
+          virgola (array in query, formato "csv" di default di Swagger) —
+          altrimenti IncorrectPackageIdentifier;
+        - la risposta è un DownloadURL valido 15 secondi: va scaricato
+          subito, qui, non salvato per dopo.
         """
-        return self._inbound_api().get_labels(shipment_id, **kwargs).payload
+        import requests
+        from sp_api.api import FulfillmentInbound
+        api = FulfillmentInbound(
+            marketplace=self._marketplace(), credentials=self.credentials,
+            version='v0', timeout=HTTP_TIMEOUT_S,
+        )
+        payload = api.get_labels(
+            shipment_confirmation_id,
+            PageType=page_type, LabelType='UNIQUE',
+            PackageLabelsToPrint=','.join(box_ids), NumberOfPackages=len(box_ids),
+        ).payload
+        url = (payload or {}).get('DownloadURL')
+        if not url:
+            raise RuntimeError(f'getLabels senza DownloadURL per {shipment_confirmation_id}: {payload}')
+        response = requests.get(url, timeout=HTTP_TIMEOUT_S)
+        response.raise_for_status()
+        return response.content
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def cancel_inbound_plan(self, inbound_plan_id):

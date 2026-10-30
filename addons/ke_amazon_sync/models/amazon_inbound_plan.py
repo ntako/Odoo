@@ -1,5 +1,8 @@
+import base64
+
 from odoo import api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools.pdf import merge_pdf
 
 from ..services.sp_api_client import SpApiClient
 from ..services.fba_inbound_service import FbaInboundService
@@ -8,6 +11,16 @@ from ..services.fba_inbound_service import FbaInboundService
 # Stati del piano in cui i colli si possono ancora creare/modificare: fino
 # all'invio del contenuto colli ad Amazon (action_set_packing_information).
 BOX_EDITABLE_STATES = ('draft', 'plan_created', 'packing_confirmed')
+
+# Formati delle etichette collo accettati da getLabels (v0, PageType) — solo
+# quelli utili qui; un formato non supportato nel marketplace dà errore da
+# Amazon, e si può cambiare e riscaricare.
+LABEL_PAGE_TYPES = [
+    ('PackageLabel_Plain_Paper', 'A4, una etichetta per foglio'),
+    ('PackageLabel_A4_2', 'A4, 2 etichette per foglio'),
+    ('PackageLabel_A4_4', 'A4, 4 etichette per foglio'),
+    ('PackageLabel_Thermal', 'Termica 4x6 pollici'),
+]
 
 
 class AmazonInboundPlan(models.Model):
@@ -115,6 +128,21 @@ class AmazonInboundPlan(models.Model):
 
     box_ids = fields.One2many('ke.amazon.inbound.plan.box', 'plan_id', string='Colli')
     shipment_ids = fields.One2many('ke.amazon.inbound.plan.shipment', 'plan_id', string='Spedizioni')
+    option_ids = fields.One2many('ke.amazon.inbound.plan.option', 'plan_id', string='Opzioni Amazon')
+    placement_option_line_ids = fields.One2many(
+        'ke.amazon.inbound.plan.option', 'plan_id', string='Opzioni di collocazione',
+        domain=[('kind', '=', 'placement')],
+    )
+    transport_option_line_ids = fields.One2many(
+        'ke.amazon.inbound.plan.option', 'plan_id', string='Opzioni di trasporto',
+        domain=[('kind', '=', 'transport')],
+    )
+    label_page_type = fields.Selection(
+        LABEL_PAGE_TYPES, string='Formato etichette collo', required=True,
+        default='PackageLabel_Plain_Paper',
+        help="Formato del PDF delle etichette dei colli (una per collo). Se Amazon lo "
+             "rifiuta per il marketplace, cambialo e premi di nuovo \"Scarica etichette collo\".",
+    )
 
     @api.constrains('picking_id')
     def _check_picking_is_fba_shipment(self):
@@ -226,23 +254,139 @@ class AmazonInboundPlan(models.Model):
 
     def _handle_step_error(self, exc):
         """
-        Il commit esplicito qui non è opzionale: senza, lo stato 'error'
-        scritto sotto resterebbe dentro la stessa transazione dell'eccezione
+        Un passo fallito lascia il piano nell'ULTIMO STATO RIUSCITO, con il
+        messaggio in error_message: lo stesso bottone riprende da lì. Prima
+        lo portava in 'error', uno stato senza uscita — con i passi ora
+        concatenati (un bottone ne fa diversi, 2026-10-30) avrebbe buttato
+        via tutto il piano per un errore a metà. 'error' resta solo per i
+        piani storici.
+        Il commit esplicito qui non è opzionale: senza, il messaggio scritto
+        sotto resterebbe dentro la stessa transazione dell'eccezione
         rilanciata subito dopo — se qualcosa più a monte (dispatch web,
-        chiamante) fa un rollback sull'errore, lo stato 'error' sparirebbe
-        con esso, lasciando il piano bloccato nel suo stato precedente senza
-        traccia del fallimento. Stesso pattern già usato ovunque nel modulo
-        per i log di sync in thread (vedi amazon_sync_log.py). Nei test,
+        chiamante) fa un rollback sull'errore, sparirebbe con essa. Nei test,
         questo commit è reso no-op da no_commit (vedi tests/common.py) — per
-        verificare che lo stato sopravviva comunque a un rollback ambientale
-        va usato un try/except esplicito, non self.assertRaises (che avvolge
-        il blocco in un suo proprio savepoint, annullato apposta quando
+        verificare che sopravviva comunque a un rollback ambientale va usato
+        un try/except esplicito, non self.assertRaises (che avvolge il
+        blocco in un suo proprio savepoint, annullato apposta quando
         l'eccezione attesa si verifica — vedi test_inbound_plan.py).
         """
         self.ensure_one()
-        self.write({'state': 'error', 'error_message': str(exc)})
+        self.write({'error_message': str(exc)})
         self.env.cr.commit()
         raise UserError(f'{exc}')
+
+    def _advance(self, steps, target):
+        """
+        Esegue i passi in 'steps' ({stato: metodo}) finché il piano non
+        arriva a 'target'. Ogni passo salva lo stato raggiunto: se uno
+        fallisce, il piano resta all'ultimo riuscito e lo stesso bottone
+        riprende da lì. Un passo che non cambia stato senza errore
+        fermerebbe il ciclo all'infinito: bloccato esplicitamente.
+        """
+        self.ensure_one()
+        self.error_message = False
+        while self.state != target:
+            step = steps.get(self.state)
+            if not step:
+                raise UserError(f'Azione non disponibile nello stato attuale ("{self.state}").')
+            before = self.state
+            step()
+            if self.state == before:
+                raise UserError(f'Il passo dallo stato "{before}" non ha fatto avanzare il piano.')
+
+    def _check_boxes_ready(self):
+        self.ensure_one()
+        if not self.box_ids:
+            raise UserError('Nessun collo definito: aggiungi i colli prima di procedere.')
+        open_boxes = self.box_ids.filtered(lambda b: b.state == 'open')
+        if open_boxes:
+            raise UserError(
+                f'Chiudi tutti i colli prima di procedere (ancora aperti: '
+                f'{", ".join(open_boxes.mapped("name"))}).'
+            )
+        # Totale per PRODOTTO, non per riga: lo stesso prodotto può stare su
+        # più righe del trasferimento (es. 1 + 3), e prima ogni riga veniva
+        # confrontata da sola con il totale nei colli ("imballate 4 unità su
+        # 1 previste", trovato dal vivo il 2026-10-30). Stesso criterio del
+        # manifesto del piano (_build_items) e del vincolo sulle righe collo.
+        expected_by_product = {}
+        for move in self.picking_id.move_ids:
+            expected_by_product[move.product_id] = (
+                expected_by_product.get(move.product_id, 0) + move.product_uom_qty
+            )
+        all_lines = self.box_ids.line_ids
+        for product, expected in expected_by_product.items():
+            packed = sum(all_lines.filtered(lambda l: l.product_id == product).mapped('quantity'))
+            if packed != expected:
+                raise UserError(
+                    f'{product.display_name}: imballate {packed:g} unità su {expected:g} '
+                    f'previste — completa i colli prima di procedere.'
+                )
+
+    # ------------------------------------------------------------------
+    # Bottoni della vista: uno per ogni decisione vera (2026-10-30). Ogni
+    # bottone concatena i passi senza scelte e si FERMA prima di quelli
+    # che impegnano (collocazione irreversibile, trasporto a pagamento).
+    # ------------------------------------------------------------------
+
+    def action_prepare_placement(self):
+        """
+        Dalla bozza (colli pronti) fino alle opzioni di collocazione: crea il
+        piano, imballaggio, invio colli, opzioni di collocazione — nessuno
+        di questi impegna. Si ferma prima della conferma irreversibile.
+        """
+        self.ensure_one()
+        if self.state not in ('draft', 'plan_created', 'packing_confirmed', 'packing_info_sent'):
+            raise UserError(f'Azione non disponibile nello stato attuale ("{self.state}").')
+        if self.state != 'packing_info_sent':
+            self._check_boxes_ready()
+        self._advance({
+            'draft': self.action_create_plan,
+            'plan_created': self._step_packing,
+            'packing_confirmed': self.action_set_packing_information,
+            'packing_info_sent': self.action_generate_placement_options,
+        }, 'placement_options_ready')
+
+    def _step_packing(self):
+        if not self.packing_option_id:
+            self.action_generate_packing_options()
+        self.action_confirm_packing_option()
+
+    def action_prepare_transport(self):
+        """
+        Dopo la collocazione confermata fino ai preventivi di trasporto:
+        finestre di consegna (prima proposta) e opzioni di trasporto. Parte
+        da sola dopo la conferma della collocazione; il bottone serve solo
+        a riprendere se si è interrotta.
+        """
+        self.ensure_one()
+        self._advance({
+            'placement_confirmed': self.action_generate_delivery_window_options,
+            'delivery_window_options_ready': self.action_confirm_delivery_window_options,
+            'delivery_window_confirmed': self.action_generate_transportation_options,
+        }, 'transport_options_ready')
+
+    def action_download_labels(self):
+        """Un solo PDF con le etichette di tutte le spedizioni del piano."""
+        self.ensure_one()
+        attachments = self.shipment_ids.labels_attachment_id
+        if not attachments:
+            raise UserError('Nessuna etichetta scaricata: premi prima "Scarica etichette collo".')
+        if len(attachments) == 1:
+            attachment = attachments
+        else:
+            merged = merge_pdf([base64.b64decode(a.datas) for a in attachments])
+            attachment = self.env['ir.attachment'].create({
+                'name': f'Etichette colli {self.name}.pdf',
+                'datas': base64.b64encode(merged),
+                'mimetype': 'application/pdf',
+                'res_model': self._name, 'res_id': self.id,
+            })
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content/{attachment.id}?download=true',
+            'target': 'self',
+        }
 
     # ------------------------------------------------------------------
     # Step del workflow — ciascuno valida lo stato di partenza, chiama il
@@ -286,32 +430,7 @@ class AmazonInboundPlan(models.Model):
     def action_set_packing_information(self):
         self.ensure_one()
         self._require_state('packing_confirmed')
-        open_boxes = self.box_ids.filtered(lambda b: b.state == 'open')
-        if open_boxes:
-            raise UserError(
-                f'Chiudi tutti i colli prima di procedere (ancora aperti: '
-                f'{", ".join(open_boxes.mapped("name"))}).'
-            )
-        if not self.box_ids:
-            raise UserError('Nessun collo definito.')
-        # Totale per PRODOTTO, non per riga: lo stesso prodotto può stare su
-        # più righe del trasferimento (es. 1 + 3), e prima ogni riga veniva
-        # confrontata da sola con il totale nei colli ("imballate 4 unità su
-        # 1 previste", trovato dal vivo il 2026-10-30). Stesso criterio del
-        # manifesto del piano (_build_items) e del vincolo sulle righe collo.
-        expected_by_product = {}
-        for move in self.picking_id.move_ids:
-            expected_by_product[move.product_id] = (
-                expected_by_product.get(move.product_id, 0) + move.product_uom_qty
-            )
-        all_lines = self.box_ids.line_ids
-        for product, expected in expected_by_product.items():
-            packed = sum(all_lines.filtered(lambda l: l.product_id == product).mapped('quantity'))
-            if packed != expected:
-                raise UserError(
-                    f'{product.display_name}: imballate {packed:g} unità su {expected:g} '
-                    f'previste — completa i colli prima di procedere.'
-                )
+        self._check_boxes_ready()
         try:
             self._service().set_packing_information(self)
         except Exception as exc:
@@ -338,10 +457,21 @@ class AmazonInboundPlan(models.Model):
         self._require_state('placement_options_ready')
         if not self.placement_option_id:
             raise UserError('Nessuna opzione di collocazione selezionata.')
+        self.error_message = False
         try:
             self._service().confirm_placement_option(self)
         except Exception as exc:
             self._handle_step_error(exc)
+        # Da qui niente più scelte fino al trasporto: si prosegue da soli.
+        # Un errore qui NON annulla la collocazione (già confermata e
+        # salvata): resta il messaggio e "Prepara trasporto" per riprendere.
+        try:
+            self.action_prepare_transport()
+        except UserError as exc:
+            raise UserError(
+                f'Collocazione confermata, ma la preparazione del trasporto si è fermata: {exc}\n'
+                f'Premi "Prepara trasporto" per riprendere.'
+            )
 
     def action_generate_delivery_window_options(self):
         self.ensure_one()
@@ -374,14 +504,25 @@ class AmazonInboundPlan(models.Model):
         self._require_state('transport_options_ready')
         if any(not s.transportation_option_id for s in self.shipment_ids):
             raise UserError('Ogni spedizione deve avere un\'opzione di trasporto selezionata.')
+        self.error_message = False
         try:
             self._service().confirm_transportation_options(self)
         except Exception as exc:
             self._handle_step_error(exc)
+        try:
+            self.action_get_labels()
+        except UserError as exc:
+            raise UserError(
+                f'Trasporto confermato, ma le etichette dei colli non sono state scaricate: {exc}\n'
+                f'Premi "Scarica etichette collo" per riprovare.'
+            )
 
     def action_get_labels(self):
+        """Anche da 'Etichette pronte': per riscaricarle, es. in un altro formato."""
         self.ensure_one()
-        self._require_state('transport_confirmed')
+        if self.state not in ('transport_confirmed', 'labels_ready'):
+            raise UserError(f'Azione non disponibile nello stato attuale ("{self.state}").')
+        self.error_message = False
         try:
             self._service().get_labels(self)
             self.write({'state': 'labels_ready'})
@@ -601,6 +742,7 @@ class AmazonInboundPlanShipment(models.Model):
     _name = 'ke.amazon.inbound.plan.shipment'
     _description = 'Spedizione (shipmentId Amazon) generata da un piano inbound FBA'
     _order = 'id'
+    _rec_name = 'amazon_shipment_id'
 
     plan_id = fields.Many2one('ke.amazon.inbound.plan', required=True, ondelete='cascade', index=True)
     amazon_shipment_id = fields.Char('Shipment ID (Amazon)', required=True, copy=False)
@@ -608,19 +750,79 @@ class AmazonInboundPlanShipment(models.Model):
     destination_fc_name = fields.Char('Centro di distribuzione', readonly=True, copy=False)
     transportation_option_id = fields.Char(
         readonly=True, copy=False,
-        help='Prima opzione di trasporto offerta da Amazon, selezionata automaticamente '
-             '(semplificazione v1, stessa convenzione già usata negli script di esplorazione: '
-             "sempre la prima opzione) — consulta 'last_options_raw' sul piano per le altre.",
+        help="Opzione di trasporto scelta per questa spedizione (scheda Opzioni del piano: "
+             "preselezionata la più economica con corriere partner Amazon).",
     )
     delivery_window_option_id = fields.Char(readonly=True, copy=False)
     tracking_number = fields.Char(
         help='Non usato nel percorso solo-corrieri-partner (v1) — il campo resta pronto '
              'per quando verrà aggiunto il percorso self-ship (corriere proprio).',
     )
-    labels_raw_response = fields.Text(
-        readonly=True, copy=False,
-        help="Payload grezzo di getLabels — shape non verificata in questa sessione per "
-             "la v2024-03-20 (vedi SpApiClient.get_labels). Conservato così com'è finché "
-             "non si verifica il formato reale (download URL o contenuto) contro una "
-             "risposta vera, prima di collegarlo a stampa/download automatico.",
+    labels_attachment_id = fields.Many2one('ir.attachment', string='PDF etichette', readonly=True, copy=False)
+    box_count = fields.Integer('Colli', readonly=True, copy=False)
+    box_contents = fields.Text(
+        'Contenuto colli', readonly=True, copy=False,
+        help="Colli che Amazon ha assegnato a questa spedizione (listShipmentBoxes), con il "
+             "contenuto: con più spedizioni è così che si sa quale collo fisico riceve quale "
+             "etichetta e va in quale magazzino.",
     )
+
+    @api.depends('amazon_shipment_id', 'shipment_confirmation_id', 'destination_fc_name')
+    def _compute_display_name(self):
+        for shipment in self:
+            name = shipment.shipment_confirmation_id or shipment.amazon_shipment_id
+            shipment.display_name = f'{name} → {shipment.destination_fc_name}' if shipment.destination_fc_name else name
+
+    def action_download_labels(self):
+        self.ensure_one()
+        if not self.labels_attachment_id:
+            raise UserError('Etichette non ancora scaricate per questa spedizione.')
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content/{self.labels_attachment_id.id}?download=true',
+            'target': 'self',
+        }
+
+
+class AmazonInboundPlanOption(models.Model):
+    """
+    Un'opzione proposta da Amazon (collocazione o trasporto), selezionabile
+    nella vista: prima Odoo prendeva sempre la prima e la confermava così,
+    anche sui due passi che impegnano (2026-10-30).
+    """
+    _name = 'ke.amazon.inbound.plan.option'
+    _description = 'Opzione Amazon (collocazione/trasporto) di un piano inbound FBA'
+    _order = 'kind, shipment_id, cost, id'
+
+    plan_id = fields.Many2one('ke.amazon.inbound.plan', required=True, ondelete='cascade', index=True)
+    kind = fields.Selection([('placement', 'Collocazione'), ('transport', 'Trasporto')], required=True)
+    shipment_id = fields.Many2one(
+        'ke.amazon.inbound.plan.shipment', string='Spedizione', ondelete='cascade',
+        help='Solo per il trasporto: le opzioni sono per spedizione.',
+    )
+    amazon_option_id = fields.Char('ID opzione (Amazon)', required=True)
+    amazon_shipment_ids = fields.Char(
+        'Spedizioni (Amazon)', help='Solo per la collocazione: shipmentId che creerebbe, separati da virgola.',
+    )
+    description = fields.Char('Descrizione')
+    cost = fields.Float('Costo', help='Collocazione: commissioni meno sconti. Trasporto: preventivo del corriere.')
+    currency_code = fields.Char('Valuta')
+    expiration = fields.Char('Scade il')
+    is_selected = fields.Boolean('Scelta')
+
+    def action_select(self):
+        self.ensure_one()
+        plan = self.plan_id
+        if self.kind == 'placement':
+            if plan.state != 'placement_options_ready':
+                raise UserError('La collocazione si sceglie solo prima di confermarla.')
+            plan.option_ids.filtered(lambda o: o.kind == 'placement').write({'is_selected': False})
+            plan.placement_option_id = self.amazon_option_id
+        else:
+            if plan.state != 'transport_options_ready':
+                raise UserError('Il trasporto si sceglie solo prima di confermarlo.')
+            plan.option_ids.filtered(
+                lambda o: o.kind == 'transport' and o.shipment_id == self.shipment_id
+            ).write({'is_selected': False})
+            self.shipment_id.transportation_option_id = self.amazon_option_id
+        self.is_selected = True

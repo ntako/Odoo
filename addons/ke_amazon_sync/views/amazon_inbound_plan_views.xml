@@ -79,40 +79,42 @@
         <field name="arch" type="xml">
             <form string="Piano inbound FBA">
                 <header>
-                    <button name="action_create_plan" string="Crea piano" type="object"
-                            class="btn-primary" invisible="state != 'draft'"/>
-                    <button name="action_generate_packing_options" string="Genera opzioni imballaggio"
-                            type="object" class="btn-primary" invisible="state != 'plan_created' or packing_option_id"/>
-                    <button name="action_confirm_packing_option" string="Conferma imballaggio"
-                            type="object" class="btn-primary" invisible="state != 'plan_created' or not packing_option_id"/>
-                    <button name="action_set_packing_information" string="Invia contenuto colli"
-                            type="object" class="btn-primary" invisible="state != 'packing_confirmed'"/>
-                    <button name="action_generate_placement_options" string="Genera opzioni collocazione"
-                            type="object" class="btn-primary" invisible="state != 'packing_info_sent'"/>
+                    <!-- Un bottone per ogni decisione vera (2026-10-30): i passi senza
+                         scelte si concatenano da soli e ci si ferma prima dei due che
+                         impegnano. I metodi dei singoli passi restano nel modello. -->
+                    <button name="action_prepare_placement" string="Crea piano e prepara collocazione"
+                            type="object" class="btn-primary" invisible="state != 'draft'"
+                            help="Crea il piano su Amazon, conferma l'imballaggio, invia i colli e genera le opzioni di collocazione. Nessuno di questi passi impegna; si ferma prima della conferma della collocazione."/>
+                    <button name="action_prepare_placement" string="Riprendi preparazione collocazione"
+                            type="object" class="btn-primary"
+                            invisible="state not in ('plan_created', 'packing_confirmed', 'packing_info_sent')"/>
                     <button name="action_confirm_placement_option" string="Conferma collocazione (IRREVERSIBILE)"
                             type="object" class="btn-danger" invisible="state != 'placement_options_ready'"
-                            confirm="Confermare la collocazione è IRREVERSIBILE lato Amazon: non si può più annullare o cambiare dopo questo punto. Procedere solo con una spedizione reale pronta a partire."/>
-                    <button name="action_generate_delivery_window_options" string="Genera finestre di consegna"
-                            type="object" class="btn-primary" invisible="state != 'placement_confirmed'"/>
-                    <button name="action_confirm_delivery_window_options" string="Conferma finestre di consegna"
-                            type="object" class="btn-primary" invisible="state != 'delivery_window_options_ready'"/>
-                    <button name="action_generate_transportation_options" string="Genera opzioni trasporto"
-                            type="object" class="btn-primary" invisible="state != 'delivery_window_confirmed'"/>
+                            confirm="Confermi l'opzione di collocazione SCELTA nella scheda Opzioni? È IRREVERSIBILE lato Amazon: non si può più annullare o cambiare. Dopo, Odoo prepara da solo finestre di consegna e preventivi di trasporto."/>
+                    <button name="action_prepare_transport" string="Prepara trasporto"
+                            type="object" class="btn-primary"
+                            invisible="state not in ('placement_confirmed', 'delivery_window_options_ready', 'delivery_window_confirmed')"/>
                     <button name="action_confirm_transportation_options" string="Conferma trasporto"
-                            type="object" class="btn-primary" invisible="state != 'transport_options_ready'"
-                            confirm="Confermare il trasporto impegna il corriere e il relativo costo. Procedere?"/>
+                            type="object" class="btn-danger" invisible="state != 'transport_options_ready'"
+                            confirm="Confermi il trasporto SCELTO nella scheda Opzioni? Impegna il corriere e il relativo costo. Dopo, Odoo scarica da solo le etichette dei colli."/>
                     <button name="action_get_labels" string="Scarica etichette collo"
                             type="object" class="btn-primary" invisible="state != 'transport_confirmed'"/>
+                    <button name="action_download_labels" string="Scarica PDF etichette"
+                            type="object" class="btn-primary" icon="fa-download" invisible="state != 'labels_ready'"/>
+                    <button name="action_get_labels" string="Riscarica etichette"
+                            type="object" class="btn-secondary" invisible="state != 'labels_ready'"
+                            help="Di nuovo da Amazon, per esempio dopo aver cambiato il formato."/>
                     <button name="action_mark_shipped" string="Segna come spedito"
-                            type="object" class="btn-primary" invisible="state != 'labels_ready'"/>
+                            type="object" class="btn-secondary" invisible="state != 'labels_ready'"/>
                     <button name="action_reset_to_draft" string="Riporta in bozza"
                             type="object" class="btn-secondary"
                             invisible="state != 'error' or amazon_inbound_plan_id"/>
                     <button name="action_cancel_plan" string="Annulla piano"
                             type="object" class="btn-secondary"
-                            invisible="state in ('shipped', 'done', 'cancelled', 'error')"
+                            invisible="state in ('transport_confirmed', 'labels_ready', 'shipped', 'done', 'cancelled', 'error')"
                             confirm="Annullare il piano? Prima della conferma del trasporto l'annullamento non è garantito a costo zero dalla documentazione Amazon."/>
-                    <field name="state" widget="statusbar"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="draft,placement_options_ready,transport_options_ready,labels_ready,shipped"/>
                 </header>
                 <sheet>
                     <div class="alert alert-danger" role="alert" invisible="not error_message">
@@ -172,15 +174,54 @@
                                 </list>
                             </field>
                         </page>
+                        <page string="Opzioni" invisible="not option_ids">
+                            <field name="option_ids" invisible="1"/>
+                            <!-- Scelta esplicita (2026-10-30): prima Odoo prendeva sempre la
+                                 prima opzione, anche per collocazione e trasporto. -->
+                            <separator string="Collocazione" invisible="not placement_option_line_ids"/>
+                            <field name="placement_option_line_ids" readonly="1" nolabel="1"
+                                   invisible="not placement_option_line_ids">
+                                <list decoration-bf="is_selected" decoration-success="is_selected">
+                                    <field name="is_selected" widget="boolean_toggle" readonly="1"/>
+                                    <field name="description"/>
+                                    <field name="cost"/>
+                                    <field name="currency_code"/>
+                                    <field name="expiration"/>
+                                    <button name="action_select" string="Scegli" type="object" icon="fa-check"
+                                            invisible="is_selected or parent.state != 'placement_options_ready'"/>
+                                </list>
+                            </field>
+                            <separator string="Trasporto (corrieri partner Amazon)" invisible="not transport_option_line_ids"/>
+                            <field name="transport_option_line_ids" readonly="1" nolabel="1"
+                                   invisible="not transport_option_line_ids">
+                                <list decoration-bf="is_selected" decoration-success="is_selected">
+                                    <field name="is_selected" widget="boolean_toggle" readonly="1"/>
+                                    <field name="shipment_id"/>
+                                    <field name="description"/>
+                                    <field name="cost"/>
+                                    <field name="currency_code"/>
+                                    <field name="expiration"/>
+                                    <button name="action_select" string="Scegli" type="object" icon="fa-check"
+                                            invisible="is_selected or parent.state != 'transport_options_ready'"/>
+                                </list>
+                            </field>
+                        </page>
                         <page string="Spedizioni">
+                            <group>
+                                <field name="label_page_type"/>
+                            </group>
                             <field name="shipment_ids" readonly="1">
                                 <list>
-                                    <field name="amazon_shipment_id"/>
                                     <field name="shipment_confirmation_id"/>
                                     <field name="destination_fc_name"/>
-                                    <field name="transportation_option_id"/>
-                                    <field name="delivery_window_option_id"/>
-                                    <field name="tracking_number"/>
+                                    <field name="box_count"/>
+                                    <field name="box_contents"/>
+                                    <field name="amazon_shipment_id" optional="hide"/>
+                                    <field name="transportation_option_id" optional="hide"/>
+                                    <field name="delivery_window_option_id" optional="hide"/>
+                                    <field name="labels_attachment_id" column_invisible="1"/>
+                                    <button name="action_download_labels" string="Etichette" type="object"
+                                            icon="fa-download" invisible="not labels_attachment_id"/>
                                 </list>
                             </field>
                         </page>

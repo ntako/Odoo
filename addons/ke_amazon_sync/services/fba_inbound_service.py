@@ -13,6 +13,7 @@ metodo qui lo richiama da solo: solo
 ke.amazon.inbound.plan.action_confirm_placement_option (dopo conferma
 esplicita dell'utente nella UI) chiama questo servizio per farlo.
 """
+import base64
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -110,6 +111,21 @@ class FbaInboundService:
     def _dump(self, payload):
         return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
 
+    def _all_pages(self, fetch, key):
+        """Unisce le pagine di una list* v2024 (pagination.nextToken)."""
+        items, token, raw = [], None, []
+        while True:
+            page = fetch(token)
+            raw.append(page)
+            items.extend(page.get(key) or [])
+            token = (page.get('pagination') or {}).get('nextToken')
+            if not token:
+                return items, raw
+
+    @staticmethod
+    def _amount(currency):
+        return float((currency or {}).get('amount') or 0.0)
+
     # ------------------------------------------------------------------
     # Step del workflow
     # ------------------------------------------------------------------
@@ -189,28 +205,85 @@ class FbaInboundService:
         self.env.cr.commit()
 
     def generate_and_list_placement_options(self, plan):
+        """
+        Genera le opzioni di collocazione e le salva come righe selezionabili
+        (ke.amazon.inbound.plan.option, kind='placement'): prima veniva
+        presa d'ufficio la prima e confermata così, proprio sul passo
+        irreversibile (2026-10-30). Preselezionata la prima, nell'ordine
+        di Amazon; le spedizioni si creano solo alla conferma, da quella
+        effettivamente scelta.
+        """
         resp = self.client.generate_placement_options(plan.amazon_inbound_plan_id)
         self.client.poll_inbound_operation(resp['operationId'])
-        listing = self.client.list_placement_options(plan.amazon_inbound_plan_id)
-        options = listing.get('placementOptions') or []
+        options, raw = self._all_pages(
+            lambda token: self.client.list_placement_options(plan.amazon_inbound_plan_id, pagination_token=token),
+            'placementOptions',
+        )
+        options = [o for o in options if o.get('status') != 'EXPIRED']
         if not options:
             raise UserError('Amazon non ha restituito nessuna opzione di collocazione.')
-        first = options[0]
+        plan.option_ids.filtered(lambda o: o.kind == 'placement').unlink()
+        Option = self.env['ke.amazon.inbound.plan.option']
+        for index, option in enumerate(options):
+            fees = sum(self._amount(f.get('value')) for f in option.get('fees') or [])
+            discounts = sum(self._amount(d.get('value')) for d in option.get('discounts') or [])
+            currency = next(
+                ((i.get('value') or {}).get('code') for i in (option.get('fees') or []) + (option.get('discounts') or [])),
+                '',
+            )
+            shipment_ids = option.get('shipmentIds') or []
+            details = '; '.join(
+                f"{i.get('description') or i.get('target')}: {self._amount(i.get('value')):g}"
+                for i in (option.get('fees') or []) + (option.get('discounts') or [])
+                if self._amount(i.get('value'))
+            )
+            Option.create({
+                'plan_id': plan.id, 'kind': 'placement',
+                'amazon_option_id': option['placementOptionId'],
+                'amazon_shipment_ids': ','.join(shipment_ids),
+                'description': f"{len(shipment_ids)} spedizion{'e' if len(shipment_ids) == 1 else 'i'}"
+                               + (f' — {details}' if details else ''),
+                'cost': fees - discounts, 'currency_code': currency or '',
+                'expiration': option.get('expiration') or '',
+                'is_selected': index == 0,
+            })
         plan.write({
-            'last_options_raw': self._dump(listing),
-            'placement_option_id': first['placementOptionId'],
+            'last_options_raw': self._dump(raw),
+            'placement_option_id': options[0]['placementOptionId'],
             'state': 'placement_options_ready',
         })
-        Shipment = self.env['ke.amazon.inbound.plan.shipment']
-        existing = set(plan.shipment_ids.mapped('amazon_shipment_id'))
-        for shipment_id in first.get('shipmentIds', []):
-            if shipment_id not in existing:
-                Shipment.create({'plan_id': plan.id, 'amazon_shipment_id': shipment_id})
         self.env.cr.commit()
 
     def confirm_placement_option(self, plan):
+        chosen = plan.option_ids.filtered(
+            lambda o: o.kind == 'placement' and o.amazon_option_id == plan.placement_option_id
+        )
+        if not chosen:
+            raise UserError('Nessuna opzione di collocazione selezionata.')
         resp = self.client.confirm_placement_option(plan.amazon_inbound_plan_id, plan.placement_option_id)
         self.client.poll_inbound_operation(resp['operationId'])
+        # Le spedizioni sono quelle dell'opzione CONFERMATA, non di un'altra
+        # solo elencata.
+        wanted = [sid for sid in (chosen.amazon_shipment_ids or '').split(',') if sid]
+        plan.shipment_ids.filtered(lambda s: s.amazon_shipment_id not in wanted).unlink()
+        existing = set(plan.shipment_ids.mapped('amazon_shipment_id'))
+        for shipment_id in wanted:
+            if shipment_id not in existing:
+                self.env['ke.amazon.inbound.plan.shipment'].create({
+                    'plan_id': plan.id, 'amazon_shipment_id': shipment_id,
+                })
+        plan.write({
+            'state': 'placement_confirmed',
+            'confirmed_by': self.env.uid,
+            'confirmed_date': datetime.now(),
+        })
+        # Commit subito dopo la conferma irreversibile: i dettagli sotto
+        # (destinazione, ID FBA) sono letture, se fallissero lo stato
+        # confermato non deve andare perso.
+        self.env.cr.commit()
+        self.refresh_shipment_details(plan)
+
+    def refresh_shipment_details(self, plan):
         for shipment in plan.shipment_ids:
             detail = self.client.get_shipment(plan.amazon_inbound_plan_id, shipment.amazon_shipment_id)
             destination = detail.get('destination') or {}
@@ -218,11 +291,6 @@ class FbaInboundService:
                 'shipment_confirmation_id': detail.get('shipmentConfirmationId') or '',
                 'destination_fc_name': destination.get('warehouseId') or detail.get('name') or '',
             })
-        plan.write({
-            'state': 'placement_confirmed',
-            'confirmed_by': self.env.uid,
-            'confirmed_date': datetime.now(),
-        })
         self.env.cr.commit()
 
     def generate_and_list_delivery_window_options(self, plan):
@@ -256,6 +324,13 @@ class FbaInboundService:
         self.env.cr.commit()
 
     def generate_and_list_transportation_options(self, plan):
+        """
+        Preventivi di trasporto salvati come righe selezionabili per
+        spedizione (kind='transport'): solo corrieri partner Amazon (scelta
+        della v1 — il percorso con corriere proprio richiede tracking e
+        appuntamenti, non gestiti). Preselezionato il più economico per
+        ogni spedizione; prima veniva presa d'ufficio la prima elencata.
+        """
         # Finestra indicativa "da qui a 2 giorni" per la quotazione, come
         # nello script di esplorazione sicura (AMZ_TESTS/02_scritture_esempio/
         # explore_inbound_safe.py) — non è un impegno, solo un input al preventivo.
@@ -270,19 +345,41 @@ class FbaInboundService:
             plan.amazon_inbound_plan_id, plan.placement_option_id, configs,
         )
         self.client.poll_inbound_operation(resp['operationId'])
-        listing = self.client.list_transportation_options(
-            plan.amazon_inbound_plan_id, plan.placement_option_id,
+        options, raw = self._all_pages(
+            lambda token: self.client.list_transportation_options(
+                plan.amazon_inbound_plan_id, plan.placement_option_id, pagination_token=token,
+            ),
+            'transportationOptions',
         )
-        first_by_shipment = {}
-        for option in listing.get('transportationOptions') or []:
-            sid = option.get('shipmentId')
-            if sid and sid not in first_by_shipment:
-                first_by_shipment[sid] = option
+        plan.option_ids.filtered(lambda o: o.kind == 'transport').unlink()
+        Option = self.env['ke.amazon.inbound.plan.option']
         for shipment in plan.shipment_ids:
-            option = first_by_shipment.get(shipment.amazon_shipment_id)
-            if option:
-                shipment.write({'transportation_option_id': option['transportationOptionId']})
-        plan.write({'last_options_raw': self._dump(listing), 'state': 'transport_options_ready'})
+            partnered = [
+                o for o in options
+                if o.get('shipmentId') == shipment.amazon_shipment_id
+                and o.get('shippingSolution') == 'AMAZON_PARTNERED_CARRIER'
+            ]
+            if not partnered:
+                raise UserError(
+                    f'Nessuna opzione con corriere partner Amazon per la spedizione '
+                    f'{shipment.amazon_shipment_id}: questa versione gestisce solo quelle.'
+                )
+            partnered.sort(key=lambda o: self._amount((o.get('quote') or {}).get('cost')))
+            for index, option in enumerate(partnered):
+                quote = option.get('quote') or {}
+                carrier = option.get('carrier') or {}
+                Option.create({
+                    'plan_id': plan.id, 'kind': 'transport', 'shipment_id': shipment.id,
+                    'amazon_option_id': option['transportationOptionId'],
+                    'description': f"{carrier.get('name') or carrier.get('alphaCode') or 'Corriere'}"
+                                   f" — {option.get('shippingMode') or ''}",
+                    'cost': self._amount(quote.get('cost')),
+                    'currency_code': (quote.get('cost') or {}).get('code') or '',
+                    'expiration': quote.get('expiration') or '',
+                    'is_selected': index == 0,
+                })
+            shipment.write({'transportation_option_id': partnered[0]['transportationOptionId']})
+        plan.write({'last_options_raw': self._dump(raw), 'state': 'transport_options_ready'})
         self.env.cr.commit()
 
     def confirm_transportation_options(self, plan):
@@ -298,10 +395,45 @@ class FbaInboundService:
         self.env.cr.commit()
 
     def get_labels(self, plan):
+        """
+        Per ogni spedizione: colli assegnati da Amazon (listShipmentBoxes,
+        con il contenuto, per sapere quale collo fisico va in quale
+        spedizione) e PDF delle etichette (getLabels v0, vedi
+        SpApiClient.get_labels), salvato come allegato della spedizione.
+        """
+        Attachment = self.env['ir.attachment']
         for shipment in plan.shipment_ids:
-            payload = self.client.get_labels(shipment.amazon_shipment_id)
-            shipment.write({'labels_raw_response': self._dump(payload)})
-        self.env.cr.commit()
+            if not shipment.shipment_confirmation_id:
+                self.refresh_shipment_details(plan)
+            boxes, _raw = self._all_pages(
+                lambda token, sid=shipment.amazon_shipment_id: self.client.list_shipment_boxes(
+                    plan.amazon_inbound_plan_id, sid, pagination_token=token,
+                ),
+                'boxes',
+            )
+            box_ids = [b['boxId'] for b in boxes if b.get('boxId')]
+            if not box_ids:
+                raise UserError(f'Amazon non ha restituito i colli della spedizione {shipment.amazon_shipment_id}.')
+            pdf = self.client.get_labels(shipment.shipment_confirmation_id, plan.label_page_type, box_ids)
+            contents = '\n'.join(
+                f"{b.get('boxId')}: " + ', '.join(f"{i.get('msku')} x{i.get('quantity')}" for i in b.get('items') or [])
+                for b in boxes
+            )
+            old = shipment.labels_attachment_id
+            attachment = Attachment.create({
+                'name': f'Etichette colli {shipment.shipment_confirmation_id or shipment.amazon_shipment_id}.pdf',
+                'datas': base64.b64encode(pdf),
+                'mimetype': 'application/pdf',
+                'res_model': 'ke.amazon.inbound.plan.shipment',
+                'res_id': shipment.id,
+            })
+            shipment.write({
+                'labels_attachment_id': attachment.id,
+                'box_count': len(box_ids),
+                'box_contents': contents,
+            })
+            old.unlink()
+            self.env.cr.commit()
 
     def cancel_plan(self, plan):
         self.client.cancel_inbound_plan(plan.amazon_inbound_plan_id)

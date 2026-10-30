@@ -18,6 +18,17 @@ from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
 from .common import no_commit
 
 
+def _tiny_pdf(text):
+    """PDF valido minimo (per merge_pdf), nessuna rete."""
+    import io
+    from reportlab.pdfgen import canvas
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer)
+    pdf.drawString(10, 10, text)
+    pdf.save()
+    return buffer.getvalue()
+
+
 class FakeInboundClient:
     """Finto client Fulfillment Inbound — risposte canned, nessuna rete."""
 
@@ -65,8 +76,18 @@ class FakeInboundClient:
         self._maybe_fail('generate_placement_options')
         return {'operationId': 'OP5'}
 
-    def list_placement_options(self, inbound_plan_id):
-        return {'placementOptions': [{'placementOptionId': 'PLACE1', 'shipmentIds': ['SHIP1', 'SHIP2']}]}
+    def list_placement_options(self, inbound_plan_id, pagination_token=None):
+        # Stessa forma del modello ufficiale v2024-03-20 (PlacementOption).
+        fee = lambda amount: {'description': 'Placement fee', 'target': 'Placement Services',
+                              'type': 'FEE', 'value': {'amount': amount, 'code': 'EUR'}}
+        return {'placementOptions': [
+            {'placementOptionId': 'PLACE1', 'shipmentIds': ['SHIP1', 'SHIP2'], 'status': 'OFFERED',
+             'fees': [fee(0)], 'discounts': []},
+            {'placementOptionId': 'PLACE2', 'shipmentIds': ['SHIP3'], 'status': 'OFFERED',
+             'fees': [fee(12.5)], 'discounts': []},
+            {'placementOptionId': 'PLACE_OLD', 'shipmentIds': ['SHIP9'], 'status': 'EXPIRED',
+             'fees': [], 'discounts': []},
+        ]}
 
     def confirm_placement_option(self, inbound_plan_id, placement_option_id):
         self._maybe_fail('confirm_placement_option')
@@ -95,19 +116,40 @@ class FakeInboundClient:
         self.last_transport_configs = shipment_transportation_configurations
         return {'operationId': 'OP9'}
 
-    def list_transportation_options(self, inbound_plan_id, placement_option_id):
-        return {'transportationOptions': [
-            {'shipmentId': 'SHIP1', 'transportationOptionId': 'TOPT-SHIP1'},
-            {'shipmentId': 'SHIP2', 'transportationOptionId': 'TOPT-SHIP2'},
-        ]}
+    def list_transportation_options(self, inbound_plan_id, placement_option_id, pagination_token=None):
+        # Due pagine, per verificare che vengano lette tutte.
+        option = lambda sid, oid, amount, solution='AMAZON_PARTNERED_CARRIER': {
+            'shipmentId': sid, 'transportationOptionId': oid, 'shippingSolution': solution,
+            'shippingMode': 'GROUND_SMALL_PARCEL', 'carrier': {'name': 'UPS', 'alphaCode': 'UPSN'},
+            'quote': {'cost': {'amount': amount, 'code': 'EUR'}}, 'preconditions': [],
+        }
+        sids = self.placement_shipments.get(placement_option_id, ['SHIP1', 'SHIP2'])
+        if not pagination_token:
+            return {
+                'transportationOptions': [option(sid, f'TOPT-EXP-{sid}', 20.0) for sid in sids]
+                + [option(sid, f'TOPT-OWN-{sid}', 1.0, 'USE_YOUR_OWN_CARRIER') for sid in sids],
+                'pagination': {'nextToken': 'PAGE2'},
+            }
+        return {'transportationOptions': [option(sid, f'TOPT-{sid}', 9.0) for sid in sids]}
+
+    placement_shipments = {'PLACE1': ['SHIP1', 'SHIP2'], 'PLACE2': ['SHIP3']}
+
+    def list_shipment_boxes(self, inbound_plan_id, shipment_id, pagination_token=None):
+        return {'boxes': [{
+            'packageId': f'PKG-{shipment_id}', 'boxId': f'FBA-{shipment_id}U000001',
+            'items': [{'msku': 'ZZT-INB-1', 'quantity': 3}],
+        }]}
+
+    def get_labels(self, shipment_confirmation_id, page_type, box_ids):
+        self._maybe_fail('get_labels')
+        self.last_labels_request = (shipment_confirmation_id, page_type, box_ids)
+        return _tiny_pdf(shipment_confirmation_id)
 
     def confirm_transportation_options(self, inbound_plan_id, transportation_selections):
         self._maybe_fail('confirm_transportation_options')
         self.last_transport_selections = transportation_selections
         return {'operationId': 'OP10'}
 
-    def get_labels(self, shipment_id, **kwargs):
-        return {'DownloadURL': f'https://example.invalid/{shipment_id}'}
 
     def cancel_inbound_plan(self, inbound_plan_id):
         self._maybe_fail('cancel_inbound_plan')
@@ -196,34 +238,34 @@ class TestInboundPlan(TransactionCase):
 
             self.plan.action_generate_placement_options()
             self.assertEqual(self.plan.state, 'placement_options_ready')
-            self.assertEqual(self.plan.placement_option_id, 'PLACE1')
-            self.assertEqual(set(self.plan.shipment_ids.mapped('amazon_shipment_id')), {'SHIP1', 'SHIP2'})
+            self.assertEqual(self.plan.placement_option_id, 'PLACE1', "preselezionata la prima, nell'ordine di Amazon")
+            self.assertEqual(len(self.plan.placement_option_line_ids), 2, "l'opzione scaduta non si propone")
+            self.assertFalse(self.plan.shipment_ids, 'le spedizioni nascono solo dalla conferma')
 
+            # La conferma prosegue da sola fino ai preventivi di trasporto.
             self.plan.action_confirm_placement_option()
-            self.assertEqual(self.plan.state, 'placement_confirmed')
+            self.assertEqual(self.plan.state, 'transport_options_ready')
             self.assertTrue(self.plan.confirmed_by)
             self.assertTrue(self.plan.confirmed_date)
+            self.assertEqual(set(self.plan.shipment_ids.mapped('amazon_shipment_id')), {'SHIP1', 'SHIP2'})
             ship1 = self.plan.shipment_ids.filtered(lambda s: s.amazon_shipment_id == 'SHIP1')
             self.assertEqual(ship1.shipment_confirmation_id, 'CONF-SHIP1')
             self.assertEqual(ship1.destination_fc_name, 'FC-SHIP1')
-
-            self.plan.action_generate_delivery_window_options()
-            self.assertEqual(self.plan.state, 'delivery_window_options_ready')
             self.assertEqual(ship1.delivery_window_option_id, 'DW-SHIP1')
-
-            self.plan.action_confirm_delivery_window_options()
-            self.assertEqual(self.plan.state, 'delivery_window_confirmed')
-
-            self.plan.action_generate_transportation_options()
-            self.assertEqual(self.plan.state, 'transport_options_ready')
+            # Corriere partner più economico, letto anche dalla seconda pagina;
+            # le opzioni con corriere proprio non si propongono.
             self.assertEqual(ship1.transportation_option_id, 'TOPT-SHIP1')
+            self.assertEqual(len(self.plan.transport_option_line_ids.filtered(lambda o: o.shipment_id == ship1)), 2)
 
+            # La conferma del trasporto scarica da sola le etichette.
             self.plan.action_confirm_transportation_options()
-            self.assertEqual(self.plan.state, 'transport_confirmed')
-
-            self.plan.action_get_labels()
             self.assertEqual(self.plan.state, 'labels_ready')
-            self.assertIn('DownloadURL', ship1.labels_raw_response)
+            self.assertEqual(client.last_labels_request[1], 'PackageLabel_Plain_Paper')
+            self.assertEqual(ship1.box_count, 1)
+            self.assertIn('ZZT-INB-1 x3', ship1.box_contents)
+            self.assertEqual(ship1.labels_attachment_id.mimetype, 'application/pdf')
+            download = self.plan.action_download_labels()
+            self.assertIn('/web/content/', download['url'])
 
             self.plan.action_mark_shipped()
             self.assertEqual(self.plan.state, 'shipped')
@@ -296,7 +338,9 @@ class TestInboundPlan(TransactionCase):
                 self.fail('UserError attesa')
             except UserError:
                 pass
-            self.assertEqual(self.plan.state, 'error')
+            # Lo stato resta l'ultimo riuscito (prima diventava 'error', senza
+            # uscita): lo stesso passo si può ripetere.
+            self.assertEqual(self.plan.state, 'plan_created')
             self.assertTrue(self.plan.error_message)
             # I dati dello step precedente, già confermato con successo, non
             # vengono persi dal fallimento dello step successivo.
@@ -319,10 +363,7 @@ class TestInboundPlan(TransactionCase):
             box.action_close_box()
             self.plan.action_set_packing_information()
             self.plan.action_generate_placement_options()
-            self.plan.action_confirm_placement_option()
-            self.plan.action_generate_delivery_window_options()
-            self.plan.action_confirm_delivery_window_options()
-            self.plan.action_generate_transportation_options()
+            self.plan.action_confirm_placement_option()  # prosegue da solo fino al trasporto
             self.plan.action_confirm_transportation_options()
             with self.assertRaises(UserError):
                 self.plan.action_cancel_plan()
@@ -422,7 +463,10 @@ class TestInboundPlan(TransactionCase):
                 self.plan.action_create_plan()
             except UserError:
                 pass
-        self.assertEqual(self.plan.state, 'error')
+        self.assertEqual(self.plan.state, 'draft', 'creazione rifiutata: resta in bozza, si corregge e si riprova')
+        self.assertTrue(self.plan.error_message)
+        # 'Riporta in bozza' resta per i piani storici finiti in 'error'.
+        self.plan.write({'state': 'error'})
         self.plan.action_reset_to_draft()
         self.assertEqual(self.plan.state, 'draft')
         self.assertFalse(self.plan.error_message)
@@ -533,3 +577,100 @@ class TestInboundPlan(TransactionCase):
             box.action_close_box()
             self.plan.action_set_packing_information()
         self.assertEqual(self.plan.state, 'packing_info_sent')
+
+    def _ready_box(self):
+        box = self.env['ke.amazon.inbound.plan.box'].browse(self.plan.action_add_box()['res_id'])
+        box.write({'length_cm': 20, 'width_cm': 20, 'height_cm': 20, 'weight_kg': 5})
+        box.action_fill_remaining()
+        box.action_close_box()
+        return box
+
+    def test_prepare_placement_runs_all_steps_from_draft(self):
+        # 2026-10-30: un bottone dalla bozza fino alle opzioni di collocazione,
+        # fermandosi prima della conferma irreversibile.
+        self._ready_box()
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_prepare_placement()
+        self.assertEqual(self.plan.state, 'placement_options_ready')
+        self.assertNotIn('confirm_placement_option', client.calls, 'mai oltre il punto irreversibile')
+        self.assertEqual(client.calls.get('set_packing_information'), 1)
+
+    def test_prepare_placement_requires_ready_boxes_before_creating(self):
+        client = FakeInboundClient()
+        with self._with_client(client):
+            with self.assertRaises(UserError):
+                self.plan.action_prepare_placement()
+        self.assertNotIn('create_inbound_plan', client.calls, 'nessun piano su Amazon senza colli pronti')
+
+    def test_prepare_placement_resumes_after_failure(self):
+        self._ready_box()
+        client = FakeInboundClient(fail_at='set_packing_information')
+        with self._with_client(client):
+            try:
+                self.plan.action_prepare_placement()
+                self.fail('UserError attesa')
+            except UserError:
+                pass
+            self.assertEqual(self.plan.state, 'packing_confirmed', "fermo all'ultimo passo riuscito")
+            self.assertTrue(self.plan.error_message)
+            client.fail_at = None
+            self.plan.action_prepare_placement()
+        self.assertEqual(self.plan.state, 'placement_options_ready')
+        self.assertFalse(self.plan.error_message)
+        self.assertEqual(client.calls['create_inbound_plan'], 1, 'la ripresa non ricrea il piano')
+
+    def test_chosen_placement_option_is_the_one_confirmed(self):
+        self._ready_box()
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_prepare_placement()
+            second = self.plan.placement_option_line_ids.filtered(lambda o: o.amazon_option_id == 'PLACE2')
+            self.assertEqual(second.cost, 12.5)
+            second.action_select()
+            self.assertEqual(self.plan.placement_option_id, 'PLACE2')
+            self.assertEqual(self.plan.placement_option_line_ids.filtered('is_selected'), second)
+            self.plan.action_confirm_placement_option()
+        self.assertEqual(self.plan.shipment_ids.mapped('amazon_shipment_id'), ['SHIP3'],
+                         "spedizioni dell'opzione scelta, non della prima elencata")
+        with self.assertRaises(UserError):
+            second.action_select()  # dopo la conferma non si cambia più
+
+    def test_chosen_transport_option_is_the_one_confirmed(self):
+        self._ready_box()
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_prepare_placement()
+            self.plan.action_confirm_placement_option()
+            ship1 = self.plan.shipment_ids.filtered(lambda s: s.amazon_shipment_id == 'SHIP1')
+            pricier = self.plan.transport_option_line_ids.filtered(
+                lambda o: o.amazon_option_id == 'TOPT-EXP-SHIP1'
+            )
+            pricier.action_select()
+            self.assertEqual(ship1.transportation_option_id, 'TOPT-EXP-SHIP1')
+            self.plan.action_confirm_transportation_options()
+        selected = {s['shipmentId']: s['transportationOptionId'] for s in client.last_transport_selections}
+        self.assertEqual(selected['SHIP1'], 'TOPT-EXP-SHIP1')
+        self.assertEqual(selected['SHIP2'], 'TOPT-SHIP2', 'le altre spedizioni restano sulla più economica')
+
+    def test_labels_failure_after_transport_keeps_confirmation(self):
+        self._ready_box()
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_prepare_placement()
+            self.plan.action_confirm_placement_option()
+            client.fail_at = 'get_labels'
+            try:
+                self.plan.action_confirm_transportation_options()
+                self.fail('UserError attesa')
+            except UserError as exc:
+                self.assertIn('Trasporto confermato', str(exc))
+            self.assertEqual(self.plan.state, 'transport_confirmed')
+            client.fail_at = None
+            self.plan.action_get_labels()
+        self.assertEqual(self.plan.state, 'labels_ready')
+        self.assertEqual(len(self.plan.shipment_ids.labels_attachment_id), 2)
+        self.assertEqual(client.last_labels_request[2], ['FBA-SHIP2U000001'],
+                         'boxId di listShipmentBoxes, come richiede getLabels')
+        download = self.plan.action_download_labels()
+        self.assertIn('/web/content/', download['url'], 'due spedizioni: un PDF unico')

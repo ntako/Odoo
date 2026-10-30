@@ -37,3 +37,5 @@ access_ke_amazon_inbound_plan_box_line_manager,ke.amazon.inbound.plan.box.line m
 access_ke_amazon_inbound_plan_shipment_user,ke.amazon.inbound.plan.shipment user,model_ke_amazon_inbound_plan_shipment,stock.group_stock_user,1,0,0,0
 access_ke_amazon_inbound_plan_shipment_manager,ke.amazon.inbound.plan.shipment manager,model_ke_amazon_inbound_plan_shipment,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_inbound_box_scan_wizard,ke.amazon.inbound.box.scan.wizard,model_ke_amazon_inbound_box_scan_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_option_user,ke.amazon.inbound.plan.option user,model_ke_amazon_inbound_plan_option,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_option_manager,ke.amazon.inbound.plan.option manager,model_ke_amazon_inbound_plan_option,stock.group_stock_manager,1,1,1,1
