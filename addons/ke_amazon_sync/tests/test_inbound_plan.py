@@ -260,7 +260,7 @@ class TestInboundPlan(TransactionCase):
             # La conferma del trasporto scarica da sola le etichette.
             self.plan.action_confirm_transportation_options()
             self.assertEqual(self.plan.state, 'labels_ready')
-            self.assertEqual(client.last_labels_request[1], 'PackageLabel_Plain_Paper')
+            self.assertEqual(client.last_labels_request[1], 'PackageLabel_Thermal', 'etichette collo 15x10 cm')
             self.assertEqual(ship1.box_count, 1)
             self.assertIn('ZZT-INB-1 x3', ship1.box_contents)
             self.assertEqual(ship1.labels_attachment_id.mimetype, 'application/pdf')

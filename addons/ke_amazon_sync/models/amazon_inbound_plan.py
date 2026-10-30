@@ -15,11 +15,14 @@ BOX_EDITABLE_STATES = ('draft', 'plan_created', 'packing_confirmed')
 # Formati delle etichette collo accettati da getLabels (v0, PageType) — solo
 # quelli utili qui; un formato non supportato nel marketplace dà errore da
 # Amazon, e si può cambiare e riscaricare.
+# Default termica 4x6": le etichette collo in uso sono 15x10 cm (indicato
+# dall'utente il 2026-10-30), cioè il formato 4x6 pollici (10,2x15,2 cm).
 LABEL_PAGE_TYPES = [
+    ('PackageLabel_Thermal', 'Termica 10x15 cm (4x6")'),
+    ('PackageLabel_Thermal_Unified', 'Termica 10x15 cm (4x6"), formato unificato'),
     ('PackageLabel_Plain_Paper', 'A4, una etichetta per foglio'),
     ('PackageLabel_A4_2', 'A4, 2 etichette per foglio'),
     ('PackageLabel_A4_4', 'A4, 4 etichette per foglio'),
-    ('PackageLabel_Thermal', 'Termica 4x6 pollici'),
 ]
 
 
@@ -139,7 +142,7 @@ class AmazonInboundPlan(models.Model):
     )
     label_page_type = fields.Selection(
         LABEL_PAGE_TYPES, string='Formato etichette collo', required=True,
-        default='PackageLabel_Plain_Paper',
+        default='PackageLabel_Thermal',
         help="Formato del PDF delle etichette dei colli (una per collo). Se Amazon lo "
              "rifiuta per il marketplace, cambialo e premi di nuovo \"Scarica etichette collo\".",
     )
