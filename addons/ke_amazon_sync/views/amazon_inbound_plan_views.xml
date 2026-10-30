@@ -105,6 +105,9 @@
                             type="object" class="btn-primary" invisible="state != 'transport_confirmed'"/>
                     <button name="action_mark_shipped" string="Segna come spedito"
                             type="object" class="btn-primary" invisible="state != 'labels_ready'"/>
+                    <button name="action_reset_to_draft" string="Riporta in bozza"
+                            type="object" class="btn-secondary"
+                            invisible="state != 'error' or amazon_inbound_plan_id"/>
                     <button name="action_cancel_plan" string="Annulla piano"
                             type="object" class="btn-secondary"
                             invisible="state in ('shipped', 'done', 'cancelled', 'error')"

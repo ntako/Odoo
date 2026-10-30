@@ -42,7 +42,11 @@ class AmazonInboundPlan(models.Model):
     source_name = fields.Char('Nome (indirizzo origine)')
     source_address_line1 = fields.Char('Indirizzo (indirizzo origine)')
     source_city = fields.Char('Città (indirizzo origine)')
-    source_state_code = fields.Char('Provincia/stato (indirizzo origine)')
+    source_state_code = fields.Char(
+        'Provincia/stato (indirizzo origine)',
+        help="Sigla della provincia, es. 'LE' — non il nome per esteso: con 'Lecce' "
+             "Amazon rispondeva \"Address was unable to be verified\" (2026-10-30).",
+    )
     source_country_code = fields.Char('Paese (indirizzo origine, ISO2)', default='IT')
     source_postal_code = fields.Char('CAP (indirizzo origine)')
     source_email = fields.Char('Email (indirizzo origine)')
@@ -368,6 +372,24 @@ class AmazonInboundPlan(models.Model):
         self.ensure_one()
         self._require_state('labels_ready')
         self.write({'state': 'shipped'})
+
+    def action_reset_to_draft(self):
+        """
+        Da 'Errore' a 'Bozza', solo se il piano non è mai stato creato su
+        Amazon (nessun Inbound Plan ID): un createInboundPlan rifiutato
+        lasciava il piano bloccato in errore senza modo di correggere i dati
+        e riprovare (trovato dal vivo il 2026-10-30). Con un ID già assegnato
+        l'errore viene da uno step successivo, e tornare in bozza
+        disallineerebbe Odoo da un piano che su Amazon esiste già.
+        """
+        self.ensure_one()
+        self._require_state('error')
+        if self.amazon_inbound_plan_id:
+            raise UserError(
+                'Il piano esiste già su Amazon: non può tornare in bozza. '
+                'Annullalo o creane uno nuovo per lo stesso trasferimento.'
+            )
+        self.write({'state': 'draft', 'error_message': False})
 
     def action_cancel_plan(self):
         self.ensure_one()

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from odoo.exceptions import UserError
 from odoo.tests.common import TransactionCase, tagged
 
+from odoo.addons.ke_amazon_sync.services.fba_inbound_service import FbaInboundService
 from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
 
 from .common import no_commit
@@ -165,7 +166,7 @@ class TestInboundPlan(TransactionCase):
             self.assertEqual(self.plan.state, 'plan_created')
             self.assertEqual(self.plan.amazon_inbound_plan_id, 'PLAN000000000000000000000000000001')
             self.assertEqual(client.last_items, [{
-                'msku': 'ZZT-INB-1', 'quantity': 3, 'labelOwner': 'SELLER', 'prepOwner': 'SELLER',
+                'msku': 'ZZT-INB-1', 'quantity': 3, 'labelOwner': 'NONE', 'prepOwner': 'NONE',  # nessun FNSKU X0: vedi _owners_for
             }])
 
             self.plan.action_generate_packing_options()
@@ -390,3 +391,37 @@ class TestInboundPlan(TransactionCase):
         box.action_fill_remaining()
         self.assertEqual(len(box.line_ids), 1, 'nessuna riga doppia per lo stesso prodotto')
         self.assertEqual(box.line_ids.quantity, 3)
+
+    def test_label_and_prep_owner_follow_fnsku(self):
+        # Amazon rifiutava il piano con labelOwner/prepOwner sempre SELLER
+        # ("Accepted values: [NONE]", primo piano reale del 2026-10-30).
+        client = FakeInboundClient()
+        self.product.x_amazon_fnsku = 'X0ZZINB0001'
+        with self._with_client(client):
+            self.plan.action_create_plan()
+        item = client.last_items[0]
+        self.assertEqual(item['labelOwner'], 'SELLER', 'FNSKU X0: etichetta da applicare')
+        self.assertEqual(item['prepOwner'], 'NONE')
+
+        service = FbaInboundService(self.env, client)
+        self.product.x_amazon_fnsku = 'B0ZZINB0001'
+        self.assertEqual(
+            service._owners_for(self.product), {'labelOwner': 'NONE', 'prepOwner': 'NONE'},
+            "marchio proprio (B0 = ASIN): nessuna etichetta, Amazon accetta solo NONE",
+        )
+
+    def test_reset_to_draft_only_if_never_created_on_amazon(self):
+        client = FakeInboundClient(fail_at='create_inbound_plan')
+        with self._with_client(client):
+            try:
+                self.plan.action_create_plan()
+            except UserError:
+                pass
+        self.assertEqual(self.plan.state, 'error')
+        self.plan.action_reset_to_draft()
+        self.assertEqual(self.plan.state, 'draft')
+        self.assertFalse(self.plan.error_message)
+
+        self.plan.write({'state': 'error', 'amazon_inbound_plan_id': 'PLAN_ESISTENTE'})
+        with self.assertRaises(UserError):
+            self.plan.action_reset_to_draft()

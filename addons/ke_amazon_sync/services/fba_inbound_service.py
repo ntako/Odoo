@@ -34,6 +34,25 @@ class FbaInboundService:
             raise UserError(f'{product.display_name}: nessun SKU Amazon né codice interno.')
         return sku
 
+    def _owners_for(self, product):
+        """
+        labelOwner/prepOwner per uno SKU. Prima erano sempre 'SELLER', e
+        Amazon rifiutava il piano (createInboundPlan, 2026-10-30): "does not
+        require labelOwner but SELLER was assigned. Accepted values: [NONE]".
+        - labelOwner: SELLER solo se l'FNSKU va davvero stampato (prefisso
+          'X0'); marchio proprio ('B0', in realtà l'ASIN) → NONE, stessa
+          regola dell'etichettatura (product._amazon_fnsku_needs_label).
+        - prepOwner: NONE — nessun articolo di questo venditore ha richiesto
+          preparazione finora (Amazon ha accettato solo NONE su entrambi gli
+          SKU del primo piano reale). Se un giorno uno SKU la richiedesse,
+          Amazon lo dice nello stesso modo ("requires prepOwner") e andrà
+          gestito per prodotto.
+        """
+        return {
+            'labelOwner': 'SELLER' if product._amazon_fnsku_needs_label() else 'NONE',
+            'prepOwner': 'NONE',
+        }
+
     def _build_items(self, plan):
         """Un elemento per prodotto del trasferimento collegato (quantità aggregata se il
         prodotto compare su più righe), non per collo: il manifesto del piano è fisso alla
@@ -46,8 +65,7 @@ class FbaInboundService:
         return [{
             'msku': self._sku_for(product),
             'quantity': int(qty),
-            'labelOwner': 'SELLER',
-            'prepOwner': 'SELLER',
+            **self._owners_for(product),
         } for product, qty in qty_by_product.items()]
 
     def _build_source_address(self, plan):
@@ -80,8 +98,7 @@ class FbaInboundService:
             'items': [{
                 'msku': self._sku_for(line.product_id),
                 'quantity': line.quantity,
-                'labelOwner': 'SELLER',
-                'prepOwner': 'SELLER',
+                **self._owners_for(line.product_id),
             } for line in box.line_ids],
         }
 
