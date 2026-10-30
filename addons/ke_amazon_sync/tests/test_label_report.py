@@ -28,7 +28,10 @@ class TestLabelReport(TransactionCase):
         uri = log._get_barcode_data_uri()
         self.assertTrue(uri.startswith('data:image/png;base64,'))
 
-    def test_report_html_embeds_barcode_as_data_uri_not_http(self):
+    def test_report_html_embeds_barcode_as_vector_bars_not_http(self):
+        """
+        Barre vettoriali, non più PNG: la PNG ricampionata dal driver Zebra a
+        203 dpi usciva a barre puntinate (segnalato dal vivo il 2026-10-30)."""
         log = self.env['ke.amazon.fba.label.log'].create({
             'product_id': self.product.id, 'fnsku': 'B0ZZREPORT1',
         })
@@ -36,8 +39,22 @@ class TestLabelReport(TransactionCase):
             'ke_amazon_sync.report_amazon_fba_label_document', log.ids,
         )
         html = html.decode() if isinstance(html, bytes) else html
-        self.assertIn('data:image/png;base64,', html)
+        self.assertIn('<svg', html)
+        self.assertNotIn('viewbox', html.lower(), 'lxml porta viewBox in minuscolo, wkhtmltopdf perde la scala')
+        self.assertNotIn('data:image/png', html, 'barcode raster: torna la retinatura sulla Zebra')
         self.assertNotIn('/report/barcode/', html, 'il barcode non deve dipendere da un fetch HTTP')
+
+    def test_barcode_bars_only_with_exact_module(self):
+        """Il rettangolo di sfondo di reportlab (largo quanto tutto il
+        disegno) non deve finire tra le barre nere; ogni modulo 0,25mm."""
+        log = self.env['ke.amazon.fba.label.log'].create({
+            'product_id': self.product.id, 'fnsku': 'X002KD32I5',
+        })
+        html = str(log._get_barcode_svg())
+        # Code128 di 'X002KD32I5': 145 moduli = 12 simboli da 11 (start, 10
+        # car., check) + stop da 13; barre = 12 x 3 + 4 dello stop = 40.
+        self.assertIn('width="36.25mm"', html, '145 moduli x 0,25mm')
+        self.assertEqual(html.count('<rect'), 40)
 
     def test_report_html_no_external_assets(self):
         """Niente t-call="web.html_container": nessun <link>/<script> esterno
@@ -70,13 +87,22 @@ class TestLabelReport(TransactionCase):
 
     def test_report_paperformat_is_wide_not_tall(self):
         paperformat = self.env.ref('ke_amazon_sync.paperformat_amazon_fba_label')
-        self.assertEqual(paperformat.page_width, 50)
-        self.assertEqual(paperformat.page_height, 25)
+        # 40x30mm, il rotolo reale in uso (2026-10-30; prima 50x25mm).
+        self.assertEqual(paperformat.page_width, 40)
+        self.assertEqual(paperformat.page_height, 30)
         self.assertEqual(
             paperformat.orientation, 'Portrait',
             "'Landscape' qui farebbe ruotare page_width/page_height già larghi, "
-            'producendo un\'etichetta 25x50mm invece di 50x25mm (verificato dal vivo via pdfinfo)',
+            'producendo un\'etichetta 30x40mm invece di 40x30mm (verificato dal vivo via pdfinfo)',
         )
+
+    def test_report_paperformat_disables_smart_shrinking(self):
+        """
+        Con lo smart shrinking di wkhtmltopdf attivo ogni misura CSS usciva
+        ridotta a ~0,8 (48mm → 38,4mm, misurato il 2026-10-30): proporzioni
+        diverse dall'etichetta fisica, impossibili da adattare in stampa."""
+        paperformat = self.env.ref('ke_amazon_sync.paperformat_amazon_fba_label')
+        self.assertTrue(paperformat.disable_shrinking)
 
     def test_report_paperformat_has_no_dpi(self):
         """

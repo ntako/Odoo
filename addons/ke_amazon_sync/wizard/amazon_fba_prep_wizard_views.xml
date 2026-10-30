@@ -21,7 +21,8 @@
                         <field name="x_amazon_labeled_qty" string="Etichettata"/>
                         <button name="action_print_fnsku_label" string="Stampa" type="object"
                                 icon="fa-print"
-                                confirm="Stampare in un unico documento tutte le etichette FNSKU ancora mancanti per QUESTA riga (Prevista - Etichettata)? Verifica di avere in mano tutte le unità corrette prima di confermare — per ristampare una riga già completata usa invece la scansione EAN con 'Forza ristampa'."/>
+                                context="{'fnsku_force_reprint': parent.force_reprint, 'fnsku_quantity': parent.scan_quantity}"
+                                confirm="Stampare le etichette FNSKU di QUESTA riga? Senza 'Forza ristampa' stampa in un unico documento tutte quelle ancora mancanti (Prevista - Etichettata); con 'Forza ristampa' spuntata ristampa 'Quantità' copie, anche se la riga è già completata. Verifica di avere in mano le unità corrette prima di confermare."/>
                     </list>
                 </field>
                 <footer>

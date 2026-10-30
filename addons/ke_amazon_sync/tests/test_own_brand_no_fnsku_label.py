@@ -82,7 +82,10 @@ class TestOwnBrandInPrepWizard(TransactionCase):
 
     def test_row_button_own_brand_completes_without_error(self):
         result = self.move.action_print_fnsku_label()
-        self.assertTrue(result)
+        # Notifica, non True muto: il click sembrava non fare niente
+        # (segnalato dal vivo il 2026-10-30).
+        self.assertEqual(result.get('tag'), 'display_notification')
+        self.assertIn('marchio proprio', result['params']['message'])
         self.assertEqual(self.move.x_amazon_labeled_qty, 3, "completa tutta la riga in un colpo solo")
 
     def test_picking_can_be_confirmed_without_any_real_print(self):

@@ -126,17 +126,41 @@ class StockMove(models.Model):
         Stampa in un colpo solo TUTTA la quantità ancora da completare per
         questa riga (Prevista - Etichettata), un unico documento con una
         pagina per etichetta — non una copia alla volta. Richiesto
-        dall'utente il 2026-10-29. Nessuna ristampa da qui: per quello resta
-        la scansione, che ha il campo dedicato.
+        dall'utente il 2026-10-29.
+        Con "Forza ristampa" spuntata nel wizard (passata dal bottone nel
+        context, insieme a "Quantità", vedi la vista) ristampa invece
+        'Quantità' copie come ristampa, anche su una riga già completata —
+        stessa regola della scansione. Richiesto dall'utente il 2026-10-30.
+        Quando non c'è nessun PDF da scaricare (marchio proprio, o lavoro
+        accodato alla stampa di rete) mostra una notifica: prima tornava
+        True e basta, e il click sembrava non aver fatto niente (segnalato
+        dal vivo il 2026-10-30 su un prodotto marchio proprio).
         """
         self.ensure_one()
-        remaining = self.product_uom_qty - self.x_amazon_labeled_qty
-        if remaining <= 0:
-            raise UserError(
-                f'{self.product_id.display_name}: quantità già completata '
-                f'({self.x_amazon_labeled_qty:g}/{self.product_uom_qty:g}).'
-            )
-        result = self._print_fnsku_labels(quantity=int(round(remaining)), force_reprint=False)
-        if result['skipped_print'] or result['queued']:
-            return True
-        return result['report_action']
+        force_reprint = bool(self.env.context.get('fnsku_force_reprint'))
+        if force_reprint:
+            quantity = self.env.context.get('fnsku_quantity') or 1
+        else:
+            remaining = self.product_uom_qty - self.x_amazon_labeled_qty
+            if remaining <= 0:
+                raise UserError(
+                    f'{self.product_id.display_name}: quantità già completata '
+                    f'({self.x_amazon_labeled_qty:g}/{self.product_uom_qty:g}). '
+                    f'Spunta "Forza ristampa" per stampare comunque altre copie.'
+                )
+            quantity = int(round(remaining))
+        result = self._print_fnsku_labels(quantity=quantity, force_reprint=force_reprint)
+        if result['report_action']:
+            return result['report_action']
+        status = 'Ristampa' if force_reprint else 'Completata'
+        if result['skipped_print']:
+            message = (f'{status} {result["product"]} ({quantity} unità): marchio proprio, '
+                       f'nessuna etichetta da stampare.')
+        else:
+            message = (f'{status} {result["product"]}: {quantity} etichette '
+                       f'in coda di stampa su "{result["station"]}".')
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {'message': message, 'type': 'info'},
+        }

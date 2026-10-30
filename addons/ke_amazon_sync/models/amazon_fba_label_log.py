@@ -1,5 +1,9 @@
 import base64
 
+from markupsafe import Markup
+from reportlab.graphics.barcode import createBarcodeDrawing
+from reportlab.graphics.shapes import Group, Rect
+
 from odoo import api, fields, models
 
 
@@ -108,3 +112,52 @@ class AmazonFbaLabelLog(models.Model):
             'Code128', self.fnsku, width=600, height=150, humanreadable=0, quiet=1,
         )
         return 'data:image/png;base64,%s' % base64.b64encode(png).decode()
+
+    def _get_barcode_svg(self, module_mm=0.25):
+        """
+        Barcode Code128 del FNSKU come SVG inline con le barre in millimetri:
+        sostituisce nel report la PNG di _get_barcode_data_uri. La PNG (600
+        px, ~400 ppi nel PDF) veniva ricampionata dal driver Windows della
+        Zebra a 203 dpi: moduli non interi in punti stampante → bordi grigi →
+        retinatura, barre "puntinate" sull'etichetta fisica (segnalato
+        dall'utente il 2026-10-30 con foto). I rettangoli SVG escono dal PDF
+        vettoriali, e il driver li rasterizza da sé alla propria risoluzione,
+        solo nero pieno.
+        Coordinate in mm su ogni <rect>, nessun viewBox: _prepare_html ripassa
+        l'HTML con lxml, che porta gli attributi in minuscolo (viewBox →
+        viewbox), e il WebKit di wkhtmltopdf perdeva la scala (barcode oltre
+        il bordo dell'etichetta). Nemmeno <div> posizionati: il layout di
+        WebKit arrotonda a pixel interi (1px = 0,26mm), le barre da un modulo
+        sparivano — entrambi verificati sul PDF il 2026-10-30.
+        Le barre vengono da reportlab (stessa codifica Code128 di
+        ir.actions.report.barcode), in unità di modulo; ogni modulo è
+        'module_mm' millimetri reali (il formato carta ha lo smart shrinking
+        disattivato): 0,25mm = 2 punti esatti della testina a 203 dpi, barre
+        tutte della stessa misura. Un FNSKU di 10 caratteri è al massimo 145
+        moduli = 36,25mm, dentro i 40mm dell'etichetta. L'altezza la decide
+        il template (100% del contenitore). Nessuna richiesta di rete.
+        """
+        self.ensure_one()
+        drawing = createBarcodeDrawing(
+            'Code128', value=self.fnsku, barWidth=1, barHeight=1, humanReadable=False, quiet=False,
+        )
+        bars = []
+        stack = [drawing]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Rect):
+                bars.append(node)
+            elif isinstance(node, Group):
+                stack.extend(node.contents)
+            elif hasattr(node, 'draw'):
+                stack.append(node.draw())
+        # Il rettangolo largo quanto tutto il disegno è lo sfondo, non una barra.
+        rects = ''.join(
+            f'<rect x="{bar.x * module_mm:g}mm" y="0" width="{bar.width * module_mm:g}mm" height="100%"/>'
+            for bar in sorted(bars, key=lambda bar: bar.x) if bar.width < drawing.width
+        )
+        return Markup(
+            f'<svg xmlns="http://www.w3.org/2000/svg" fill="#000" '
+            f'width="{drawing.width * module_mm:g}mm" height="100%" '
+            f'style="display:block;margin:0 auto;">{rects}</svg>'
+        )

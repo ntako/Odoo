@@ -80,6 +80,19 @@ class TestFbaPrepWizardLabeledDisplay(TransactionCase):
         with self.assertRaises(UserError):
             self.move.action_print_fnsku_label()
 
+    def test_print_button_with_force_reprint_uses_wizard_quantity(self):
+        # Richiesto dall'utente il 2026-10-30: "Forza ristampa" e "Quantità"
+        # del wizard valgono anche per il bottone sulla riga (passate dalla
+        # vista nel context, parent.force_reprint / parent.scan_quantity).
+        self.move.action_print_fnsku_label()  # completa subito le 3 previste
+        action = self.move.with_context(
+            fnsku_force_reprint=True, fnsku_quantity=2,
+        ).action_print_fnsku_label()
+        self.assertEqual(len(action.get('context', {}).get('active_ids', [])), 2)
+        self.assertEqual(self.move.x_amazon_labeled_qty, 3, "le ristampe non contano come unità completate")
+        logs = self.env['ke.amazon.fba.label.log'].search([('move_id', '=', self.move.id)])
+        self.assertEqual(len(logs.filtered('is_reprint')), 2)
+
     def test_scan_and_button_share_the_same_count(self):
         # Scansione e bottone incrementano lo STESSO conteggio, non due
         # storie separate — garantisce che non si possa superare la
