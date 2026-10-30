@@ -49,9 +49,12 @@ class AmazonFbaStandaloneLabelWizard(models.TransientModel):
         self.ean_scan = False
         self.product_id = product.id
         fnsku = product._get_amazon_fnsku()
+        if fnsku and not product._amazon_fnsku_needs_label():
+            fnsku_note = f'{fnsku} — marchio proprio, nessuna etichetta necessaria'
+        else:
+            fnsku_note = fnsku or 'MANCANTE'
         self.last_scan_message = (
-            f'{product.display_name} — SKU {product.default_code or "-"} — '
-            f'FNSKU {fnsku or "MANCANTE"}'
+            f'{product.display_name} — SKU {product.default_code or "-"} — FNSKU {fnsku_note}'
         )
 
     def action_print(self):
@@ -59,33 +62,33 @@ class AmazonFbaStandaloneLabelWizard(models.TransientModel):
         product = self._resolve_product()
         fnsku = product._get_amazon_fnsku()
         if not fnsku:
-            raise UserError(f'{product.display_name}: FNSKU mancante. Esegui prima "Import FNSKU".')
+            raise UserError(f'{product.display_name}: FNSKU non ancora importato. Esegui prima "Import FNSKU".')
         qty = self.quantity or 0
         if qty <= 0:
             raise UserError('Indica un numero di copie maggiore di zero.')
 
-        # Nessun move_id/picking_id: stampa indipendente da qualunque
-        # spedizione, non tocca giacenza né richiede un trasferimento aperto
-        # (vedi amazon_fba_label_log.py). Un record per copia, così il report
-        # (un foglio per 'doc') stampa esattamente 'qty' etichette.
-        logs = self.env['ke.amazon.fba.label.log'].create([{
-            'product_id': product.id,
-            'fnsku': fnsku,
-        } for _ in range(qty)])
-
-        # "Usa stampa di rete (ZPL)" (Impostazioni → Amazon): se attiva e con
-        # una postazione configurata, accoda invece di generare il PDF — vedi
-        # ke.amazon.print.station._get_configured_station(). Record vuoto
-        # (opzione disattivata, comportamento di sempre) non è un errore.
-        station = self.env['ke.amazon.print.station']._get_configured_station()
-        if station:
-            for log in logs:
-                self.env['ke.amazon.print.job']._enqueue_from_label_log(station, log)
+        if not product._amazon_fnsku_needs_label():
+            # FNSKU con prefisso 'B0' (in realtà l'ASIN): marchio proprio,
+            # traccia tramite il codice del produttore già sull'unità —
+            # nessuna etichetta da stampare. Vedi product.product.
+            # _amazon_fnsku_needs_label. Nessun log creato qui: a differenza
+            # di stock.move._print_fnsku_labels non c'è nessuna quantità da
+            # "completare" in questo flusso standalone.
             self.last_scan_message = (
-                f'{qty} etichetta/e {product.display_name} in coda di stampa su "{station.name}".'
+                f'{product.display_name}: marchio proprio, nessuna etichetta FNSKU necessaria '
+                f'(traccia tramite il codice del produttore).'
             )
             return True
 
-        return self.env.ref('ke_amazon_sync.action_report_amazon_fba_label').report_action(
-            logs, config=False,
-        )
+        # Nessun move_id/picking_id: stampa indipendente da qualunque
+        # spedizione, non tocca giacenza né richiede un trasferimento aperto
+        # (vedi amazon_fba_label_log.py). Logica di creazione/dispatch
+        # condivisa con stock.move._print_fnsku_labels e il bottone sulle
+        # righe del wizard "Spedisci a FBA" — vedi _create_and_dispatch.
+        result = self.env['ke.amazon.fba.label.log']._create_and_dispatch(product, fnsku, qty)
+        if result['queued']:
+            self.last_scan_message = (
+                f'{qty} etichetta/e {product.display_name} in coda di stampa su "{result["station"]}".'
+            )
+            return True
+        return result['report_action']

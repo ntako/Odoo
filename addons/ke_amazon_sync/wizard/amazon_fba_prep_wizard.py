@@ -8,6 +8,13 @@ class AmazonFbaPrepWizard(models.TransientModel):
 
     picking_id = fields.Many2one('stock.picking', string='Spedizione', required=True)
     ean_scan = fields.Char('Scansiona EAN')
+    scan_quantity = fields.Integer(
+        'Quantità', default=1,
+        help="Unità identiche già in mano per lo stesso SKU: scansioni una volta sola e "
+             "vengono stampate/accodate tutte le copie in un unico documento (una pagina "
+             "per etichetta), invece di scansionare un'unità alla volta. Non può superare "
+             "la quantità ancora da completare per quella riga, a meno di 'Forza ristampa'.",
+    )
     force_reprint = fields.Boolean(
         'Forza ristampa',
         help="Spunta per stampare di nuovo l'etichetta di una riga già completata "
@@ -28,19 +35,18 @@ class AmazonFbaPrepWizard(models.TransientModel):
 
     def _labeled_count(self, move):
         """
-        Quantità già effettivamente etichettata per 'move', contata dallo
-        storico (ke.amazon.fba.label.log), NON da move.quantity: su questa
-        versione di Odoo, action_assign() precompila move.quantity con
-        l'intera quantità prevista non appena la riga è riservata (anche per
-        prodotti non storable), con picked=False — quel valore rappresenta
-        "quanto SAREBBE da fare", non "quanto è stato fisicamente etichettato
-        finora". Verificato con un test reale (non solo dedotto): dopo
-        action_assign() su un prodotto non storable, quantity era già = alla
-        quantità richiesta con picked ancora False.
+        Quantità già effettivamente etichettata per 'move' — delega al campo
+        calcolato stock.move.x_amazon_labeled_qty (stesso conteggio reale
+        dallo storico ke.amazon.fba.label.log, non move.quantity: su questa
+        versione di Odoo action_assign() precompila move.quantity con
+        l'intera quantità prevista non appena la riga è riservata, con
+        picked=False, prima di qualunque etichettatura reale). Il campo è
+        stato estratto qui per poterlo mostrare anche nella vista (colonna
+        "Etichettata") — prima la vista leggeva 'quantity' direttamente,
+        mostrando una spedizione come già completamente etichettata ancora
+        prima di scansionare la prima unità. Segnalato dal vivo il 2026-10-29.
         """
-        return self.env['ke.amazon.fba.label.log'].search_count([
-            ('move_id', '=', move.id), ('is_reprint', '=', False),
-        ])
+        return move.x_amazon_labeled_qty
 
     def _find_move(self, barcode):
         """
@@ -71,64 +77,24 @@ class AmazonFbaPrepWizard(models.TransientModel):
             raise UserError('Scansiona o digita un codice EAN.')
 
         move = self._find_move(barcode)
-        product = move.product_id
-
-        # FNSKU della variante per una famiglia, del template per un prodotto
-        # semplice — mai quello del template su una famiglia (vedi
-        # product.product._get_amazon_fnsku).
-        fnsku = product._get_amazon_fnsku()
-        if not fnsku:
-            raise UserError(f'{product.display_name}: FNSKU mancante. Esegui prima "Import FNSKU".')
-
-        labeled = self._labeled_count(move)
-        is_complete = labeled >= move.product_uom_qty
-        if is_complete and not self.force_reprint:
-            raise UserError(
-                f'{product.display_name}: quantità già completata '
-                f'({labeled:g}/{move.product_uom_qty:g}). '
-                f'Spunta "Forza ristampa" per stampare comunque una copia.'
-            )
-
-        is_reprint = is_complete
-        if not is_reprint:
-            labeled += 1
-            # Allinea move.quantity al conteggio REALE etichettato finora (non
-            # al valore precompilato da action_assign, vedi _labeled_count) —
-            # è quello che _action_done() userà per chiudere il trasferimento.
-            move.quantity = labeled
-            move.picked = True
-
-        log = self.env['ke.amazon.fba.label.log'].create({
-            'picking_id': self.picking_id.id,
-            'move_id': move.id,
-            'product_id': product.id,
-            'fnsku': fnsku,
-            'is_reprint': is_reprint,
-        })
+        quantity = self.scan_quantity or 1
+        # Logica di completamento/registrazione condivisa con il bottone di
+        # stampa diretta sulla riga — vedi stock.move._print_fnsku_labels.
+        result = move._print_fnsku_labels(quantity=quantity, force_reprint=self.force_reprint)
+        self.scan_quantity = 1
         self.force_reprint = False
-        status = "RISTAMPA" if is_reprint else "OK"
+        status = "RISTAMPA" if result['is_reprint'] else "OK"
+        qty_note = f' ({quantity} etichette)' if quantity > 1 else ''
         self.last_scan_message = (
-            f'{status} {product.display_name}: {labeled:g}/{move.product_uom_qty:g}'
+            f'{status} {result["product"]}: {result["labeled"]:g}/{move.product_uom_qty:g}{qty_note}'
         )
-
-        # "Usa stampa di rete (ZPL)" (Impostazioni → Amazon): se attiva e con
-        # una postazione configurata, accoda invece di generare il PDF — vedi
-        # ke.amazon.print.station._get_configured_station(). Record vuoto
-        # (opzione disattivata, comportamento di sempre) non è un errore.
-        station = self.env['ke.amazon.print.station']._get_configured_station()
-        if station:
-            self.env['ke.amazon.print.job']._enqueue_from_label_log(station, log)
-            self.last_scan_message += f' — in coda di stampa su "{station.name}"'
+        if result['skipped_print']:
+            self.last_scan_message += ' — marchio proprio, nessuna etichetta necessaria'
             return True
-
-        # config=False: salta il prompt "Configura il layout documento" che
-        # Odoo mostra al primo report stampato su un'azienda mai configurata
-        # — irrilevante per un'etichetta di magazzino senza branding, trovato
-        # con un test reale (senza, il primo scan apriva quel wizard invece
-        # di stampare).
-        return self.env.ref('ke_amazon_sync.action_report_amazon_fba_label').report_action(
-            log, config=False,
-        )
+        if result['queued']:
+            self.last_scan_message += f' — in coda di stampa su "{result["station"]}"'
+            return True
+        return result['report_action']
 
     def action_validate_picking(self):
         """Chiude la spedizione (_action_done) una volta etichettate tutte le

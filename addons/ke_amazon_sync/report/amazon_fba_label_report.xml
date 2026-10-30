@@ -27,7 +27,26 @@
         <field name="margin_right">1</field>
         <field name="header_line" eval="False"/>
         <field name="header_spacing">0</field>
-        <field name="dpi">203</field>
+        <!-- dpi=0 (NON assente dalla definizione): era 203 (il valore reale
+             della testina Zebra), impostarlo faceva rendere wkhtmltopdf il
+             contenuto CSS molto più piccolo della pagina fisica, lasciando
+             gran parte dell'etichetta vuota — verificato dal vivo generando
+             lo stesso PDF con/senza questo campo e confrontando il risultato
+             (pdftoppm) pixel per pixel: con dpi=203 il contenuto riempiva
+             solo ~35% di ogni lato, con dpi=0 quasi tutta la pagina.
+             Segnalato dall'utente il 2026-10-29 ("contenuto non esteso per
+             tutta la pagina"). Va scritto esplicitamente a 0, non solo tolto
+             dalla definizione: un -u su un record XML già esistente aggiorna
+             solo i campi PRESENTI nel file, un campo assente lascia il
+             valore vecchio già salvato in DB invariato (verificato dal vivo:
+             la prima versione di questo fix toglieva solo la riga, il
+             record restava a 203 anche dopo -u). Questo campo serve alla
+             RASTERIZZAZIONE del PDF (che qui va bene al valore di default),
+             non alla risoluzione reale di stampa: la stampa oggi passa dal
+             PDF via browser/driver Windows, non da un percorso ZPL raster
+             diretto (quello userebbe services/zpl_builder.py, un codice
+             completamente separato). -->
+        <field name="dpi">0</field>
     </record>
 
     <template id="report_amazon_fba_label_document">&lt;!DOCTYPE html&gt;
@@ -64,19 +83,31 @@
                              un'ultima pagina vuota di troppo in coda (verificato:
                              3 etichette → "Pages: 4") — uno spreco di
                              un'etichetta fisica a ogni stampa su rotolo. -->
-                        <div t-attf-style="width:50mm;height:25mm;padding:1mm;font-family:Arial,sans-serif;overflow:hidden;page-break-inside:avoid;#{'page-break-after:always;' if not o_last else ''}">
-                            <div style="text-align:center;">
+                        <div t-attf-style="width:50mm;height:25mm;padding:1mm;box-sizing:border-box;font-family:Arial,sans-serif;overflow:hidden;page-break-inside:avoid;#{'page-break-after:always;' if not o_last else ''}">
+                            <div style="text-align:center;line-height:0;">
                                 <!-- Data URI generata in Python
                                      (o._get_barcode_data_uri, vedi
                                      amazon_fba_label_log.py), nessuna richiesta
-                                     di rete per il barcode stesso. -->
-                                <img t-att-src="o._get_barcode_data_uri()"
-                                     style="max-width:48mm;max-height:12mm;"/>
+                                     di rete per il barcode stesso. Larghezza
+                                     FISSA (non max-width): con solo max-width,
+                                     wkhtmltopdf non scalava l'immagine fino al
+                                     vincolo come atteso, rendendola molto più
+                                     piccola della pagina (verificato dal vivo
+                                     via pdftoppm — segnalato dall'utente il
+                                     2026-10-29, "contenuto non esteso per
+                                     tutta la pagina"). Una larghezza fissa
+                                     forza sempre la stessa scala, indipendente
+                                     da quella resa non lineare. -->
+                                <img t-att-src="o._get_barcode_data_uri()" style="width:48mm;"/>
                             </div>
-                            <div style="text-align:center;font-size:11px;font-weight:bold;letter-spacing:0.5px;">
+                            <div style="text-align:center;font-size:22px;font-weight:bold;letter-spacing:0.5px;line-height:1.25;margin-top:1mm;">
                                 <span t-esc="o.fnsku"/>
                             </div>
-                            <div style="text-align:center;font-size:8px;line-height:1.15;overflow:hidden;word-break:break-word;">
+                            <!-- Una sola riga, troncata con ellissi se troppo
+                                 lunga (non più a capo su più righe): richiesto
+                                 dall'utente il 2026-10-29, a favore di più
+                                 spazio per il barcode. -->
+                            <div style="text-align:center;font-size:12px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
                                 <span t-esc="o.product_id.default_code or o.product_id.display_name"/>
                                 <t t-if="o.product_id.default_code"> | <span t-esc="o.product_id.name"/></t>
                             </div>

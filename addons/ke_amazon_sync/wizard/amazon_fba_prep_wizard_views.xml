@@ -8,6 +8,7 @@
                 <field name="picking_id" invisible="1"/>
                 <group>
                     <field name="ean_scan" placeholder="Scansiona o digita l'EAN..." autofocus="1"/>
+                    <field name="scan_quantity"/>
                     <field name="force_reprint"/>
                 </group>
                 <div class="alert alert-info" role="alert" invisible="not last_scan_message">
@@ -17,7 +18,10 @@
                     <list>
                         <field name="product_id"/>
                         <field name="product_uom_qty" string="Prevista"/>
-                        <field name="quantity" string="Etichettata"/>
+                        <field name="x_amazon_labeled_qty" string="Etichettata"/>
+                        <button name="action_print_fnsku_label" string="Stampa" type="object"
+                                icon="fa-print"
+                                confirm="Stampare in un unico documento tutte le etichette FNSKU ancora mancanti per QUESTA riga (Prevista - Etichettata)? Verifica di avere in mano tutte le unità corrette prima di confermare — per ristampare una riga già completata usa invece la scansione EAN con 'Forza ristampa'."/>
                     </list>
                 </field>
                 <footer>

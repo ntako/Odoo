@@ -37,11 +37,59 @@ class AmazonFbaLabelLog(models.Model):
              "prevista (unità danneggiata/etichetta da rifare) — non ha incrementato la "
              "quantità fatta sul movimento, serve solo come traccia storica.",
     )
+    is_own_brand_no_label = fields.Boolean(
+        'Marchio proprio (nessuna etichetta)', default=False,
+        help="True se il valore FNSKU qui sopra è in realtà l'ASIN (prefisso 'B0', non "
+             "'X0') — il prodotto traccia tramite il codice del produttore già sull'unità, "
+             "nessuna etichetta è stata davvero stampata/accodata per questa riga. La riga "
+             "esiste solo per contare la quantità come completata (vedi "
+             "stock.move._print_fnsku_labels) — non confonderla con una stampa reale "
+             "guardando lo storico.",
+    )
 
     @api.depends('product_id', 'fnsku')
     def _compute_display_name(self):
         for rec in self:
             rec.display_name = f'{rec.product_id.display_name} — {rec.fnsku}'
+
+    @api.model
+    def _create_and_dispatch_many(self, specs, move=None, picking=None):
+        """
+        'specs': lista di (product, fnsku, quantity, is_reprint). Crea TUTTE
+        le righe di log di TUTTE le voci in un colpo solo e fa UN SOLO
+        dispatch (un documento con una pagina per etichetta in tutto, o
+        un'unica coda di lavori) — usato quando si stampano più prodotti
+        diversi in una sola azione (es. tutte le righe del wizard "Spedisci
+        a FBA" insieme, un click invece di uno per riga — richiesto
+        dall'utente il 2026-10-29). 'move'/'picking' valgono per TUTTE le
+        voci (stesso trasferimento); non ha senso mischiare trasferimenti
+        diversi in una singola chiamata.
+        Ritorna un dict {'queued', 'station', 'report_action'}.
+        """
+        vals_list = [{
+            'picking_id': picking.id if picking else False,
+            'move_id': move.id if move else False,
+            'product_id': product.id, 'fnsku': fnsku, 'is_reprint': is_reprint,
+        } for product, fnsku, quantity, is_reprint in specs for _ in range(quantity)]
+        logs = self.create(vals_list)
+
+        station = self.env['ke.amazon.print.station']._get_configured_station()
+        if station:
+            for log in logs:
+                self.env['ke.amazon.print.job']._enqueue_from_label_log(station, log)
+            return {'queued': True, 'station': station.name, 'report_action': None}
+
+        report_action = self.env.ref('ke_amazon_sync.action_report_amazon_fba_label').report_action(
+            logs, config=False,
+        )
+        return {'queued': False, 'station': None, 'report_action': report_action}
+
+    @api.model
+    def _create_and_dispatch(self, product, fnsku, quantity, is_reprint=False, move=None, picking=None):
+        """Caso con un solo prodotto — vedi _create_and_dispatch_many."""
+        return self._create_and_dispatch_many(
+            [(product, fnsku, quantity, is_reprint)], move=move, picking=picking,
+        )
 
     def _get_barcode_data_uri(self):
         """

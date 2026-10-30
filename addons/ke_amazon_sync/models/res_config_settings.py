@@ -273,6 +273,32 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_seed_fbm_stock', log_rec.id)
         return self._open_log_action()
 
+    def action_run_recover_renamed_families(self):
+        """
+        Operazione di recupero: rilegge l'ultimo Full Import con un log
+        salvato e ripara le famiglie che Amazon ha solo rinominato (stesso
+        gruppo di figli, nuovo parent ASIN) — non tocca famiglie divise o
+        unite, serve una decisione reale su come ristrutturare i dati. Vedi
+        SyncEngine.recover_renamed_family_parent_asin. Nessuna chiamata
+        Amazon: lavora solo sul testo del log già salvato.
+        """
+        source_log = self.env['ke.amazon.sync.log'].search(
+            [('sync_type', '=', 'full_import'), ('log_lines', '!=', False)],
+            order='id desc', limit=1,
+        )
+        if not source_log:
+            raise UserError('Nessun Full Import con un log trovato.')
+        log_rec = self.env['ke.amazon.sync.log'].create({
+            'name': f'Ripara famiglie rinominate — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'recover_renamed_families',
+            'state': 'running',
+            'start_date': datetime.now(),
+            'parent_log_id': source_log.id,
+        })
+        self.env.cr.commit()
+        self._start_thread('_thread_recover_renamed_families', log_rec.id)
+        return self._open_log_action()
+
     def action_migrate_to_amazon_listings(self):
         """
         Operazione una tantum (fase 1 multi-marketplace, vedi TASK.md): crea una
@@ -560,6 +586,30 @@ class ResConfigSettings(models.TransientModel):
                           updated, skipped, errors)
             except Exception as exc:
                 _log.error('Thread seed_fbm_stock fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc),
+                               'end_date': datetime.now()})
+                cr.commit()
+
+    @api.model
+    def _thread_recover_renamed_families(self, db, uid, ctx, log_id):
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from ..services.sync_engine import SyncEngine
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            try:
+                engine = SyncEngine(env, None)
+                fixed, skipped_other, skipped_collision = engine.recover_renamed_family_parent_asin(
+                    log_rec, log_rec.parent_log_id.id,
+                )
+                _log.info(
+                    'Ripara famiglie rinominate: %d riparate, %d divise/unite, %d collisioni',
+                    fixed, skipped_other, skipped_collision,
+                )
+            except Exception as exc:
+                _log.error('Thread recover_renamed_families fallito: %s', exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc),
                                'end_date': datetime.now()})
                 cr.commit()

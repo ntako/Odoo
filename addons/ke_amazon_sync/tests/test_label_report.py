@@ -18,7 +18,7 @@ class TestLabelReport(TransactionCase):
         super().setUp()
         self.product = self.env['product.product'].create({
             'name': 'ZZT Prodotto Report', 'type': 'consu', 'is_storable': True,
-            'default_code': 'ZZT-REPORT-1', 'x_amazon_fnsku': 'B0ZZREPORT1',
+            'default_code': 'ZZT-REPORT-1', 'x_amazon_fnsku': 'X0ZZREPORT1',
         })
 
     def test_barcode_data_uri_has_no_network_dependency(self):
@@ -77,3 +77,32 @@ class TestLabelReport(TransactionCase):
             "'Landscape' qui farebbe ruotare page_width/page_height già larghi, "
             'producendo un\'etichetta 25x50mm invece di 50x25mm (verificato dal vivo via pdfinfo)',
         )
+
+    def test_report_paperformat_has_no_dpi(self):
+        """
+        Segnalato dal vivo il 2026-10-29 ("contenuto non esteso per tutta la
+        pagina"): con dpi=203 impostato, wkhtmltopdf rendeva il contenuto CSS
+        molto più piccolo della pagina fisica (verificato generando lo stesso
+        PDF con/senza e confrontando pixel per pixel via pdftoppm — con
+        dpi=203 il contenuto riempiva solo ~35% di ogni lato). Il campo serve
+        alla rasterizzazione, non alla risoluzione di stampa reale (oggi un
+        PDF via browser/driver Windows, non un percorso ZPL raster diretto).
+        """
+        paperformat = self.env.ref('ke_amazon_sync.paperformat_amazon_fba_label')
+        self.assertFalse(paperformat.dpi, 'dpi impostato causa di nuovo il disallineamento di scala')
+
+    def test_report_html_product_name_is_single_line_truncated(self):
+        """
+        Richiesto dal vivo il 2026-10-29: una sola riga, troncata con ellissi
+        se troppo lunga, non più a capo su più righe (più spazio per il
+        barcode, ingrandito proporzionalmente nello stesso giro)."""
+        log = self.env['ke.amazon.fba.label.log'].create({
+            'product_id': self.product.id, 'fnsku': 'B0ZZREPORT1',
+        })
+        html, _ = self.env['ir.actions.report']._render_qweb_html(
+            'ke_amazon_sync.report_amazon_fba_label_document', log.ids,
+        )
+        html = html.decode() if isinstance(html, bytes) else html
+        self.assertIn('white-space:nowrap', html)
+        self.assertIn('text-overflow:ellipsis', html)
+        self.assertNotIn('word-break:break-word', html, 'sostituito dal troncamento a una riga')

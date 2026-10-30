@@ -39,6 +39,53 @@ class AmazonShipToFbaWizard(models.TransientModel):
             'target': 'current',
         }
 
+    def action_print_all_fnsku_labels(self):
+        """
+        Stampa in UN SOLO click le etichette FNSKU di TUTTE le righe (ognuna
+        per la propria quantità) PRIMA ancora di confermare la spedizione —
+        il trasferimento/stock.move non esiste ancora a questo punto.
+        Bottone a livello di wizard (non per riga): un bottone dentro una
+        riga della lista editabile non salva sempre la riga prima di
+        chiamare il metodo (trovato dal vivo il 2026-10-29: "non funziona se
+        non salvo prima"), mentre un bottone sul form principale salva
+        sempre l'intero form, righe comprese, prima di eseguire l'azione.
+        Nessun move/picking collegato (come il wizard standalone): questa
+        stampa non traccia nessuna quantità "etichettata" contro un
+        movimento, va fatta di nuovo dal wizard di etichettatura/scansione
+        se si vuole un conteggio legato al trasferimento reale.
+        Le righe marchio proprio (FNSKU con prefisso 'B0', in realtà l'ASIN
+        — vedi product.product._amazon_fnsku_needs_label) vengono escluse
+        dalla stampa senza errore: tracciano tramite il codice del
+        produttore già sull'unità, nessuna etichetta serve.
+        """
+        self.ensure_one()
+        if not self.line_ids:
+            raise UserError('Aggiungi almeno un prodotto prima di stampare.')
+
+        specs = []
+        for line in self.line_ids:
+            product = line.product_id
+            if not product:
+                raise UserError('Una riga non ha un prodotto selezionato.')
+            fnsku = product._get_amazon_fnsku()
+            if not fnsku:
+                raise UserError(f'{product.display_name}: FNSKU non ancora importato. Esegui prima "Import FNSKU".')
+            qty = int(line.quantity or 0)
+            if qty <= 0:
+                raise UserError(f'{product.display_name}: indica una quantità maggiore di zero.')
+            if product._amazon_fnsku_needs_label():
+                specs.append((product, fnsku, qty, False))
+
+        if not specs:
+            raise UserError(
+                'Nessuna etichetta da stampare: tutti i prodotti in elenco sono marchio proprio '
+                '(tracciano tramite il codice del produttore, nessun FNSKU da applicare).'
+            )
+        result = self.env['ke.amazon.fba.label.log']._create_and_dispatch_many(specs)
+        if result['queued']:
+            return True
+        return result['report_action']
+
 
 class AmazonShipToFbaWizardLine(models.TransientModel):
     _name = 'ke.amazon.ship.wizard.line'

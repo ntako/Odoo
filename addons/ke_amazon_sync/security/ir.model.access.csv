@@ -28,3 +28,12 @@ access_ke_amazon_print_job_user,ke.amazon.print.job user,model_ke_amazon_print_j
 access_ke_amazon_print_job_manager,ke.amazon.print.job manager,model_ke_amazon_print_job,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_fba_label_log_user,ke.amazon.fba.label.log user,model_ke_amazon_fba_label_log,stock.group_stock_user,1,0,0,0
 access_ke_amazon_fba_label_log_manager,ke.amazon.fba.label.log manager,model_ke_amazon_fba_label_log,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_user,ke.amazon.inbound.plan user,model_ke_amazon_inbound_plan,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_manager,ke.amazon.inbound.plan manager,model_ke_amazon_inbound_plan,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_box_user,ke.amazon.inbound.plan.box user,model_ke_amazon_inbound_plan_box,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_box_manager,ke.amazon.inbound.plan.box manager,model_ke_amazon_inbound_plan_box,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_box_line_user,ke.amazon.inbound.plan.box.line user,model_ke_amazon_inbound_plan_box_line,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_box_line_manager,ke.amazon.inbound.plan.box.line manager,model_ke_amazon_inbound_plan_box_line,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_plan_shipment_user,ke.amazon.inbound.plan.shipment user,model_ke_amazon_inbound_plan_shipment,stock.group_stock_user,1,0,0,0
+access_ke_amazon_inbound_plan_shipment_manager,ke.amazon.inbound.plan.shipment manager,model_ke_amazon_inbound_plan_shipment,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_inbound_box_scan_wizard,ke.amazon.inbound.box.scan.wizard,model_ke_amazon_inbound_box_scan_wizard,stock.group_stock_manager,1,1,1,1

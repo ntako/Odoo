@@ -17,6 +17,15 @@ DELAY_ORDERS_GET_S = 60.0   # getOrders (lista/pagina ordini): rate ufficiale so
 DELAY_ORDERS_ITEMS_S = 2.0  # getOrderItems (righe ordine): rate ufficiale 0.5 req/s, burst 30
 DELAY_INVENTORY_S = 0.5   # getInventorySummaries: max 2 req/s (burst 2) → 0.5s tra ogni chiamata
 DELAY_SELLERS_S = 60.0    # getMarketplaceParticipations: rate ufficiale 0.016 req/s (~1 ogni 60s), burst 15
+# Fulfillment Inbound v2024-03-20 (piano spedizioni inbound FBA): rate
+# ufficiale verificato il 2026-10-29, pagina per pagina, per OGNI operazione
+# usata sotto — tutte 2 richieste/secondo (burst diverso, 2/6/30 secondo
+# l'operazione, irrilevante qui: ogni chiamata è singola e sequenziale
+# dentro un'azione utente, non un ciclo/pagina). Eccezione onesta: getLabels
+# — la pagina di riferimento trovata documenta solo la v0 (non la
+# v2024-03-20 realmente usata dalla libreria installata); stesso delay
+# prudente per coerenza, da riverificare se si rivela insufficiente.
+DELAY_INBOUND_S = 0.5
 RETRY_MAX = 5
 RETRY_BACKOFF_S = 60
 
@@ -854,3 +863,192 @@ class SpApiClient:
             marketplaceIds=[self.marketplace_id],
             body=body,
         )
+
+    # ------------------------------------------------------------------
+    # Fulfillment Inbound v2024-03-20 — piano di spedizione inbound FBA
+    # ------------------------------------------------------------------
+    # Workflow multi-step, quasi tutto asincrono (operationId + polling via
+    # poll_inbound_operation sotto). Verificato dalla documentazione
+    # ufficiale il 2026-10-29 (vedi RICERCA_fulfillment_inbound_api_
+    # sandbox_2026-10-29.md): confirm_placement_option è il punto di non
+    # ritorno dichiarato da Amazon ("This option cannot be reversed after
+    # it is selected.") — nessun metodo qui lo chiama da solo, solo
+    # ke.amazon.inbound.plan.action_confirm_placement_option (con conferma
+    # esplicita dell'utente) deve farlo.
+    # Ogni metodo passa i campi del body COME kwarg diretti alla libreria
+    # (non un singolo dict 'body='): verificato leggendo il codice installato
+    # di FulfillmentInboundV20240320 (es. create_inbound_plan/
+    # generate_transportation_options fanno `data=kwargs`, cioè i kwargs
+    # passati qui diventano il body così com'è, senza un involucro 'body').
+
+    def _inbound_api(self):
+        from sp_api.api import FulfillmentInbound
+        return FulfillmentInbound(
+            marketplace=self._marketplace(), credentials=self.credentials,
+            version='2024-03-20', timeout=HTTP_TIMEOUT_S,
+        )
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def get_inbound_operation_status(self, operation_id):
+        return self._inbound_api().get_inbound_operation_status(operation_id).payload
+
+    def poll_inbound_operation(self, operation_id, poll_interval_s=10, poll_max_minutes=2):
+        """
+        Attende il completamento di un'operazione asincrona della Fulfillment
+        Inbound API (create_inbound_plan, confirm_packing_option,
+        confirm_placement_option, ... restituiscono tutte un operationId
+        invece del risultato diretto) — stesso meccanismo già collaudato in
+        AMZ_TESTS/_common.py::poll_inbound_operation, qui con un tetto più
+        stretto (2 minuti, non 5) perché gira dentro una richiesta HTTP
+        interattiva di Odoo (bottone sul form), non uno script a riga di
+        comando. Ritorna il payload finale di get_inbound_operation_status.
+        Solleva TimeoutError se non termina in tempo (il chiamante deve
+        trattarlo come "riprova più tardi", non un errore permanente: il
+        piano lato Amazon potrebbe comunque completarsi) e RuntimeError se
+        lo stato finale è FAILED.
+        """
+        import time
+        deadline = time.monotonic() + poll_max_minutes * 60
+        while time.monotonic() < deadline:
+            time.sleep(poll_interval_s)
+            payload = self.get_inbound_operation_status(operation_id)
+            status = payload.get('operationStatus', '')
+            if status == 'SUCCESS':
+                return payload
+            if status == 'FAILED':
+                raise RuntimeError(
+                    f'Operazione {operation_id} fallita lato Amazon: '
+                    f'{payload.get("operationProblems")}'
+                )
+        raise TimeoutError(
+            f'Operazione {operation_id} non completata entro {poll_max_minutes} minuti — riprova.'
+        )
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def create_inbound_plan(self, name, source_address, destination_marketplace_ids, items):
+        """
+        Crea un nuovo piano inbound. 'items': lista di
+        {'msku', 'quantity', 'labelOwner', 'prepOwner'}. Asincrono: il
+        payload contiene 'inboundPlanId' e 'operationId' — attendere
+        poll_inbound_operation(operationId) prima di procedere.
+        """
+        return self._inbound_api().create_inbound_plan(
+            name=name,
+            sourceAddress=source_address,
+            destinationMarketplaces=destination_marketplace_ids,
+            items=items,
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def generate_packing_options(self, inbound_plan_id):
+        return self._inbound_api().generate_packing_options(inbound_plan_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def list_packing_options(self, inbound_plan_id):
+        return self._inbound_api().list_packing_options(inbound_plan_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def confirm_packing_option(self, inbound_plan_id, packing_option_id):
+        return self._inbound_api().confirm_packing_option(inbound_plan_id, packing_option_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def set_packing_information(self, inbound_plan_id, package_groupings):
+        """'package_groupings': lista di {'packingGroupId', 'boxes': [...]}."""
+        return self._inbound_api().set_packing_information(
+            inbound_plan_id, packageGroupings=package_groupings,
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def generate_placement_options(self, inbound_plan_id):
+        return self._inbound_api().generate_placement_options(inbound_plan_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def list_placement_options(self, inbound_plan_id):
+        return self._inbound_api().list_placement_options(inbound_plan_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def confirm_placement_option(self, inbound_plan_id, placement_option_id):
+        """
+        ATTENZIONE — punto di non ritorno dichiarato dalla documentazione
+        ufficiale Amazon e confermato dal docstring della libreria stessa
+        ("Once confirmed, it cannot be changed for the Inbound Plan."). Da
+        chiamare SOLO dopo una conferma esplicita e consapevole dell'utente
+        — vedi ke.amazon.inbound.plan.action_confirm_placement_option.
+        """
+        return self._inbound_api().confirm_placement_option(inbound_plan_id, placement_option_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def get_shipment(self, inbound_plan_id, shipment_id):
+        return self._inbound_api().get_shipment(inbound_plan_id, shipment_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def generate_transportation_options(self, inbound_plan_id, placement_option_id,
+                                         shipment_transportation_configurations):
+        """
+        'shipment_transportation_configurations': lista di
+        {'shipmentId', 'readyToShipWindow': {'start': iso8601}, 'contactInformation'?,
+        'freightInformation'?, 'pallets'?} — schema GenerateTransportationOptionsRequest
+        verificato sulla pagina di riferimento ufficiale il 2026-10-29.
+        """
+        return self._inbound_api().generate_transportation_options(
+            inbound_plan_id,
+            placementOptionId=placement_option_id,
+            shipmentTransportationConfigurations=shipment_transportation_configurations,
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def list_transportation_options(self, inbound_plan_id, placement_option_id):
+        return self._inbound_api().list_transportation_options(
+            inbound_plan_id, placementOptionId=placement_option_id,
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def confirm_transportation_options(self, inbound_plan_id, transportation_selections):
+        """
+        'transportation_selections': lista di {'shipmentId', 'transportationOptionId',
+        'contactInformation'?} — schema ConfirmTransportationOptionsRequest
+        verificato sulla pagina di riferimento ufficiale il 2026-10-29.
+        Richiede che confirm_placement_option sia già stato chiamato con
+        successo per questo piano (vincolo dichiarato dalla documentazione).
+        """
+        return self._inbound_api().confirm_transportation_options(
+            inbound_plan_id, transportationSelections=transportation_selections,
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def generate_delivery_window_options(self, inbound_plan_id, shipment_id):
+        return self._inbound_api().generate_delivery_window_options(inbound_plan_id, shipment_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def list_delivery_window_options(self, inbound_plan_id, shipment_id):
+        return self._inbound_api().list_delivery_window_options(inbound_plan_id, shipment_id).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def confirm_delivery_window_options(self, inbound_plan_id, shipment_id, delivery_window_option_id):
+        return self._inbound_api().confirm_delivery_window_options(
+            inbound_plan_id, shipment_id, delivery_window_option_id,
+        ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def get_labels(self, shipment_id, **kwargs):
+        """
+        Etichetta/e del collo per 'shipment_id'. Shape della risposta non
+        verificata in questa sessione per la v2024-03-20 (la pagina di
+        riferimento ufficiale trovata documenta solo la v0, con un
+        'DownloadURL' valido 15 secondi — la libreria installata usa
+        comunque un path v2024-03-20 per questo metodo). Verificare il
+        payload reale restituito prima di collegare automaticamente il
+        download/stampa — vedi ke.amazon.inbound.plan.action_get_labels.
+        """
+        return self._inbound_api().get_labels(shipment_id, **kwargs).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def cancel_inbound_plan(self, inbound_plan_id):
+        """
+        Annulla un piano inbound. La documentazione garantisce una finestra
+        di annullamento senza costi solo DOPO la conferma del trasporto (24h
+        pacco singolo, 1h LTL/FTL) — non dichiara esplicitamente cosa
+        succede annullando PRIMA di quel punto (assenza di informazione, non
+        una garanzia). Vedi RICERCA_fulfillment_inbound_api_sandbox_2026-10-29.md §2.
+        """
+        return self._inbound_api().cancel_inbound_plan(inbound_plan_id).payload

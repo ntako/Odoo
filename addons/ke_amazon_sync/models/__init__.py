@@ -2,6 +2,7 @@ from . import res_company
 from . import product_template
 from . import product_variant
 from . import stock_picking
+from . import stock_move
 from . import amazon_sync_log
 from . import amazon_marketplace
 from . import amazon_listing
@@ -11,3 +12,4 @@ from . import amazon_print_station
 from . import amazon_print_job
 from . import res_config_settings
 from . import sale_order
+from . import amazon_inbound_plan

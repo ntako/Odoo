@@ -50,6 +50,14 @@
                                     class="btn btn-secondary"
                                     confirm="Avvio il download delle immagini mancanti in background. Continuare?"/>
                         </setting>
+                        <setting string="Famiglie rinominate da Amazon"
+                                 help="Rilegge l'ultimo Full Import e ripara le famiglie che Amazon ha solo rinominato (stesso gruppo di varianti, nuovo parent ASIN) — non tocca famiglie che Amazon ha diviso o unito con altre, quelle restano segnalate per una verifica manuale. Nessuna chiamata Amazon.">
+                            <button name="action_run_recover_renamed_families"
+                                    string="Ripara famiglie rinominate"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Rilegge l'ultimo Full Import e aggiorna il parent ASIN delle famiglie semplicemente rinominate da Amazon. Non tocca famiglie divise o unite. Continuare?"/>
+                        </setting>
                     </block>
 
                     <block title="Automazioni" name="amazon_crons">

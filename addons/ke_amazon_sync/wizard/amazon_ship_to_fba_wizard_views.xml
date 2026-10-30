@@ -20,6 +20,11 @@
                             string="Conferma spedizione"
                             type="object"
                             class="btn btn-primary"/>
+                    <button name="action_print_all_fnsku_labels"
+                            string="Stampa tutte le etichette"
+                            type="object"
+                            class="btn btn-secondary"
+                            confirm="Stampare le etichette FNSKU di tutti i prodotti in elenco (una copia per unità)? Non sono ancora legate a nessun trasferimento (verrà creato solo confermando la spedizione) — verifica di avere in mano le unità corrette prima di confermare."/>
                     <button string="Annulla" class="btn btn-secondary" special="cancel"/>
                 </footer>
             </form>

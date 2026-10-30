@@ -115,6 +115,24 @@ Il PDF (50x25mm, un'etichetta per pagina) è autosufficiente: barcode come data 
 
 Un interruttore in **Impostazioni → Amazon Seller Central → Etichette FNSKU** ("Usa stampa di rete (ZPL)", **disattivo di default**) decide quale canale usano entrambi i wizard di stampa sopra: disattivo (default) → PDF dal browser come sempre; attivo + una postazione scelta → accoda un lavoro ZPL su quella postazione invece del PDF. Se attivo senza una postazione valida, i wizard segnalano l'errore invece di stampare in silenzio il PDF.
 
+### 10. Spedizioni inbound FBA (`ke.amazon.inbound.plan`)
+
+Rifornimento verso Amazon tramite la Fulfillment Inbound API v2024-03-20 — **Magazzino → Amazon Sync → Piani inbound FBA**, o dal bottone "Piano inbound FBA" su un trasferimento "In transito verso Amazon" già validato e già etichettato FNSKU (quel trasferimento resta l'unica fonte di SKU/quantità del piano, il piano non ne definisce di nuovi). Workflow a stati che segue 1:1 la sequenza ufficiale Amazon:
+
+```
+draft → plan_created → packing_confirmed → placement_options_ready
+     → placement_confirmed (IRREVERSIBILE) → delivery_window_options_ready
+     → delivery_window_confirmed → transport_options_ready → transport_confirmed
+     → labels_ready → shipped
+```
+
+- **Colli** (`ke.amazon.inbound.plan.box`/`.box.line`, scheda "Colli" del piano): si scansionano gli articoli nel collo (wizard EAN-scan, stesso idioma degli altri wizard di stampa FNSKU), si chiude impostando dimensioni/peso. Tutta la quantità del trasferimento deve essere imballata prima di proseguire.
+- **`placement_confirmed`** è l'unico stato raggiunto chiamando `confirmPlacementOption` — dichiarato **irreversibile** dalla documentazione ufficiale Amazon ("This option cannot be reversed after it is selected."). Il bottone corrispondente ha una conferma esplicita nella UI; nessun altro percorso nel codice chiama quel metodo.
+- Solo **corrieri partner Amazon** in questa prima versione (preventivo/costo mostrato prima di confermare) — il percorso self-ship (corriere proprio) non è ancora implementato.
+- **Annullamento** (`cancelInboundPlan`) disponibile solo prima di `transport_confirmed`: dopo quel punto la documentazione garantisce una finestra a costo zero limitata (24h pacco singolo / 1h LTL-FTL), quindi il bottone si disabilita.
+- **Limite noto**: la shape esatta della risposta `getLabels` per questa versione dell'API non è stata verificata contro una chiamata reale (la pagina di riferimento trovata documenta solo la v0) — il payload viene salvato grezzo (`ke.amazon.inbound.plan.shipment.labels_raw_response`) finché non si verifica il formato reale, prima di collegarlo a stampa/download automatico.
+- Logica di orchestrazione in `services/fba_inbound_service.py` (separato da `sync_engine.py`: dominio di creazione/push multi-step con un punto di non ritorno, non di import/reconcile); wrapper SP-API dedicati in `services/sp_api_client.py` (`DELAY_INBOUND_S`, tutti con retry fail-fast).
+
 ---
 
 ## Installazione

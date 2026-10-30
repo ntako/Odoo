@@ -217,4 +217,14 @@
               parent="menu_amazon_sync_root"
               action="action_amazon_print_job"
               sequence="44"/>
+
+    <!-- Spedizioni inbound FBA (Fulfillment Inbound API v2024-03-20) — vedi
+         progetto-odoo-amazon-fba-etichettatura.md §10 Priorità 3 e
+         RICERCA_fulfillment_inbound_api_sandbox_2026-10-29.md per il confine
+         di sicurezza (confirmPlacementOption è irreversibile). -->
+    <menuitem id="menu_amazon_inbound_plan"
+              name="Piani inbound FBA"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_inbound_plan"
+              sequence="45"/>
 </odoo>

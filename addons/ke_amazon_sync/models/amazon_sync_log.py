@@ -29,6 +29,7 @@ class AmazonSyncLog(models.Model):
         ('move_to_general', 'Spostamento Giacenza verso Magazzino Generale'),
         ('import_fnsku', 'Import FNSKU'),
         ('detect_marketplaces', 'Rileva Marketplace Attivi'),
+        ('recover_renamed_families', 'Ripara Famiglie Rinominate su Amazon'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),
@@ -1377,6 +1378,42 @@ class AmazonSyncLog(models.Model):
     # Sync Giacenze FBA
     # ------------------------------------------------------------------
 
+    def _describe_fba_sync_warehouses(self, marketplaces):
+        """
+        Riga di log iniziale della sync giacenze FBA — raggruppa i marketplace
+        per magazzino FBA EFFETTIVO (marketplace.get_fba_warehouse(), con
+        fallback al Magazzino FBA aziendale), invece di affermare sempre "Pan-EU
+        pooled, stesso magazzino per tutti" a prescindere dalla configurazione
+        reale. Trovato dal vivo il 2026-10-29: il messaggio era statico e
+        mentiva su un giro con UK ancora privo di un magazzino FBA dedicato
+        (fallback sullo stesso magazzino di IT/ES/FR) — fuorviante proprio nel
+        caso che più conta segnalare. Nessun magazzino configurato per un
+        marketplace (né proprio né aziendale) è un gruppo a sé, visibile come
+        tale invece di sparire silenziosamente nel fallback.
+        """
+        by_warehouse = {}
+        order = []
+        for marketplace in marketplaces:
+            warehouse = marketplace.get_fba_warehouse()
+            key = warehouse.id if warehouse else False
+            if key not in by_warehouse:
+                by_warehouse[key] = (warehouse, self.env['ke.amazon.marketplace'])
+                order.append(key)
+            warehouse, group = by_warehouse[key]
+            by_warehouse[key] = (warehouse, group | marketplace)
+
+        parts = []
+        for key in order:
+            warehouse, group = by_warehouse[key]
+            wh_label = warehouse.name if warehouse else 'NESSUNO (non configurato)'
+            parts.append(f'{", ".join(group.mapped("code"))} → {wh_label}')
+
+        return (
+            f'Avvio sync giacenze FBA su {len(marketplaces)} marketplace: '
+            f'{", ".join(marketplaces.mapped("code"))}. Magazzino FBA per gruppo: '
+            + '; '.join(parts) + '.'
+        )
+
     def action_start_sync_fba_quantities(self, name_prefix='Sync Giacenze FBA'):
         """
         Avvia la sincronizzazione delle giacenze FBA da Amazon verso Odoo in un
@@ -1415,9 +1452,7 @@ class AmazonSyncLog(models.Model):
             'sync_type': 'sync_fba',
             'state': 'running',
             'start_date': fields.Datetime.now(),
-            'log_lines': f'Avvio sync giacenze FBA su {len(marketplaces)} marketplace: '
-                         f'{", ".join(marketplaces.mapped("code"))} (inventario Pan-EU pooled, '
-                         f'stesso magazzino Odoo per tutti).',
+            'log_lines': self._describe_fba_sync_warehouses(marketplaces),
         })
         params.set_param('ke_amazon_sync.fba_sync_state', 'running')
         params.set_param('ke_amazon_sync.fba_sync_log_id', str(log_rec.id))

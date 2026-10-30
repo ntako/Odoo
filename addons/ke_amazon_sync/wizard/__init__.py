@@ -8,3 +8,4 @@ from . import amazon_move_to_general_wizard
 from . import amazon_fba_prep_wizard
 from . import amazon_fba_standalone_label_wizard
 from . import amazon_print_station_show_key_wizard
+from . import amazon_inbound_box_scan_wizard

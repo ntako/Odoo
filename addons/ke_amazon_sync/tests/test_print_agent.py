@@ -19,7 +19,7 @@ class TestPrintStationAndJob(TransactionCase):
         self.station = self.env['ke.amazon.print.station'].create({'name': 'ZZT Stazione test'})
         self.product = self.env['product.product'].create({
             'name': 'ZZT Prodotto etichetta', 'type': 'consu', 'is_storable': True,
-            'default_code': 'ZZT-PRINT-1', 'x_amazon_fnsku': 'B0ZZPRINT1',
+            'default_code': 'ZZT-PRINT-1', 'x_amazon_fnsku': 'X0ZZPRINT1',
         })
         self.label_log = self.env['ke.amazon.fba.label.log'].create({
             'product_id': self.product.id, 'fnsku': 'B0ZZPRINT1',
@@ -150,7 +150,7 @@ class TestPrintAgentController(HttpCase):
         self.raw_key = action['context']['default_raw_key']
         self.product = self.env['product.product'].create({
             'name': 'ZZT Prodotto HTTP', 'type': 'consu', 'is_storable': True,
-            'default_code': 'ZZT-PRINT-HTTP-1', 'x_amazon_fnsku': 'B0ZZPRINTHTTP1',
+            'default_code': 'ZZT-PRINT-HTTP-1', 'x_amazon_fnsku': 'X0ZZPRINTHTTP1',
         })
         self.label_log = self.env['ke.amazon.fba.label.log'].create({
             'product_id': self.product.id, 'fnsku': 'B0ZZPRINTHTTP1',
@@ -215,7 +215,7 @@ class TestLabelPrintingToggle(TransactionCase):
         self.station = self.env['ke.amazon.print.station'].create({'name': 'ZZT Stazione toggle'})
         self.product = self.env['product.product'].create({
             'name': 'ZZT Prodotto toggle', 'type': 'consu', 'is_storable': True,
-            'default_code': 'ZZT-TOGGLE-1', 'x_amazon_fnsku': 'B0ZZTOGGLE1',
+            'default_code': 'ZZT-TOGGLE-1', 'x_amazon_fnsku': 'X0ZZTOGGLE1',
             'barcode': '0000000ZZTOGL1',
         })
 
@@ -241,7 +241,7 @@ class TestLabelPrintingToggle(TransactionCase):
         self.assertTrue(result, 'quando la stampa di rete è attiva non deve tornare il report PDF')
         jobs = self.env['ke.amazon.print.job'].search([('station_id', '=', self.station.id)])
         self.assertEqual(len(jobs), 2, 'una copia richiesta = un lavoro in coda')
-        self.assertIn('B0ZZTOGGLE1', jobs[0].zpl)
+        self.assertIn('X0ZZTOGGLE1', jobs[0].zpl)
         self.assertIn('in coda di stampa', wiz.last_scan_message)
 
     def _make_picking_with_move(self, qty=2):

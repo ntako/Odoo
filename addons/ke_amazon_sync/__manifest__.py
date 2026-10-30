@@ -1,6 +1,6 @@
 {
     'name': 'KE Amazon Sync',
-    'version': '19.0.1.1.0',
+    'version': '19.0.1.2.0',
     'category': 'Inventory/Configuration',
     'summary': 'Sincronizzazione prodotti con Amazon Seller Central',
     # Esplicita per evitare che Odoo usi README.md come descrizione: senza
@@ -42,6 +42,8 @@
         'views/stock_picking_views.xml',
         'views/amazon_fba_label_log_views.xml',
         'views/amazon_report_views.xml',
+        'wizard/amazon_inbound_box_scan_wizard_views.xml',
+        'views/amazon_inbound_plan_views.xml',
         'views/menu.xml',
     ],
     'assets': {

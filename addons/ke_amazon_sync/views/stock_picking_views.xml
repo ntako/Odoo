@@ -11,6 +11,11 @@
                         type="object"
                         class="btn-primary"
                         invisible="not x_amazon_is_fba_shipment or state in ('done', 'cancel')"/>
+                <button name="action_open_amazon_inbound_plan"
+                        string="Piano inbound FBA"
+                        type="object"
+                        class="btn-secondary"
+                        invisible="not x_amazon_is_fba_shipment or state != 'done'"/>
             </xpath>
         </field>
     </record>

@@ -30,3 +30,28 @@ class StockPicking(models.Model):
             'target': 'new',
             'context': {'default_picking_id': self.id},
         }
+
+    def action_open_amazon_inbound_plan(self):
+        """
+        Apre il piano inbound già collegato a questo trasferimento, o ne apre
+        uno nuovo precompilato se non esiste ancora — visibile solo quando il
+        trasferimento è 'In transito verso Amazon' e già validato (vedi
+        x_amazon_is_fba_shipment), cioè già etichettato FNSKU.
+        """
+        self.ensure_one()
+        plan = self.env['ke.amazon.inbound.plan'].search(
+            [('picking_id', '=', self.id), ('state', 'not in', ('error', 'cancelled'))], limit=1,
+        )
+        if plan:
+            return {
+                'type': 'ir.actions.act_window',
+                'res_model': 'ke.amazon.inbound.plan',
+                'view_mode': 'form',
+                'res_id': plan.id,
+            }
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'ke.amazon.inbound.plan',
+            'view_mode': 'form',
+            'context': {'default_picking_id': self.id},
+        }

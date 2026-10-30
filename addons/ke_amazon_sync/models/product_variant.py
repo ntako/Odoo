@@ -67,6 +67,25 @@ class ProductProduct(models.Model):
             return self.product_tmpl_id.x_amazon_fnsku or ''
         return ''
 
+    def _amazon_fnsku_needs_label(self):
+        """
+        True se il valore FNSKU di questa variante va stampato fisicamente,
+        False se è in realtà l'ASIN (prefisso 'B0', non 'X0') — il prodotto
+        traccia tramite il codice del produttore già sull'unità (marchio
+        proprio idoneo all'esenzione, es. Amazon Brand Registry): nessuna
+        etichetta aggiuntiva serve. Verificato sui dati reali di questo
+        venditore il 2026-10-29 (non solo dedotto): circa il 45% dei valori
+        FNSKU già importati inizia con 'B0' invece di 'X0' (il prefisso di
+        un vero FNSKU generato da Amazon) — una minoranza consistente, non
+        un caso raro da ignorare.
+        Chiamare solo dopo aver verificato che _get_amazon_fnsku() non sia
+        vuoto: "FNSKU non ancora importato" è un caso diverso (va bloccato
+        con un errore esplicito), non va confuso con "non serve etichetta".
+        """
+        self.ensure_one()
+        fnsku = self._get_amazon_fnsku()
+        return bool(fnsku) and not fnsku.upper().startswith('B0')
+
     def get_amazon_sale_price(self):
         """
         Prezzo IVA inclusa da comunicare ad Amazon per questa variante: lst_price

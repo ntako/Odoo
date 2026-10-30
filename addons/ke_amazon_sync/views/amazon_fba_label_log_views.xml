@@ -11,6 +11,7 @@
                 <field name="fnsku"/>
                 <field name="user_id"/>
                 <field name="is_reprint" widget="boolean_toggle"/>
+                <field name="is_own_brand_no_label" string="Marchio proprio" widget="boolean_toggle"/>
             </list>
         </field>
     </record>
@@ -25,6 +26,8 @@
                 <field name="fnsku"/>
                 <field name="user_id"/>
                 <filter string="Solo ristampe" name="filter_reprint" domain="[('is_reprint', '=', True)]"/>
+                <filter string="Solo marchio proprio (nessuna etichetta)" name="filter_own_brand"
+                        domain="[('is_own_brand_no_label', '=', True)]"/>
                 <separator/>
                 <filter string="Spedizione" name="groupby_picking" context="{'group_by': 'picking_id'}"/>
                 <filter string="Prodotto" name="groupby_product" context="{'group_by': 'product_id'}"/>

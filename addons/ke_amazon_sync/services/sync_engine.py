@@ -19,6 +19,7 @@ Funzione 3 – sync_prices_and_quantities:
 import base64
 import logging
 import re
+import re
 from datetime import datetime, timezone
 
 import requests
@@ -1377,6 +1378,137 @@ class SyncEngine:
         })
         self.env.cr.commit()
         return len(by_code)
+
+    # Messaggio scritto in _process_variant_listing quando una riga indica
+    # un parent_asin diverso da quello già registrato per lo stesso SKU —
+    # se cambi quel testo, aggiorna anche questa regex (vedi
+    # recover_renamed_family_parent_asin sotto, che lo rilegge dal log).
+    _RENAMED_FAMILY_LOG_RE = re.compile(
+        r'risulta già nella famiglia "[^"]*" \(id=(\d+), parent_asin=([A-Z0-9]+)\) '
+        r'ma questa riga indica un parent_asin diverso \(([A-Z0-9]+)\)'
+    )
+
+    def recover_renamed_family_parent_asin(self, log_rec, source_log_id):
+        """
+        Operazione di recupero: Amazon a volte riassegna in blocco un nuovo
+        parent ASIN a famiglie di varianti già esistenti (pulizia periodica
+        delle relazioni di variazione sul suo catalogo, non un bug nostro) —
+        verificato dal vivo il 2026-10-29 su un Full Import reale: 668
+        famiglie coinvolte, loggate come "conflitto" e saltate (comportamento
+        corretto: _process_variant_listing non deve indovinare). Di queste,
+        solo quelle dove OGNI riga coinvolta della stessa famiglia indica lo
+        STESSO unico nuovo parent_asin (nessuno split su più ASIN, nessun
+        altro parent_asin storico già puntato allo stesso nuovo valore) sono
+        una semplice rinomina: stesso gruppo di figli, nessun dato da
+        spostare. Qui si ripara SOLO quel caso, aggiornando x_amazon_parent_asin
+        sul template esistente — famiglie divise o unite restano segnalate,
+        serve una decisione reale su come ristrutturare i dati, non
+        automatizzabile in sicurezza qui.
+
+        Rilegge il testo già salvato di un Full Import precedente
+        (source_log_id, tipicamente l'ultimo) — nessuna chiamata Amazon,
+        nessuna nuova analisi dal vivo: i dati vengono dal log di
+        quell'import, non da uno stato più recente del catalogo. Se il
+        catalogo è cambiato nel frattempo (altro import, altra riconciliazione),
+        la famiglia viene saltata invece di sovrascrivere un dato più
+        recente (vedi il controllo su x_amazon_parent_asin invariato sotto).
+
+        Ritorna (riparate, saltate_split_o_unione, saltate_collisione).
+        """
+        source_log = self.env['ke.amazon.sync.log'].browse(source_log_id)
+        if not source_log.exists() or not source_log.log_lines:
+            msg = f'Log Full Import #{source_log_id} non trovato o senza righe.'
+            log_rec.write({'state': 'error', 'error_summary': msg, 'end_date': datetime.now()})
+            self.env.cr.commit()
+            return 0, 0, 0
+
+        fam_to_news = {}
+        fam_old_asin = {}
+        for line in source_log.log_lines.splitlines():
+            m = self._RENAMED_FAMILY_LOG_RE.search(line)
+            if not m:
+                continue
+            fam_id, old_asin, new_asin = m.groups()
+            fam_to_news.setdefault(fam_id, set()).add(new_asin)
+            fam_old_asin[fam_id] = old_asin
+
+        new_to_fams = {}
+        for fam_id, news in fam_to_news.items():
+            for new_asin in news:
+                new_to_fams.setdefault(new_asin, set()).add(fam_id)
+
+        Template = self.env['product.template']
+        fixed = skipped_split = skipped_collision = 0
+        lines = [f'Famiglie candidate trovate nel log #{source_log_id}: {len(fam_to_news)}']
+        for fam_id, news in fam_to_news.items():
+            if len(news) > 1:
+                # La famiglia è stata DIVISA su più nuovi parent_asin diversi
+                # — non una semplice rinomina, serve decidere come separare
+                # le varianti in Odoo. Non automatizzabile qui.
+                skipped_split += 1
+                lines.append(
+                    f'SALTATO (divisa) id={fam_id}: {len(news)} nuovi parent_asin diversi '
+                    f'({", ".join(sorted(news))}) — serve una decisione su come separare le varianti'
+                )
+                continue
+            new_asin = next(iter(news))
+            if len(new_to_fams[new_asin]) > 1:
+                # Lo stesso nuovo parent_asin è il bersaglio di PIÙ famiglie
+                # vecchie diverse — famiglie UNITE da Amazon, non una
+                # rinomina 1:1. Non automatizzabile qui.
+                skipped_split += 1
+                lines.append(
+                    f'SALTATO (unione con altra famiglia) id={fam_id}: nuovo parent_asin {new_asin} '
+                    f'conteso anche da altre famiglie — serve una decisione su come unire le varianti'
+                )
+                continue
+            tmpl = Template.browse(int(fam_id))
+            if not tmpl.exists() or not tmpl.active:
+                lines.append(f'SALTATO id={fam_id}: template non trovato o archiviato nel frattempo')
+                continue
+            if tmpl.x_amazon_parent_asin != fam_old_asin[fam_id]:
+                # Il parent_asin è già cambiato da quando questo log è stato
+                # scritto (altro import/riconciliazione, o un giro precedente
+                # di questo stesso recupero) — non sovrascrivere un dato più
+                # recente di quello che questo log descriveva.
+                lines.append(
+                    f'SALTATO "{tmpl.name[:40]}" (id={tmpl.id}): parent_asin già cambiato dal log, '
+                    f'non più {fam_old_asin[fam_id]}'
+                )
+                continue
+            collision = Template.search([
+                ('x_amazon_parent_asin', '=', new_asin), ('id', '!=', tmpl.id), ('active', '=', True),
+            ], limit=1)
+            if collision:
+                # Probabile famiglia duplicata creata per errore durante
+                # l'import stesso (una riga di quella famiglia non è stata
+                # riconosciuta via SKU, ne ha creata una seconda sotto il
+                # nuovo parent_asin) — fondere due template è un'operazione
+                # diversa e più rischiosa (spostare stock/ordini), non la
+                # faccio qui.
+                skipped_collision += 1
+                lines.append(
+                    f'SALTATO (collisione) "{tmpl.name[:40]}" (id={tmpl.id}): esiste già un altro '
+                    f'template (id={collision.id}) con il nuovo parent_asin {new_asin} — probabile '
+                    f'duplicato creato durante l\'import, serve fusione manuale'
+                )
+                continue
+            tmpl.write({'x_amazon_parent_asin': new_asin})
+            fixed += 1
+            lines.append(
+                f'RIPARATO "{tmpl.name[:40]}" (id={tmpl.id}): parent_asin {fam_old_asin[fam_id]} → {new_asin}'
+            )
+
+        log_rec.write({
+            'state': 'done',
+            'products_total': len(fam_to_news),
+            'products_updated': fixed,
+            'products_skipped': skipped_split + skipped_collision,
+            'log_lines': '\n'.join(lines),
+            'end_date': datetime.now(),
+        })
+        self.env.cr.commit()
+        return fixed, skipped_split, skipped_collision
 
     def _build_barcode_map(self):
         """Mappa barcode (forma canonica, vedi _normalize_ean) -> product.template.
@@ -3872,6 +4004,66 @@ class SyncEngine:
             return Product.browse()
         return product_tmpl.product_variant_id
 
+    def _find_fnsku_variant(self, sku, report_skus):
+        """
+        Abbinamento SKU → variante dedicato all'Import FNSKU. Più severo di
+        _find_amazon_product_variant: un FNSKU sbagliato finisce stampato
+        sull'etichetta, quindi nel dubbio si salta invece di scegliere.
+
+        - Match esatto (SKU variante, poi SKU/default_code template) prima di
+          tutto; se lo stesso valore è su più record → ambiguo.
+        - Fallback SKU con/senza '+' solo se lo SKU alternativo NON ha una
+          propria riga nello stesso report: altrimenti la riga storica
+          ('PFS-1234') e quella nuova ('PFS-1234+') finirebbero sullo stesso
+          prodotto e vincerebbe l'ultima elaborata, a seconda dell'ordine
+          del report. La riga dello SKU alternativo resta l'unica fonte per
+          il prodotto che lo porta.
+        - Anche il fallback deve essere univoco.
+        - Template con più varianti → 'multi_variante' (come
+          _find_amazon_product_variant: non si sceglie una variante a caso).
+          Lo SKU esiste in Odoo, quindi niente fallback '+': lo SKU
+          alternativo potrebbe essere un altro prodotto e riceverebbe
+          l'FNSKU di questo.
+        - Il fallback si applica solo se lo SKU esatto è del tutto assente.
+
+        Ritorna (variante, motivo): motivo '' se trovato, altrimenti
+        'non_trovato', 'multi_variante' o 'ambiguo'.
+        """
+        Product = self.env['product.product']
+        Template = self.env['product.template']
+
+        def _resolve(sku_value):
+            variants = Product.search([('x_amazon_sku', '=', sku_value)], limit=2)
+            if len(variants) > 1:
+                return Product.browse(), 'ambiguo'
+            if variants:
+                return variants, ''
+            for field in ('x_amazon_sku', 'default_code'):
+                tmpls = Template.search([(field, '=', sku_value)], limit=2)
+                if len(tmpls) > 1:
+                    return Product.browse(), 'ambiguo'
+                if tmpls:
+                    if len(tmpls.product_variant_ids) > 1:
+                        return Product.browse(), 'multi_variante'
+                    return tmpls.product_variant_id, ''
+            return Product.browse(), 'non_trovato'
+
+        variant, reason = _resolve(sku)
+        if reason != 'non_trovato':
+            # Trovato, ambiguo o presente ma non risolvibile: il fallback
+            # vale solo per uno SKU che in Odoo non c'è affatto.
+            return variant, reason
+
+        sku_alt = sku[:-1] if sku.endswith('+') else sku + '+'
+        if not sku_alt:
+            return Product.browse(), 'non_trovato'
+        variant, reason = _resolve(sku_alt)
+        if variant and sku_alt in report_skus:
+            # Il prodotto è già rivendicato dalla riga esatta dello SKU
+            # alternativo: questa riga non deve competere con quella.
+            return Product.browse(), 'ambiguo'
+        return variant, reason
+
     def _create_amazon_order_line(self, order, item):
         sku = item.get('SellerSKU', '')
         asin = item.get('ASIN', '')
@@ -3983,8 +4175,9 @@ class SyncEngine:
     def process_fnsku_report_rows(self, log_rec, rows):
         """
         Elabora il report inventario FBA (GET_FBA_MYI_ALL_INVENTORY_DATA) per popolare
-        x_amazon_fnsku. Abbina per SKU usando _find_amazon_product_variant (variante
-        prima, poi template) — righe senza SKU riconosciuto in Odoo vengono segnalate
+        x_amazon_fnsku. Abbina per SKU usando _find_fnsku_variant (variante
+        prima, poi template; fallback '+' solo se univoco e non conteso da
+        un'altra riga del report) — righe senza SKU riconosciuto in Odoo vengono segnalate
         come saltate, non è un errore (es. inventario storico/archiviato non più in
         Odoo). Se la variante trovata appartiene a un template con PIÙ varianti,
         l'FNSKU va sulla variante (product.product.x_amazon_fnsku), non sul
@@ -4015,6 +4208,10 @@ class SyncEngine:
         dedicated = bool(marketplace) and not marketplace.is_fba_pooled()
         matched = not_found = errors = 0
         lines = []
+        # Tutti gli SKU del report: serve a _find_fnsku_variant per non
+        # applicare il fallback con/senza '+' quando lo SKU alternativo ha
+        # una propria riga (storica e nuova sullo stesso prodotto).
+        report_skus = {(row.get('sku') or '').strip() for row in rows} - {''}
 
         for row in rows:
             sku = (row.get('sku') or '').strip()
@@ -4023,10 +4220,16 @@ class SyncEngine:
                 continue
 
             try:
-                variant = self._find_amazon_product_variant(sku, '')
+                variant, reason = self._find_fnsku_variant(sku, report_skus)
                 if not variant:
                     not_found += 1
-                    lines.append(f'{mp_tag}SKU NON TROVATO (o ambiguo su più varianti): {sku} — FNSKU: {fnsku}')
+                    if reason == 'ambiguo':
+                        lines.append(
+                            f'{mp_tag}SALTATO {sku} (abbinamento ambiguo: SKU su più prodotti, '
+                            f'o prodotto già abbinato dalla riga dello SKU con/senza "+") — FNSKU: {fnsku}'
+                        )
+                    else:
+                        lines.append(f'{mp_tag}SKU NON TROVATO (o ambiguo su più varianti): {sku} — FNSKU: {fnsku}')
                     continue
 
                 product = variant.product_tmpl_id
