@@ -11,6 +11,9 @@
                 <header>
                     <button name="action_scan_items" string="Scansiona articoli" type="object"
                             class="btn-primary" invisible="state != 'open'"/>
+                    <button name="action_fill_remaining" string="Metti tutto il rimanente" type="object"
+                            class="btn-secondary" invisible="state != 'open'"
+                            help="Aggiunge a questo collo tutti gli articoli del trasferimento non ancora in nessun collo: con un solo collo, l'intero trasferimento senza riscansionare."/>
                     <button name="action_close_box" string="Chiudi collo" type="object"
                             class="btn-primary" invisible="state != 'open'"/>
                     <button name="action_reopen_box" string="Riapri collo" type="object"
@@ -136,7 +139,15 @@
                     </group>
                     <notebook>
                         <page string="Colli">
-                            <field name="box_ids" readonly="state not in ('draft', 'plan_created')">
+                            <!-- default_plan_id: un bottone (Scansiona/Chiudi collo)
+                                 nel dialog di un collo NUOVO fa salvare a Odoo il
+                                 collo da solo prima di eseguire l'azione
+                                 (relational_utils.js, beforeExecuteActionButton) —
+                                 senza questo default il salvataggio falliva con
+                                 "Valore richiesto mancante per il campo plan_id"
+                                 (segnalato dal vivo il 2026-10-30). -->
+                            <field name="box_ids" readonly="state not in ('draft', 'plan_created')"
+                                   context="{'default_plan_id': id}">
                                 <list>
                                     <field name="sequence" widget="handle"/>
                                     <field name="name"/>

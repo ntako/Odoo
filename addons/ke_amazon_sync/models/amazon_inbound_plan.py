@@ -136,26 +136,50 @@ class AmazonInboundPlan(models.Model):
         return marketplace if marketplace and marketplace.active else False
 
     @api.model
+    def _source_address_vals(self, picking):
+        """
+        Indirizzo di origine dal partner del magazzino sorgente (o
+        dell'azienda). Niente 'mobile': il campo non esiste più su res.partner
+        in Odoo 19, leggerlo dava AttributeError appena 'phone' era vuoto
+        (trovato il 2026-10-30).
+        """
+        warehouse = picking.picking_type_id.warehouse_id
+        partner = warehouse.partner_id or self.env.company.partner_id
+        if not partner:
+            return {}
+        return {
+            'source_name': partner.name or warehouse.name,
+            'source_address_line1': partner.street or '',
+            'source_city': partner.city or '',
+            'source_state_code': partner.state_id.code or '',
+            'source_country_code': partner.country_id.code or 'IT',
+            'source_postal_code': partner.zip or '',
+            'source_email': partner.email or '',
+            'source_phone': partner.phone or '',
+        }
+
+    @api.model
     def default_get(self, fields_list):
         res = super().default_get(fields_list)
         picking_id = self.env.context.get('default_picking_id') or self.env.context.get('active_id')
         if picking_id and 'picking_id' in fields_list:
             picking = self.env['stock.picking'].browse(picking_id)
             res['picking_id'] = picking.id
-            warehouse = picking.picking_type_id.warehouse_id
-            partner = warehouse.partner_id or self.env.company.partner_id
-            if partner and 'source_name' in fields_list:
-                res.update({
-                    'source_name': partner.name or warehouse.name,
-                    'source_address_line1': partner.street or '',
-                    'source_city': partner.city or '',
-                    'source_state_code': partner.state_id.code or '',
-                    'source_country_code': partner.country_id.code or 'IT',
-                    'source_postal_code': partner.zip or '',
-                    'source_email': partner.email or '',
-                    'source_phone': partner.phone or partner.mobile or '',
-                })
+            if 'source_name' in fields_list:
+                res.update(self._source_address_vals(picking))
         return res
+
+    @api.onchange('picking_id')
+    def _onchange_picking_id_source_address(self):
+        """
+        Anche quando il trasferimento si sceglie a mano (piano creato dal
+        menu, non dal bottone sul trasferimento): prima l'indirizzo arrivava
+        solo da default_get, e un piano creato dal menu restava con
+        l'indirizzo vuoto (segnalato dal vivo il 2026-10-30). Solo in bozza:
+        dopo la creazione su Amazon l'indirizzo inviato non va riscritto.
+        """
+        if self.picking_id and self.state == 'draft':
+            self.update(self._source_address_vals(self.picking_id))
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -405,6 +429,41 @@ class AmazonInboundPlanBox(models.Model):
         self.ensure_one()
         self._require_plan_not_packed()
         self.write({'state': 'open'})
+
+    def action_fill_remaining(self):
+        """
+        Mette in questo collo tutto ciò che del trasferimento non è ancora in
+        nessun collo del piano — con un solo collo, l'intero trasferimento in
+        un click invece di riscansionare unità già scansionate in fase di
+        etichettatura (richiesto dall'utente il 2026-10-30). Con più colli
+        riempie questo con il resto: la ripartizione tra colli resta manuale
+        (scansione o righe a mano), solo l'utente sa cosa c'è in ognuno.
+        Somma sulla riga già esistente dello stesso prodotto, se c'è.
+        """
+        self.ensure_one()
+        if self.state != 'open':
+            raise UserError(f'{self.name} è già chiuso: riaprilo prima di aggiungere articoli.')
+        self._require_plan_not_packed()
+        plan = self.plan_id
+        expected = {}
+        for move in plan.picking_id.move_ids:
+            expected[move.product_id] = expected.get(move.product_id, 0) + move.product_uom_qty
+        added = False
+        for product, qty in expected.items():
+            packed = sum(plan.box_ids.line_ids.filtered(lambda l: l.product_id == product).mapped('quantity'))
+            remaining = int(round(qty - packed))
+            if remaining <= 0:
+                continue
+            line = self.line_ids.filtered(lambda l: l.product_id == product)[:1]
+            if line:
+                line.quantity += remaining
+            else:
+                self.env['ke.amazon.inbound.plan.box.line'].create({
+                    'box_id': self.id, 'product_id': product.id, 'quantity': remaining,
+                })
+            added = True
+        if not added:
+            raise UserError('Tutti gli articoli del trasferimento sono già nei colli.')
 
     def _require_plan_not_packed(self):
         self.ensure_one()

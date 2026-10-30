@@ -338,3 +338,55 @@ class TestInboundPlan(TransactionCase):
             self.env['ke.amazon.inbound.plan']._default_marketplace(),
             'marketplace archiviato: nessun default, meglio sceglierlo a mano',
         )
+
+    def test_source_address_filled_without_phone(self):
+        # 'mobile' non esiste più su res.partner in Odoo 19: con 'phone'
+        # vuoto default_get andava in AttributeError (trovato il 2026-10-30).
+        partner = self.picking.picking_type_id.warehouse_id.partner_id or self.env.company.partner_id
+        partner.write({'phone': False, 'city': 'ZZT Città'})
+        vals = self.env['ke.amazon.inbound.plan'].with_context(
+            default_picking_id=self.picking.id,
+        ).default_get(['picking_id', 'source_name', 'source_city', 'source_phone'])
+        self.assertEqual(vals['source_city'], 'ZZT Città')
+        self.assertEqual(vals['source_phone'], '')
+
+    def test_source_address_filled_when_picking_chosen_manually(self):
+        # Piano creato dal menu, trasferimento scelto dopo: l'indirizzo va
+        # compilato anche qui, non solo dal bottone sul trasferimento.
+        partner = self.picking.picking_type_id.warehouse_id.partner_id or self.env.company.partner_id
+        partner.write({'street': 'ZZT Via 1', 'city': 'ZZT Città', 'zip': '00000'})
+        plan = self.env['ke.amazon.inbound.plan'].new({'picking_id': self.picking.id})
+        plan._onchange_picking_id_source_address()
+        self.assertEqual(plan.source_address_line1, 'ZZT Via 1')
+        self.assertEqual(plan.source_city, 'ZZT Città')
+        self.assertEqual(plan.source_postal_code, '00000')
+
+    def test_fill_remaining_single_box_takes_whole_picking(self):
+        # Richiesto dall'utente il 2026-10-30: un collo solo, tutto il
+        # trasferimento in un click senza riscansionare.
+        box = self.env['ke.amazon.inbound.plan.box'].create({'plan_id': self.plan.id, 'name': 'Collo 1'})
+        box.action_fill_remaining()
+        self.assertEqual(len(box.line_ids), 1)
+        self.assertEqual(box.line_ids.product_id, self.product)
+        self.assertEqual(box.line_ids.quantity, 3)
+        with self.assertRaises(UserError):
+            box.action_fill_remaining()  # niente più da aggiungere
+
+    def test_fill_remaining_second_box_takes_only_the_rest(self):
+        first = self.env['ke.amazon.inbound.plan.box'].create({'plan_id': self.plan.id, 'name': 'Collo 1'})
+        self.env['ke.amazon.inbound.plan.box.line'].create({
+            'box_id': first.id, 'product_id': self.product.id, 'quantity': 1,
+        })
+        second = self.env['ke.amazon.inbound.plan.box'].create({'plan_id': self.plan.id, 'name': 'Collo 2'})
+        second.action_fill_remaining()
+        self.assertEqual(second.line_ids.quantity, 2, '3 previste - 1 già nel primo collo')
+        self.assertEqual(first.line_ids.quantity, 1, 'il primo collo non viene toccato')
+
+    def test_fill_remaining_sums_on_existing_line(self):
+        box = self.env['ke.amazon.inbound.plan.box'].create({'plan_id': self.plan.id, 'name': 'Collo 1'})
+        self.env['ke.amazon.inbound.plan.box.line'].create({
+            'box_id': box.id, 'product_id': self.product.id, 'quantity': 1,
+        })
+        box.action_fill_remaining()
+        self.assertEqual(len(box.line_ids), 1, 'nessuna riga doppia per lo stesso prodotto')
+        self.assertEqual(box.line_ids.quantity, 3)
