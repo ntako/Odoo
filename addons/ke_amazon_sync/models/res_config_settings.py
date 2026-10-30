@@ -75,6 +75,16 @@ class ResConfigSettings(models.TransientModel):
     # label_wizard). Disattivo di default: comportamento invariato (PDF dal
     # browser) finché qualcuno non attiva esplicitamente la stampa di rete
     # E sceglie una postazione — vedi TASK.md "Agente di stampa Windows".
+    amazon_fnsku_label_source = fields.Selection(
+        [('odoo', 'Generata in Odoo'), ('amazon', 'Scaricata da Amazon')],
+        string='Etichette FNSKU (PDF)',
+        config_parameter='ke_amazon_sync.fnsku_label_source',
+        default='odoo',
+        help="'Scaricata da Amazon': il PDF lo genera Amazon (createMarketplaceItemLabels) "
+             "nel formato della sua etichetta, una chiamata per stampa, serve la connessione. "
+             "'Generata in Odoo': come sempre, anche offline. Non vale per la stampa di rete "
+             "(ZPL), che resta generata in Odoo.",
+    )
     amazon_zpl_printing_enabled = fields.Boolean(
         string='Usa stampa di rete (ZPL)',
         config_parameter='ke_amazon_sync.zpl_printing_enabled',

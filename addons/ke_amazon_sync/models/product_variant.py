@@ -67,6 +67,22 @@ class ProductProduct(models.Model):
             return self.product_tmpl_id.x_amazon_fnsku or ''
         return ''
 
+    def _get_amazon_condition_label(self):
+        """
+        Condizione da stampare sull'etichetta FNSKU ('Nuovo', 'Usato — …'),
+        come sull'etichetta generata da Amazon (richiesto dall'utente il
+        2026-10-30). Fonte: la condizione sincronizzata da Amazon con la sync
+        giacenze FBA (SyncEngine._store_item_conditions) sull'inserzione della
+        variante — la più recente se ce ne sono su più marketplace — poi
+        quella del template, infine 'Nuovo'.
+        """
+        self.ensure_one()
+        listings = self.x_amazon_listing_ids.sorted(
+            lambda l: l.last_sync or fields.Datetime.to_datetime('1970-01-01'), reverse=True,
+        )
+        condition = (listings[:1].condition or self.product_tmpl_id.x_amazon_condition or 'new_new')
+        return dict(self.env['ke.amazon.listing']._fields['condition'].selection).get(condition, 'Nuovo')
+
     def _amazon_fnsku_needs_label(self):
         """
         True se il valore FNSKU di questa variante va stampato fisicamente,

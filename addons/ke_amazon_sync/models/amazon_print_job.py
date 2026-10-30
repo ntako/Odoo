@@ -52,7 +52,10 @@ class AmazonPrintJob(models.Model):
         from odoo.addons.ke_amazon_sync.services.zpl_builder import build_fnsku_zpl
 
         product = label_log.product_id
-        zpl = build_fnsku_zpl(label_log.fnsku, product.default_code, product.name)
+        # Trattino semplice: '—' non è ASCII e lo ZPL qui non dichiara una
+        # codifica (^CI), la stampante lo renderebbe come caratteri spuri.
+        condition = product._get_amazon_condition_label().replace('—', '-')
+        zpl = build_fnsku_zpl(label_log.fnsku, product.default_code, product.name, condition)
         return self.create({
             'station_id': station.id,
             'label_log_id': label_log.id,

@@ -430,7 +430,9 @@ class SpApiClient:
     def fetch_inventory_page(self, page_token=None):
         """
         Scarica UNA pagina di inventario FBA (senza scorrere tutte le pagine).
-        Ritorna ([{'sku':..., 'asin':..., 'qty':...}, ...], next_token_o_None).
+        Ritorna ([{'sku':..., 'asin':..., 'qty':..., 'condition':...}, ...], next_token_o_None).
+        'condition' è il testo di InventorySummary.condition (es. 'NewItem'),
+        usato solo per la condizione stampata sull'etichetta FNSKU.
         Usata dalla sync a blocchi per evitare che un'unica invocazione debba
         scaricare tutte le pagine (potenzialmente centinaia) in un colpo solo,
         rischiando di superare il limite di tempo reale in caso di
@@ -450,6 +452,7 @@ class SpApiClient:
                 'sku': s.get('sellerSku', ''),
                 'asin': s.get('asin', ''),
                 'qty': s.get('inventoryDetails', {}).get('fulfillableQuantity', 0),
+                'condition': s.get('condition', ''),
             }
             for s in payload.get('inventorySummaries', [])
         ]
@@ -1052,6 +1055,33 @@ class SpApiClient:
         return self._inbound_api().confirm_delivery_window_options(
             inbound_plan_id, shipment_id, delivery_window_option_id,
         ).payload
+
+    @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
+    def create_item_labels(self, msku_quantities, width_mm, height_mm, locale_code='it_IT'):
+        """
+        Etichette FNSKU degli articoli generate da Amazon (createMarketplaceItemLabels,
+        v2024-03-20, 2 req/s burst 30 — verificato sul modello ufficiale il
+        2026-10-30), come PDF (bytes). 'msku_quantities': [{'msku', 'quantity'}].
+        Formato termico con larghezza/altezza 25-100 (la documentazione non
+        dice l'unità: millimetri presunti, verificare sul primo PDF reale).
+        La risposta è un documentDownloads con un URI a scadenza: scaricato
+        subito, qui.
+        """
+        import requests
+        payload = self._inbound_api().create_marketplace_item_labels(
+            labelType='THERMAL_PRINTING',
+            marketplaceId=self.marketplace_id,
+            mskuQuantities=msku_quantities,
+            width=width_mm, height=height_mm,
+            localeCode=locale_code,
+        ).payload
+        downloads = (payload or {}).get('documentDownloads') or []
+        uri = downloads[0].get('uri') if downloads else None
+        if not uri:
+            raise RuntimeError(f'createMarketplaceItemLabels senza documento da scaricare: {payload}')
+        response = requests.get(uri, timeout=HTTP_TIMEOUT_S)
+        response.raise_for_status()
+        return response.content
 
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def get_labels(self, shipment_confirmation_id, page_type, box_ids):

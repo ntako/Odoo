@@ -16,15 +16,17 @@ _LABEL_HEIGHT_DOT = 200  # 25mm a 203dpi
 _MAX_NAME_LEN = 40
 
 
-def build_fnsku_zpl(fnsku, sku, name):
+def build_fnsku_zpl(fnsku, sku, name, condition=''):
     """
     ZPL per un'etichetta FNSKU: barcode Code128, testo FNSKU, SKU interno,
-    descrizione breve troncata. 'fnsku' è obbligatorio (verificato dal
+    descrizione breve troncata, condizione ('Nuovo', come sull'etichetta di
+    Amazon — aggiunta il 2026-10-30). 'fnsku' è obbligatorio (verificato dal
     chiamante, vedi ke.amazon.print.job._enqueue_from_label_log) — qui non
     si riverifica, solo si genera.
     """
     sku = (sku or '').strip()
     name = (name or '').strip()[:_MAX_NAME_LEN]
+    condition = (condition or '').strip()
     return (
         f'^XA\n'
         f'^PW{_LABEL_WIDTH_DOT}\n'
@@ -35,5 +37,6 @@ def build_fnsku_zpl(fnsku, sku, name):
         f'^FO20,95^A0N,24,24^FD{fnsku}^FS\n'
         f'^FO20,125^A0N,18,18^FD{sku}^FS\n'
         f'^FO20,150^A0N,16,16^FD{name}^FS\n'
-        f'^XZ\n'
+        + (f'^FO20,172^A0N,16,16^FD{condition}^FS\n' if condition else '')
+        + f'^XZ\n'
     )

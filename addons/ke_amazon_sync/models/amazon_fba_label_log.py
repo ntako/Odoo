@@ -5,6 +5,7 @@ from reportlab.graphics.barcode import createBarcodeDrawing
 from reportlab.graphics.shapes import Group, Rect
 
 from odoo import api, fields, models
+from odoo.exceptions import UserError
 
 
 class AmazonFbaLabelLog(models.Model):
@@ -83,10 +84,69 @@ class AmazonFbaLabelLog(models.Model):
                 self.env['ke.amazon.print.job']._enqueue_from_label_log(station, log)
             return {'queued': True, 'station': station.name, 'report_action': None}
 
+        source = self.env['ir.config_parameter'].sudo().get_param('ke_amazon_sync.fnsku_label_source', 'odoo')
+        if source == 'amazon':
+            return {'queued': False, 'station': None, 'report_action': self._amazon_labels_action(logs)}
+
         report_action = self.env.ref('ke_amazon_sync.action_report_amazon_fba_label').report_action(
             logs, config=False,
         )
         return {'queued': False, 'station': None, 'report_action': report_action}
+
+    @api.model
+    def _build_label_client(self):
+        """Client SP-API per le etichette Amazon — Amazon.it (pool Pan-EU), come
+        il marketplace predefinito dei piani inbound. Metodo separato perché i
+        test lo sostituiscono con un client finto."""
+        from ..services.sp_api_client import SpApiClient
+        marketplace = self.env.ref('ke_amazon_sync.amazon_marketplace_it', raise_if_not_found=False)
+        client = SpApiClient(
+            self.env, marketplace_id=marketplace.marketplace_id if marketplace and marketplace.active else None,
+        )
+        client.validate_credentials()
+        return client
+
+    @api.model
+    def _amazon_labels_action(self, logs):
+        """
+        PDF delle etichette generato da Amazon (createMarketplaceItemLabels)
+        per gli stessi prodotti/quantità delle righe di log appena create,
+        al posto del report Odoo — impostazione "Etichette FNSKU (PDF):
+        Scaricata da Amazon" (richiesto dall'utente il 2026-10-30). Stesso
+        SKU inviato nei piani inbound (x_amazon_sku, altrimenti default_code)
+        e stesso formato del report Odoo (formato carta, oggi 40x30). Su
+        errore di Amazon solleva: le righe di log appena create vengono
+        annullate con la transazione, niente storico di stampe mai avvenute.
+        """
+        quantities = {}
+        for log in logs:
+            product = log.product_id
+            sku = product.x_amazon_sku or product.default_code
+            if not sku:
+                raise UserError(f'{product.display_name}: nessuno SKU Amazon, impossibile chiedere l\'etichetta ad Amazon.')
+            quantities[sku] = quantities.get(sku, 0) + 1
+        paperformat = self.env.ref('ke_amazon_sync.paperformat_amazon_fba_label')
+        try:
+            client = self._build_label_client()
+            pdf = client.create_item_labels(
+                [{'msku': sku, 'quantity': qty} for sku, qty in quantities.items()],
+                width_mm=paperformat.page_width, height_mm=paperformat.page_height,
+            )
+        except Exception as exc:
+            raise UserError(
+                f'Etichette non ottenute da Amazon: {exc}\n'
+                f'Puoi tornare a "Generata in Odoo" nelle impostazioni Amazon.'
+            )
+        attachment = self.env['ir.attachment'].create({
+            'name': f'Etichette FNSKU Amazon ({len(logs)}).pdf',
+            'datas': base64.b64encode(pdf),
+            'mimetype': 'application/pdf',
+        })
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/web/content/{attachment.id}?download=true',
+            'target': 'self',
+        }
 
     @api.model
     def _create_and_dispatch(self, product, fnsku, quantity, is_reprint=False, move=None, picking=None):

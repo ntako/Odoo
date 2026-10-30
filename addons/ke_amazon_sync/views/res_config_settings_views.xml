@@ -157,6 +157,10 @@
                     </block>
 
                     <block title="Etichette FNSKU" name="amazon_labels">
+                        <setting string="Etichette FNSKU (PDF)"
+                                 help="Generata in Odoo (default, anche offline) oppure scaricata da Amazon nel suo formato (una chiamata ad Amazon per ogni stampa). La stampa di rete ZPL resta sempre generata in Odoo.">
+                            <field name="amazon_fnsku_label_source" widget="radio"/>
+                        </setting>
                         <setting string="Usa stampa di rete (ZPL)"
                                  help="Se disattivo (default), le etichette si stampano in PDF dal browser come adesso. Se attivo, vengono accodate per l'agente di stampa Windows sulla postazione scelta qui sotto.">
                             <field name="amazon_zpl_printing_enabled"/>

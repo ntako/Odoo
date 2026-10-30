@@ -16,3 +16,4 @@ from . import test_fba_sync_warehouse_log
 from . import test_fba_prep_wizard_labeled_display
 from . import test_ship_to_fba_wizard_print
 from . import test_own_brand_no_fnsku_label
+from . import test_item_condition_and_amazon_labels

@@ -3521,6 +3521,9 @@ class SyncEngine:
         mp_tag = f'[{marketplace.code}] ' if marketplace else ''
 
         items, new_page_token = self.client.fetch_inventory_page(page_token)
+        # Condizione per SKU, pagina per pagina: indipendente dalle quantità
+        # (che si aggregano per ASIN e si scrivono solo sull'ultima pagina).
+        self._store_item_conditions(items, marketplace)
 
         if asin_totals is None:
             asin_totals = {}
@@ -3540,6 +3543,7 @@ class SyncEngine:
 
         updated = errors = skipped = 0
         lines = [f'{mp_tag}Inventario scaricato: {len(asin_totals)} ASIN distinti.']
+        lines.extend(self._condition_log_lines(mp_tag))
 
         for asin, fba_qty in asin_totals.items():
             product_tmpl = self.env['product.template'].search(
@@ -4003,6 +4007,74 @@ class SyncEngine:
         if not product_tmpl or len(product_tmpl.product_variant_ids) > 1:
             return Product.browse()
         return product_tmpl.product_variant_id
+
+    # InventorySummary.condition (testo libero, es. 'NewItem' — modello
+    # ufficiale FBA Inventory: "for example, New Item") → condizione Odoo.
+    # Chiave normalizzata: minuscolo, senza spazi/trattini/underscore. Tutte
+    # le varianti 'New…' (con garanzia, OEM, confezione aperta) stampano
+    # 'Nuovo'; un valore non riconosciuto non sovrascrive niente.
+    _CONDITION_MAP = {
+        'new': 'new_new', 'newitem': 'new_new', 'newwithwarranty': 'new_new',
+        'newoem': 'new_new', 'newopenbox': 'new_new',
+        'usedlikenew': 'used_like_new', 'usedverygood': 'used_very_good',
+        'usedgood': 'used_good', 'usedacceptable': 'used_acceptable',
+    }
+
+    def _store_item_conditions(self, items, marketplace):
+        """
+        Salva la condizione Amazon di ogni SKU dell'inventario FBA, per
+        stamparla sull'etichetta FNSKU come fa Amazon ('Nuovo'), richiesto
+        dall'utente il 2026-10-30. Sull'inserzione della variante per questo
+        marketplace e, per un prodotto a variante singola, anche sul
+        template (x_amazon_condition, la stessa usata per pubblicare).
+        Abbinamento SKU → variante con la stessa regola severa dell'Import
+        FNSKU (_find_fnsku_variant): uno SKU ambiguo si salta. Scrive solo
+        se cambia. Contatori sull'istanza, riportati nel log a fine
+        marketplace da _condition_log_lines.
+        """
+        self._conditions_updated = getattr(self, '_conditions_updated', 0)
+        self._conditions_unknown = getattr(self, '_conditions_unknown', set())
+        page_skus = {(i.get('sku') or '').strip() for i in items} - {''}
+        for item in items:
+            sku = (item.get('sku') or '').strip()
+            raw = (item.get('condition') or '').strip()
+            if not sku or not raw:
+                continue
+            key = raw.lower().replace(' ', '').replace('_', '').replace('-', '')
+            condition = self._CONDITION_MAP.get(key)
+            if not condition:
+                self._conditions_unknown.add(raw)
+                continue
+            variant, _reason = self._find_fnsku_variant(sku, page_skus)
+            if not variant:
+                continue
+            changed = False
+            if marketplace:
+                listing = self.env['ke.amazon.listing'].sudo().search([
+                    ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
+                ], limit=1)
+                if listing and listing.condition != condition:
+                    listing.write({'condition': condition})
+                    changed = True
+            template = variant.product_tmpl_id
+            if len(template.product_variant_ids) == 1 and template.x_amazon_condition != condition:
+                template.write({'x_amazon_condition': condition})
+                changed = True
+            if changed:
+                self._conditions_updated += 1
+
+    def _condition_log_lines(self, mp_tag):
+        lines = []
+        if getattr(self, '_conditions_updated', 0):
+            lines.append(f'{mp_tag}Condizione Amazon aggiornata per {self._conditions_updated} SKU.')
+        if getattr(self, '_conditions_unknown', None):
+            lines.append(
+                f'{mp_tag}Condizioni Amazon non riconosciute (non salvate): '
+                f'{", ".join(sorted(self._conditions_unknown))}'
+            )
+        self._conditions_updated = 0
+        self._conditions_unknown = set()
+        return lines
 
     def _find_fnsku_variant(self, sku, report_skus):
         """
