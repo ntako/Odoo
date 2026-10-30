@@ -148,16 +148,20 @@
                     </group>
                     <notebook>
                         <page string="Colli">
-                            <!-- default_plan_id: un bottone (Scansiona/Chiudi collo)
-                                 nel dialog di un collo NUOVO fa salvare a Odoo il
-                                 collo da solo prima di eseguire l'azione
-                                 (relational_utils.js, beforeExecuteActionButton) —
-                                 senza questo default il salvataggio falliva con
-                                 "Valore richiesto mancante per il campo plan_id"
-                                 (segnalato dal vivo il 2026-10-30). -->
-                            <field name="box_ids" readonly="state not in ('draft', 'plan_created')"
-                                   context="{'default_plan_id': id}">
-                                <list>
+                            <!-- Colli creati SOLO dal bottone "Aggiungi collo" (create="0"),
+                                 non dalla riga "Aggiungi" della lista: un collo nuovo nel
+                                 dialog x2many veniva salvato da solo dai bottoni
+                                 Scansiona/Chiudi (beforeExecuteActionButton) e poi di
+                                 nuovo da "Salva" ("Invalid ids list: false"), e serviva
+                                 il piano già salvato (segnalati dal vivo il 2026-10-30).
+                                 Il bottone del form salva prima il piano e apre un collo
+                                 già esistente. Modificabili fino all'invio del contenuto
+                                 colli (setPackingInformation), non oltre. -->
+                            <button name="action_add_box" string="Aggiungi collo" type="object"
+                                    class="btn-secondary" icon="fa-plus"
+                                    invisible="state not in ('draft', 'plan_created', 'packing_confirmed')"/>
+                            <field name="box_ids" readonly="state not in ('draft', 'plan_created', 'packing_confirmed')">
+                                <list create="0">
                                     <field name="sequence" widget="handle"/>
                                     <field name="name"/>
                                     <field name="state" widget="badge" decoration-success="state == 'closed'"/>

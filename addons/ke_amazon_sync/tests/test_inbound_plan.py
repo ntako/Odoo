@@ -479,3 +479,35 @@ class TestInboundPlan(TransactionCase):
             self.plan.action_cancel_plan()
         self.assertEqual(self.plan.state, 'cancelled')
         self.assertNotIn('cancel_inbound_plan', client.calls, 'nessuna chiamata con inboundPlanId vuoto')
+
+    def test_add_box_creates_linked_box_and_opens_it(self):
+        # 2026-10-30: colli creati dal bottone, non dalla riga della lista
+        # ("Invalid ids list: false" e piano da salvare a mano prima).
+        action = self.plan.action_add_box()
+        box = self.env['ke.amazon.inbound.plan.box'].browse(action['res_id'])
+        self.assertEqual(box.plan_id, self.plan)
+        self.assertEqual(box.name, 'Collo 1')
+        self.assertEqual(action['target'], 'new')
+        second = self.env['ke.amazon.inbound.plan.box'].browse(self.plan.action_add_box()['res_id'])
+        self.assertEqual(second.name, 'Collo 2')
+        self.assertGreater(second.sequence, box.sequence)
+
+    def test_boxes_editable_until_packing_info_sent(self):
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_create_plan()
+            self.plan.action_generate_packing_options()
+            self.plan.action_confirm_packing_option()
+            # Imballaggio confermato: i colli si preparano adesso.
+            box = self.env['ke.amazon.inbound.plan.box'].browse(self.plan.action_add_box()['res_id'])
+            box.write({'length_cm': 20, 'width_cm': 20, 'height_cm': 20, 'weight_kg': 5})
+            box.action_fill_remaining()
+            box.action_close_box()
+            box.action_reopen_box()
+            box.action_close_box()
+            self.plan.action_set_packing_information()
+            self.assertEqual(self.plan.state, 'packing_info_sent')
+            with self.assertRaises(UserError):
+                box.action_reopen_box()
+            with self.assertRaises(UserError):
+                self.plan.action_add_box()

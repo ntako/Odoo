@@ -5,6 +5,11 @@ from ..services.sp_api_client import SpApiClient
 from ..services.fba_inbound_service import FbaInboundService
 
 
+# Stati del piano in cui i colli si possono ancora creare/modificare: fino
+# all'invio del contenuto colli ad Amazon (action_set_packing_information).
+BOX_EDITABLE_STATES = ('draft', 'plan_created', 'packing_confirmed')
+
+
 class AmazonInboundPlan(models.Model):
     _name = 'ke.amazon.inbound.plan'
     _description = 'Piano di spedizione inbound FBA (Fulfillment Inbound API v2024-03-20)'
@@ -400,6 +405,28 @@ class AmazonInboundPlan(models.Model):
             raise UserError('Nessun piano inbound con un indirizzo di origine trovato su Amazon.')
         self.write(vals)
 
+    def action_add_box(self):
+        """
+        Crea un collo già collegato al piano e lo apre in un dialog — al
+        posto della riga "Aggiungi" della lista colli (vedi la vista per il
+        perché). Essendo un bottone del form principale, Odoo salva il piano
+        prima di chiamarlo: niente più obbligo di salvarlo a mano.
+        """
+        self.ensure_one()
+        if self.state not in BOX_EDITABLE_STATES:
+            raise UserError('Il contenuto dei colli è già stato inviato ad Amazon: non si aggiungono altri colli.')
+        box = self.env['ke.amazon.inbound.plan.box'].create({
+            'plan_id': self.id, 'name': f'Collo {len(self.box_ids) + 1}',
+            'sequence': (max(self.box_ids.mapped('sequence')) if self.box_ids else 0) + 10,
+        })
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'ke.amazon.inbound.plan.box',
+            'res_id': box.id,
+            'view_mode': 'form',
+            'target': 'new',
+        }
+
     def action_reset_to_draft(self):
         """
         Da 'Errore' a 'Bozza', solo se il piano non è mai stato creato su
@@ -461,6 +488,7 @@ class AmazonInboundPlanBox(models.Model):
 
     def action_scan_items(self):
         self.ensure_one()
+        self._require_plan_not_packed()
         if self.state != 'open':
             raise UserError(f'{self.name} è già chiuso: riaprilo prima di scansionare altri articoli.')
         return {
@@ -521,9 +549,13 @@ class AmazonInboundPlanBox(models.Model):
 
     def _require_plan_not_packed(self):
         self.ensure_one()
-        if self.plan_id.state not in ('draft', 'plan_created'):
+        # Fino a 'packing_confirmed' compreso: il contenuto dei colli va ad
+        # Amazon solo con "Invia contenuto colli" (setPackingInformation),
+        # dopo la conferma dell'imballaggio — bloccarli già lì impediva di
+        # prepararli nel momento in cui servono (2026-10-30).
+        if self.plan_id.state not in BOX_EDITABLE_STATES:
             raise UserError(
-                'Il piano ha già superato lo step di imballaggio: non modificare più i colli da qui.'
+                'Il contenuto dei colli è già stato inviato ad Amazon: non modificare più i colli da qui.'
             )
 
 
