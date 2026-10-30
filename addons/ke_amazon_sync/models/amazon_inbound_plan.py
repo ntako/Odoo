@@ -27,8 +27,13 @@ class AmazonInboundPlan(models.Model):
     )
     marketplace_id = fields.Many2one(
         'ke.amazon.marketplace', string='Marketplace', required=True,
-        help='Marketplace di destinazione. Per un pool EU (es. IT/DE/ES/FR condiviso), '
-             'un qualunque marketplace pooled attivo va bene.',
+        default=lambda self: self._default_marketplace(),
+        help="Marketplace di destinazione inviato ad Amazon: decide in quale PAESE "
+             "Amazon colloca la merce all'arrivo. Con il Pan-EU va lasciato Italia: la "
+             "merce entra in un magazzino italiano e Amazon la redistribuisce dopo. "
+             "Scegliere DE/FR/ES vuol dire spedire direttamente in un magazzino estero "
+             "(trasporto internazionale e, in genere, obblighi IVA nel paese di "
+             "deposito) — non è indifferente come nel wizard \"Spedisci a FBA\".",
     )
 
     # Indirizzo di origine — snapshot editabile (Amazon richiede un oggetto
@@ -117,6 +122,18 @@ class AmazonInboundPlan(models.Model):
                 raise UserError(
                     f'{plan.picking_id.name} è già collegato al piano inbound "{other.name}".'
                 )
+
+    @api.model
+    def _default_marketplace(self):
+        """
+        Amazon.it come default (richiesto dall'utente il 2026-10-30): il
+        vecchio help diceva "un qualunque marketplace pooled va bene", vero
+        per il pool di giacenza ma non per la spedizione — vedi l'help del
+        campo. Vuoto se il record non c'è o è archiviato: meglio un campo
+        obbligatorio da compilare a mano che un default sbagliato.
+        """
+        marketplace = self.env.ref('ke_amazon_sync.amazon_marketplace_it', raise_if_not_found=False)
+        return marketplace if marketplace and marketplace.active else False
 
     @api.model
     def default_get(self, fields_list):

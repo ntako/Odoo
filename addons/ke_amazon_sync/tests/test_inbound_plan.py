@@ -326,3 +326,15 @@ class TestInboundPlan(TransactionCase):
             self.env['ke.amazon.inbound.plan'].create({
                 'picking_id': self.picking.id, 'marketplace_id': self.marketplace.id,
             })
+
+    def test_default_marketplace_is_italy(self):
+        # Richiesto dall'utente il 2026-10-30: con il Pan-EU il marketplace
+        # del piano decide il paese di arrivo della merce, default Amazon.it.
+        italy = self.env.ref('ke_amazon_sync.amazon_marketplace_it')
+        italy.active = True
+        self.assertEqual(self.env['ke.amazon.inbound.plan']._default_marketplace(), italy)
+        italy.active = False
+        self.assertFalse(
+            self.env['ke.amazon.inbound.plan']._default_marketplace(),
+            'marketplace archiviato: nessun default, meglio sceglierlo a mano',
+        )
