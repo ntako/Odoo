@@ -511,3 +511,25 @@ class TestInboundPlan(TransactionCase):
                 box.action_reopen_box()
             with self.assertRaises(UserError):
                 self.plan.action_add_box()
+
+    def test_send_boxes_with_same_product_on_two_picking_lines(self):
+        # Trasferimento reale del 2026-10-30: SAV-54872+ su due righe (1 + 3),
+        # 4 nel collo — il controllo confrontava ogni riga da sola con il
+        # totale ("imballate 4 unità su 1 previste").
+        first_move = self.picking.move_ids
+        first_move.copy({
+            'picking_id': self.picking.id, 'product_uom_qty': 2, 'quantity': 2, 'state': 'done',
+        })
+        self.assertEqual(len(self.picking.move_ids), 2)
+        client = FakeInboundClient()
+        with self._with_client(client):
+            self.plan.action_create_plan()
+            self.plan.action_generate_packing_options()
+            self.plan.action_confirm_packing_option()
+            box = self.env['ke.amazon.inbound.plan.box'].browse(self.plan.action_add_box()['res_id'])
+            box.write({'length_cm': 20, 'width_cm': 20, 'height_cm': 20, 'weight_kg': 5})
+            box.action_fill_remaining()
+            self.assertEqual(box.line_ids.quantity, 5, '3 + 2 sulle due righe')
+            box.action_close_box()
+            self.plan.action_set_packing_information()
+        self.assertEqual(self.plan.state, 'packing_info_sent')

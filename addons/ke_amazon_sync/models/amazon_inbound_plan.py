@@ -294,13 +294,22 @@ class AmazonInboundPlan(models.Model):
             )
         if not self.box_ids:
             raise UserError('Nessun collo definito.')
-        all_lines = self.box_ids.line_ids
+        # Totale per PRODOTTO, non per riga: lo stesso prodotto può stare su
+        # più righe del trasferimento (es. 1 + 3), e prima ogni riga veniva
+        # confrontata da sola con il totale nei colli ("imballate 4 unità su
+        # 1 previste", trovato dal vivo il 2026-10-30). Stesso criterio del
+        # manifesto del piano (_build_items) e del vincolo sulle righe collo.
+        expected_by_product = {}
         for move in self.picking_id.move_ids:
-            expected = move.product_uom_qty
-            packed = sum(all_lines.filtered(lambda l: l.product_id == move.product_id).mapped('quantity'))
+            expected_by_product[move.product_id] = (
+                expected_by_product.get(move.product_id, 0) + move.product_uom_qty
+            )
+        all_lines = self.box_ids.line_ids
+        for product, expected in expected_by_product.items():
+            packed = sum(all_lines.filtered(lambda l: l.product_id == product).mapped('quantity'))
             if packed != expected:
                 raise UserError(
-                    f'{move.product_id.display_name}: imballate {packed:g} unità su {expected:g} '
+                    f'{product.display_name}: imballate {packed:g} unità su {expected:g} '
                     f'previste — completa i colli prima di procedere.'
                 )
         try:
