@@ -44,15 +44,6 @@ class AmazonMarketplace(models.Model):
              "pooled (es. UK o US).",
     )
 
-    fba_used_location_id = fields.Many2one(
-        'stock.location', string='Ubicazione FBA – Usato',
-        domain="[('usage', '=', 'internal')]",
-        help="Solo per un marketplace con un Magazzino FBA proprio (non pooled, es. UK): "
-             "dove stanno le sue unità usate rivendute da Amazon (Grade & Resell). Se vuota, "
-             "la sync giacenze la crea da sola accanto allo stock del suo magazzino FBA. "
-             "I marketplace del pool usano quella configurata sull'azienda (tab Amazon).",
-    )
-
     def get_fba_warehouse(self):
         """
         Magazzino FBA effettivo per questo marketplace: quello impostato qui, o —

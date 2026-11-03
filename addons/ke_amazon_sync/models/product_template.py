@@ -284,12 +284,9 @@ class ProductTemplate(models.Model):
 
         # Ubicazioni "FBA – Usato" (pool sull'azienda + marketplace dedicati):
         # stanno dentro il magazzino FBA ma l'usato non è giacenza del nuovo.
-        used_location_ids = set(self.env['ke.amazon.marketplace'].sudo().with_context(
+        used_location_ids = set(self.env['stock.warehouse'].sudo().with_context(
             active_test=False,
-        ).search([('fba_used_location_id', '!=', False)]).fba_used_location_id.ids)
-        pool_used_id = int(params.get_param('ke_amazon_sync.fba_used_location_id', 0) or 0)
-        if pool_used_id:
-            used_location_ids.add(pool_used_id)
+        ).search([('amazon_fba_used_location_id', '!=', False)]).amazon_fba_used_location_id.ids)
 
         variant_ids = self.mapped('product_variant_ids').ids
         qty_by_wh_variant = {}  # {(warehouse_id, variant_id): qty}

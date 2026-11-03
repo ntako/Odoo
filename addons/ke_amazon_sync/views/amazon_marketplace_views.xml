@@ -31,7 +31,6 @@
                         <field name="active"/>
                         <field name="sequence"/>
                         <field name="fba_warehouse_id"/>
-                        <field name="fba_used_location_id" invisible="not fba_warehouse_id"/>
                     </group>
                 </sheet>
             </form>

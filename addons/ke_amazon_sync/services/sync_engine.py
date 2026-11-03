@@ -4238,32 +4238,25 @@ class SyncEngine:
 
     def _get_fba_used_location(self, marketplace=None):
         """
-        Ubicazione "FBA – Usato" del magazzino FBA del marketplace: una per
-        magazzino, con la stessa regola del nuovo — il pool (marketplace senza
-        magazzino proprio, o con quello aziendale) usa quella configurata
-        sull'azienda, un marketplace con magazzino dedicato la sua. Se manca,
-        la crea accanto allo stock del magazzino (stesso livello del transito),
-        così non entra nella giacenza del nuovo, scritta sull'ubicazione
-        esatta dello stock (_set_product_stock).
+        Ubicazione "FBA – Usato" del magazzino FBA del marketplace, configurata
+        sul magazzino stesso (stock.warehouse.amazon_fba_used_location_id): chi
+        condivide il magazzino (il pool IT/ES/FR) condivide l'ubicazione, chi
+        ne ha uno proprio (UK) ha la propria. Se manca, la crea accanto allo
+        stock del magazzino (stesso livello del transito), così non entra
+        nella giacenza del nuovo, scritta sull'ubicazione esatta dello stock
+        (_set_product_stock), né nei prelievi da quello stock.
         """
-        company = self.env.company
-        warehouse = marketplace.get_fba_warehouse() if marketplace else company.amazon_fba_warehouse_id
+        warehouse = (
+            marketplace.get_fba_warehouse() if marketplace else self.env.company.amazon_fba_warehouse_id
+        )
         if not warehouse:
             return None
-        dedicated = bool(
-            marketplace and marketplace.fba_warehouse_id
-            and marketplace.fba_warehouse_id != company.amazon_fba_warehouse_id
-        )
-        location = marketplace.fba_used_location_id if dedicated else company.amazon_fba_used_location_id
-        if location:
-            return location
+        if warehouse.amazon_fba_used_location_id:
+            return warehouse.amazon_fba_used_location_id
         location = self.env['stock.location'].sudo().create({
             'name': 'Usato', 'usage': 'internal', 'location_id': warehouse.view_location_id.id,
         })
-        if dedicated:
-            marketplace.sudo().fba_used_location_id = location
-        else:
-            company.sudo().amazon_fba_used_location_id = location
+        warehouse.sudo().amazon_fba_used_location_id = location
         return location
 
     def _sync_resell_inventory(self, marketplace, mp_tag=''):

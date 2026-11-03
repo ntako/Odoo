@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Ubicazione dell'usato Amazon sul magazzino FBA (2026-11-03): chi
+         condivide il magazzino condivide l'ubicazione. Visibile solo sui
+         magazzini FBA Amazon. -->
+    <record id="view_warehouse_form_amazon_used" model="ir.ui.view">
+        <field name="name">stock.warehouse.form.amazon.used</field>
+        <field name="model">stock.warehouse</field>
+        <field name="inherit_id" ref="stock.view_warehouse"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='code']" position="after">
+                <field name="is_amazon_fba_warehouse" invisible="1"/>
+                <field name="amazon_fba_used_location_id" invisible="not is_amazon_fba_warehouse"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

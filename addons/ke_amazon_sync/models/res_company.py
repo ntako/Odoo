@@ -3,7 +3,6 @@ from odoo import api, fields, models
 _FBA_PARAM = 'ke_amazon_sync.fba_warehouse_id'
 _FBM_PARAM = 'ke_amazon_sync.fbm_warehouse_id'
 _DEFAULT_PARAM = 'ke_amazon_sync.default_warehouse_id'
-_FBA_USED_PARAM = 'ke_amazon_sync.fba_used_location_id'
 
 
 class ResCompany(models.Model):
@@ -46,32 +45,6 @@ class ResCompany(models.Model):
              "Amazon FBM (magazzino 'FBM Amazon') o spedisci rifornimenti FBA — "
              'è la fonte di verità fisica, distinta dalle allocazioni per canale.',
     )
-
-    amazon_fba_used_location_id = fields.Many2one(
-        'stock.location',
-        string='Ubicazione FBA – Usato (pool)',
-        compute='_compute_amazon_fba_used_location',
-        inverse='_inverse_amazon_fba_used_location',
-        store=False,
-        domain="[('usage', '=', 'internal')]",
-        help="Dove stanno le unità usate rivendute da Amazon (Grade & Resell) del "
-             "magazzino FBA qui sopra, condivisa da tutti i marketplace del pool. "
-             "Separata dallo stock FBA del nuovo. Se vuota, la sync giacenze la crea da "
-             "sola ('Usato', accanto allo stock del magazzino FBA). I marketplace con un "
-             "magazzino FBA proprio (es. UK) hanno la loro, sulla scheda del marketplace.",
-    )
-
-    @api.depends()
-    def _compute_amazon_fba_used_location(self):
-        loc_id = int(self.env['ir.config_parameter'].sudo().get_param(_FBA_USED_PARAM, 0) or 0)
-        location = self.env['stock.location'].browse(loc_id).exists() if loc_id else self.env['stock.location']
-        for rec in self:
-            rec.amazon_fba_used_location_id = location
-
-    def _inverse_amazon_fba_used_location(self):
-        params = self.env['ir.config_parameter'].sudo()
-        for rec in self:
-            params.set_param(_FBA_USED_PARAM, rec.amazon_fba_used_location_id.id or 0)
 
     @api.depends()
     def _compute_amazon_warehouses(self):

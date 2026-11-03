@@ -137,7 +137,6 @@ class TestResellOffers(TransactionCase):
         from odoo.addons.ke_amazon_sync.services.sync_engine import SyncEngine
         self.SyncEngine = SyncEngine
         self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', '')
-        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.fba_used_location_id', 0)
         self.warehouse = self.env['stock.warehouse'].create({'name': 'ZZT WH Usato', 'code': 'ZZTUS'})
         self.env.company.amazon_fba_warehouse_id = self.warehouse.id
         self.it = self.env['ke.amazon.marketplace'].create({
@@ -210,8 +209,8 @@ class TestResellOffers(TransactionCase):
             {'sku': REAL_SKU, 'asin': ASIN, 'qty': 9, 'condition': 'NewItem'},
             {'sku': GR_SKU, 'asin': ASIN, 'qty': 2, 'condition': 'UsedVeryGood'},
         ])
-        used = self.env.company.amazon_fba_used_location_id
-        self.assertTrue(used, "creata da sola e salvata sull'azienda (pool)")
+        used = self.warehouse.amazon_fba_used_location_id
+        self.assertTrue(used, 'creata da sola e salvata sul magazzino FBA')
         self.assertEqual(used.location_id, self.warehouse.view_location_id, 'accanto allo stock, come il transito')
         self.assertEqual(self._qty(self.warehouse.lot_stock_id), 9, 'il nuovo non include l\'usato')
         self.assertEqual(self._qty(used), 2)
@@ -233,7 +232,7 @@ class TestResellOffers(TransactionCase):
         self._sync_fba('ZZT_US_IT', items)
         self._sync_fba('ZZT_US_FR', items)
         self._sync_fba('ZZT_US_IT', items)
-        self.assertEqual(self._qty(self.env.company.amazon_fba_used_location_id), 2,
+        self.assertEqual(self._qty(self.warehouse.amazon_fba_used_location_id), 2,
                          'stesse unità viste da IT e FR (pool): contate una volta')
 
     def test_dedicated_marketplace_has_its_own_used_location(self):
@@ -244,8 +243,20 @@ class TestResellOffers(TransactionCase):
         })
         self._sync_fba('ZZT_US_IT', [{'sku': GR_SKU, 'asin': ASIN, 'qty': 2, 'condition': 'UsedLikeNew'}])
         self._sync_fba('ZZT_US_UK', [{'sku': GR_SKU + 'UK', 'asin': ASIN, 'qty': 1, 'condition': 'UsedGood'}])
-        self.assertTrue(uk.fba_used_location_id)
-        self.assertNotEqual(uk.fba_used_location_id, self.env.company.amazon_fba_used_location_id)
-        self.assertEqual(uk.fba_used_location_id.location_id, uk_wh.view_location_id)
-        self.assertEqual(self._qty(uk.fba_used_location_id), 1)
-        self.assertEqual(self._qty(self.env.company.amazon_fba_used_location_id), 2)
+        uk_used = uk_wh.amazon_fba_used_location_id
+        self.assertTrue(uk_used, 'il magazzino UK ha la sua')
+        self.assertNotEqual(uk_used, self.warehouse.amazon_fba_used_location_id)
+        self.assertEqual(uk_used.location_id, uk_wh.view_location_id)
+        self.assertEqual(self._qty(uk_used), 1)
+        self.assertEqual(self._qty(self.warehouse.amazon_fba_used_location_id), 2)
+        self.assertTrue(uk_wh.is_amazon_fba_warehouse)
+        self.assertTrue(self.warehouse.is_amazon_fba_warehouse)
+
+    def test_configured_used_location_is_respected(self):
+        chosen = self.env['stock.location'].create({
+            'name': 'ZZT Usato scelto', 'usage': 'internal', 'location_id': self.warehouse.view_location_id.id,
+        })
+        self.warehouse.amazon_fba_used_location_id = chosen
+        self._sync_fba('ZZT_US_IT', [{'sku': GR_SKU, 'asin': ASIN, 'qty': 3, 'condition': 'UsedGood'}])
+        self.assertEqual(self.warehouse.amazon_fba_used_location_id, chosen, 'nessuna ubicazione nuova')
+        self.assertEqual(self._qty(chosen), 3)

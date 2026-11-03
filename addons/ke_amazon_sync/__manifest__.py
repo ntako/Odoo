@@ -35,6 +35,7 @@
         'views/amazon_marketplace_views.xml',
         'views/res_config_settings_views.xml',
         'views/res_company_views.xml',
+        'views/stock_warehouse_views.xml',
         'views/amazon_sync_log_views.xml',
         'views/product_template_views.xml',
         'views/amazon_resell_offer_views.xml',
