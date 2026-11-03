@@ -438,6 +438,32 @@ def _ean_search_variants(code):
     return variants
 
 
+def _is_grade_and_resell_sku(sku):
+    """
+    True per uno SKU creato da Amazon con il programma Grade & Resell
+    (`amzn.gr.<SKU originale>-<codice>-<LN|VG|…>`): resi rivenduti come usati
+    a nome del venditore, sullo STESSO ASIN/EAN del suo SKU. Non sono un
+    prodotto del venditore: se entrano nell'abbinamento per ASIN/EAN prendono
+    il posto dello SKU vero (SKU legacy, listing del marketplace — una sola
+    per variante+marketplace) e lo SKU vero finisce su un prodotto doppione
+    senza ASIN. Caso reale verificato su Seller Central il 2026-11-03:
+    MGP-KIT42015 attivo in IT con 9 FBA, in Odoo coperto da
+    amzn.gr.MGP-KIT42015-lZ9ONo9Bvr79U2ay-LN. Decisione con l'utente:
+    ignorarli in tutti i flussi di import (vedi TASK.md).
+    """
+    return (sku or '').strip().lower().startswith('amzn.gr.')
+
+
+def _grade_and_resell_log_line(skus, prefix=''):
+    """Una riga di log riassuntiva (non una per SKU) per gli SKU Grade & Resell saltati."""
+    if not skus:
+        return None
+    shown = ', '.join(sorted(skus)[:5])
+    more = f' e altri {len(skus) - 5}' if len(skus) > 5 else ''
+    return (f'{prefix}SALTATI {len(skus)} SKU Grade & Resell (usato rivenduto da Amazon, '
+            f'non un prodotto del venditore): {shown}{more}')
+
+
 class _MatchMaps:
     """
     Raggruppa tutte le mappe di matching SKU/ASIN/EAN usate da full_import/
@@ -501,6 +527,10 @@ class _MatchMaps:
         marketplace, a prescindere da quale sia primario.
         """
         for listing in listings:
+            # Una listing Grade & Resell rimasta da un import precedente
+            # guiderebbe ancora l'abbinamento verso il prodotto sbagliato.
+            if _is_grade_and_resell_sku(listing.sku):
+                continue
             # listing.product_id è la VARIANTE (ke.amazon.listing è scoped
             # per variante, vedi amazon_listing.py) — qui serve il template,
             # come tutti gli altri valori di by_sku/by_asin.
@@ -746,11 +776,16 @@ class SyncEngine:
 
         created = updated = skipped = errors = 0
         lines = []
+        grade_resell_skus = set()
 
         for listing in self.client.iter_seller_skus(max_products=limit):
             product = _parse_listing(listing)
             sku = product['sku']
             asin = product['asin']
+            if _is_grade_and_resell_sku(sku):
+                skipped += 1
+                grade_resell_skus.add(sku)
+                continue
 
             # Arricchisci con dati catalogo (include relationships)
             if asin:
@@ -833,6 +868,9 @@ class SyncEngine:
             if (created + updated) % 50 == 0:
                 self.env.cr.commit()
 
+        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        if gr_line:
+            lines.append(gr_line)
         log_rec.write({
             'state': 'error' if errors and not (created + updated) else 'done',
             'products_total': created + updated + skipped + errors,
@@ -938,7 +976,9 @@ class SyncEngine:
         for r in rows:
             r_sku = (r.get('seller-sku') or '').strip()
             r_asin = (r.get('asin1') or '').strip()
-            if not r_sku or not r_asin:
+            # Uno SKU Grade & Resell letto per primo diventava lo SKU "buono"
+            # dell'ASIN (vince il primo, salvo un '+'): mai candidato.
+            if not r_sku or not r_asin or _is_grade_and_resell_sku(r_sku):
                 continue
             current = best_sku_by_asin.get(r_asin)
             if current is None or (r_sku.endswith('+') and not current.endswith('+')):
@@ -1012,11 +1052,16 @@ class SyncEngine:
         created = updated = skipped = errors = 0
         lines = []
 
+        grade_resell_skus = set()
         for row in chunk:
             product = self._parse_listing_report(row)
             sku = product['sku']
             asin = product['asin']
             if not sku:
+                continue
+            if _is_grade_and_resell_sku(sku):
+                skipped += 1
+                grade_resell_skus.add(sku)
                 continue
 
             if asin and asin in catalog_by_asin:
@@ -1127,6 +1172,9 @@ class SyncEngine:
                 _log.error(msg, exc_info=True)
                 lines.append(msg)
 
+        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        if gr_line:
+            lines.append(gr_line)
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
             'products_total': log_rec.products_total + len(chunk),
@@ -1172,11 +1220,16 @@ class SyncEngine:
 
         created = updated = skipped = errors = 0
         lines = []
+        grade_resell_skus = set()
 
         for listing in items:
             product = _parse_listing(listing)
             sku = product['sku']
             asin = product['asin']
+            if _is_grade_and_resell_sku(sku):
+                skipped += 1
+                grade_resell_skus.add(sku)
+                continue
 
             if asin:
                 catalog = self.client.get_catalog_item(asin)
@@ -1254,6 +1307,9 @@ class SyncEngine:
             lines.append(msg)
             _log.info(msg)
 
+        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        if gr_line:
+            lines.append(gr_line)
         new_total = log_rec.products_total + len(items)
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         update_vals = {
@@ -3521,6 +3577,11 @@ class SyncEngine:
         mp_tag = f'[{marketplace.code}] ' if marketplace else ''
 
         items, new_page_token = self.client.fetch_inventory_page(page_token)
+        # Le unità Grade & Resell sono usate: non vanno sommate alla giacenza
+        # del prodotto nuovo con lo stesso ASIN, né scriverne la condizione.
+        grade_resell = {i.get('sku') for i in items if _is_grade_and_resell_sku(i.get('sku'))}
+        self._grade_resell_skipped = getattr(self, '_grade_resell_skipped', set()) | grade_resell
+        items = [i for i in items if not _is_grade_and_resell_sku(i.get('sku'))]
         # Condizione per SKU, pagina per pagina: indipendente dalle quantità
         # (che si aggregano per ASIN e si scrivono solo sull'ultima pagina).
         self._store_item_conditions(items, marketplace)
@@ -3544,6 +3605,10 @@ class SyncEngine:
         updated = errors = skipped = 0
         lines = [f'{mp_tag}Inventario scaricato: {len(asin_totals)} ASIN distinti.']
         lines.extend(self._condition_log_lines(mp_tag))
+        gr_line = _grade_and_resell_log_line(getattr(self, '_grade_resell_skipped', set()), mp_tag)
+        if gr_line:
+            lines.append(gr_line)
+        self._grade_resell_skipped = set()
 
         for asin, fba_qty in asin_totals.items():
             product_tmpl = self.env['product.template'].search(
@@ -4283,12 +4348,19 @@ class SyncEngine:
         # Tutti gli SKU del report: serve a _find_fnsku_variant per non
         # applicare il fallback con/senza '+' quando lo SKU alternativo ha
         # una propria riga (storica e nuova sullo stesso prodotto).
-        report_skus = {(row.get('sku') or '').strip() for row in rows} - {''}
+        report_skus = {
+            (row.get('sku') or '').strip() for row in rows
+            if not _is_grade_and_resell_sku(row.get('sku'))
+        } - {''}
 
+        grade_resell_skus = set()
         for row in rows:
             sku = (row.get('sku') or '').strip()
             fnsku = (row.get('fnsku') or '').strip()
             if not sku or not fnsku:
+                continue
+            if _is_grade_and_resell_sku(sku):
+                grade_resell_skus.add(sku)
                 continue
 
             try:
@@ -4362,6 +4434,9 @@ class SyncEngine:
                 lines.append(f'{mp_tag}ERRORE {sku}: {exc}')
                 _log.error('Errore elaborazione FNSKU %s: %s', sku, exc, exc_info=True)
 
+        gr_line = _grade_and_resell_log_line(grade_resell_skus, mp_tag)
+        if gr_line:
+            lines.append(gr_line)
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
             'products_total': log_rec.products_total + len(rows),
@@ -4448,10 +4523,14 @@ class SyncEngine:
         """
         amazon_by_sku = {}
         amazon_by_asin = {}
+        grade_resell_skus = set()
         for row in rows:
             parsed = self._parse_listing_report(row)
             sku = parsed['sku']
             asin = parsed['asin']
+            if _is_grade_and_resell_sku(sku):
+                grade_resell_skus.add(sku)
+                continue
             if sku:
                 amazon_by_sku[sku] = parsed
             if asin:
@@ -4467,7 +4546,9 @@ class SyncEngine:
         total_amazon = len(amazon_by_sku)
         _log.info('Riconciliazione da report: %d listing su Amazon', total_amazon)
         existing = (log_rec.log_lines or '').rstrip('\n')
-        log_rec.write({'log_lines': existing + f'\nStore Amazon: {total_amazon} listing trovati (da report).'})
+        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        log_rec.write({'log_lines': existing + f'\nStore Amazon: {total_amazon} listing trovati (da report).'
+                       + (f'\n{gr_line}' if gr_line else '')})
         self.env.cr.commit()
         return self._do_reconcile(log_rec, amazon_by_sku, amazon_by_asin)
 
