@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Offerte usato Amazon (Grade & Resell): alimentate da Full Import e
+         sync giacenze FBA, in sola lettura (2026-11-03). -->
+    <record id="view_amazon_resell_offer_list" model="ir.ui.view">
+        <field name="name">ke.amazon.resell.offer.list</field>
+        <field name="model">ke.amazon.resell.offer</field>
+        <field name="arch" type="xml">
+            <list string="Offerte usato Amazon" create="0" edit="0"
+                  decoration-muted="qty == 0" decoration-warning="not product_id">
+                <field name="product_id"/>
+                <field name="marketplace_id"/>
+                <field name="sku"/>
+                <field name="asin" optional="hide"/>
+                <field name="condition"/>
+                <field name="status" widget="badge" decoration-success="status == 'active'"/>
+                <field name="fulfillment" optional="hide"/>
+                <field name="price"/>
+                <field name="currency_id" column_invisible="1"/>
+                <field name="qty" sum="Totale"/>
+                <field name="last_sync" optional="show"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_resell_offer_form" model="ir.ui.view">
+        <field name="name">ke.amazon.resell.offer.form</field>
+        <field name="model">ke.amazon.resell.offer</field>
+        <field name="arch" type="xml">
+            <form string="Offerta usato Amazon" create="0">
+                <sheet>
+                    <div class="alert alert-warning" role="alert" invisible="product_id">
+                        Prodotto originale non trovato in Odoo: le unità di questa offerta
+                        non entrano in nessuna giacenza. Viene ricercato di nuovo a ogni sync.
+                    </div>
+                    <group>
+                        <group>
+                            <field name="sku"/>
+                            <field name="marketplace_id" readonly="1"/>
+                            <field name="product_id" readonly="1"/>
+                            <field name="asin"/>
+                        </group>
+                        <group>
+                            <field name="condition"/>
+                            <field name="status"/>
+                            <field name="fulfillment"/>
+                            <field name="price"/>
+                            <field name="currency_id" invisible="1"/>
+                            <field name="qty"/>
+                            <field name="last_sync"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_amazon_resell_offer_search" model="ir.ui.view">
+        <field name="name">ke.amazon.resell.offer.search</field>
+        <field name="model">ke.amazon.resell.offer</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="sku"/>
+                <field name="product_id"/>
+                <field name="asin"/>
+                <filter name="with_qty" string="Con unità" domain="[('qty', '>', 0)]"/>
+                <filter name="unlinked" string="Senza prodotto originale" domain="[('product_id', '=', False)]"/>
+                <group>
+                    <filter name="groupby_marketplace" string="Marketplace" context="{'group_by': 'marketplace_id'}"/>
+                    <filter name="groupby_product" string="Prodotto" context="{'group_by': 'product_tmpl_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_amazon_resell_offer" model="ir.actions.act_window">
+        <field name="name">Offerte usato Amazon</field>
+        <field name="res_model">ke.amazon.resell.offer</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_amazon_resell_offer_search"/>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Nessuna offerta usato</p>
+            <p>Le offerte "Grade &amp; Resell" (resi rivenduti da Amazon come usati, SKU
+               amzn.gr.…) compaiono qui dopo un Full Import o una sync giacenze FBA.</p>
+        </field>
+    </record>
+
+    <!-- Scheda prodotto: offerte usato sotto le inserzioni per marketplace. -->
+    <record id="view_product_template_form_amazon_resell" model="ir.ui.view">
+        <field name="name">product.template.form.amazon.resell</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="ke_amazon_sync.view_product_template_amazon_tab"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='x_amazon_listing_ids']" position="after">
+                <separator string="Usato Amazon (Grade &amp; Resell)" invisible="not x_amazon_resell_offer_ids"/>
+                <group invisible="not x_amazon_resell_offer_ids">
+                    <field name="x_amazon_stock_fba_used"/>
+                </group>
+                <field name="x_amazon_resell_offer_ids" nolabel="1" readonly="1"
+                       invisible="not x_amazon_resell_offer_ids">
+                    <list create="0" delete="0" edit="0">
+                        <field name="product_id" string="Variante"/>
+                        <field name="marketplace_id"/>
+                        <field name="sku"/>
+                        <field name="condition"/>
+                        <field name="status" widget="badge" decoration-success="status == 'active'"/>
+                        <field name="price"/>
+                        <field name="qty"/>
+                        <field name="last_sync"/>
+                    </list>
+                </field>
+            </xpath>
+        </field>
+    </record>
+</odoo>

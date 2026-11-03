@@ -51,6 +51,9 @@ class ProductProduct(models.Model):
     x_amazon_listing_ids = fields.One2many(
         'ke.amazon.listing', 'product_id', string='Inserzioni per marketplace',
     )
+    x_amazon_resell_offer_ids = fields.One2many(
+        'ke.amazon.resell.offer', 'product_id', string='Offerte usato Amazon',
+    )
 
     def _get_amazon_fnsku(self):
         """

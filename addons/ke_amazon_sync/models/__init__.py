@@ -13,3 +13,4 @@ from . import amazon_print_job
 from . import res_config_settings
 from . import sale_order
 from . import amazon_inbound_plan
+from . import amazon_resell_offer

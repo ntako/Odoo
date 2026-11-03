@@ -196,6 +196,12 @@
               action="action_amazon_listing"
               sequence="41"/>
 
+    <menuitem id="menu_amazon_resell_offer"
+              name="Offerte usato (Grade &amp; Resell)"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_resell_offer"
+              sequence="42"/>
+
     <menuitem id="menu_amazon_fba_label_log"
               name="Etichette FBA stampate"
               parent="menu_amazon_sync_root"

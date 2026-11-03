@@ -11,6 +11,7 @@
                 <field name="x_amazon_asin" string="ASIN"/>
                 <field name="x_amazon_sales_30d" string="Vendite (30gg)" sum="Totale"/>
                 <field name="x_amazon_stock_fba" string="Giacenza FBA" sum="Totale"/>
+                <field name="x_amazon_stock_fba_used" string="FBA usato" sum="Totale" optional="show"/>
                 <field name="x_amazon_stock_fbm" string="Giacenza FBM" sum="Totale"/>
                 <field name="x_amazon_stock_generale" string="Giacenza Generale" sum="Totale"/>
                 <field name="x_amazon_qty" string="Quantità dichiarata su Amazon" sum="Totale"

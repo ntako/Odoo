@@ -158,6 +158,18 @@ class ProductTemplate(models.Model):
         for template in self:
             template.x_amazon_listing_ids = template.product_variant_ids.x_amazon_listing_ids
 
+    # Offerte usato (Grade & Resell) delle varianti, in sola lettura sulla
+    # scheda prodotto — stessa logica di x_amazon_listing_ids.
+    x_amazon_resell_offer_ids = fields.Many2many(
+        'ke.amazon.resell.offer', string='Offerte usato Amazon',
+        compute='_compute_x_amazon_resell_offer_ids',
+    )
+
+    @api.depends('product_variant_ids.x_amazon_resell_offer_ids')
+    def _compute_x_amazon_resell_offer_ids(self):
+        for template in self:
+            template.x_amazon_resell_offer_ids = template.product_variant_ids.x_amazon_resell_offer_ids
+
     # --- Stato su Amazon ---
     x_amazon_status = fields.Selection([
         ('active', 'Attivo'),
@@ -248,6 +260,13 @@ class ProductTemplate(models.Model):
         help='Giacenza in Odoo nel magazzino FBA configurato. '
              'Snapshot aggiornato periodicamente, non in tempo reale.',
     )
+    x_amazon_stock_fba_used = fields.Float(
+        'Giacenza FBA usato',
+        compute='_compute_x_amazon_stock_by_warehouse', store=True,
+        help="Unità usate rivendute da Amazon (Grade & Resell) nelle ubicazioni "
+             "'FBA – Usato'. Escluse da 'Giacenza magazzino FBA'. Snapshot aggiornato "
+             'periodicamente, non in tempo reale.',
+    )
     x_amazon_stock_fbm = fields.Float(
         'Giacenza magazzino FBM',
         compute='_compute_x_amazon_stock_by_warehouse', store=True,
@@ -263,8 +282,23 @@ class ProductTemplate(models.Model):
         fbm_id = int(params.get_param('ke_amazon_sync.fbm_warehouse_id', 0) or 0)
         warehouse_ids = [i for i in (default_id, fba_id, fbm_id) if i]
 
+        # Ubicazioni "FBA – Usato" (pool sull'azienda + marketplace dedicati):
+        # stanno dentro il magazzino FBA ma l'usato non è giacenza del nuovo.
+        used_location_ids = set(self.env['ke.amazon.marketplace'].sudo().with_context(
+            active_test=False,
+        ).search([('fba_used_location_id', '!=', False)]).fba_used_location_id.ids)
+        pool_used_id = int(params.get_param('ke_amazon_sync.fba_used_location_id', 0) or 0)
+        if pool_used_id:
+            used_location_ids.add(pool_used_id)
+
         variant_ids = self.mapped('product_variant_ids').ids
         qty_by_wh_variant = {}  # {(warehouse_id, variant_id): qty}
+        used_by_variant = {}
+        if variant_ids and used_location_ids:
+            for q in self.env['stock.quant'].search([
+                ('product_id', 'in', variant_ids), ('location_id', 'in', list(used_location_ids)),
+            ]):
+                used_by_variant[q.product_id.id] = used_by_variant.get(q.product_id.id, 0.0) + q.quantity
         if variant_ids and warehouse_ids:
             Quant = self.env['stock.quant']
             warehouses = self.env['stock.warehouse'].browse(warehouse_ids)
@@ -275,6 +309,8 @@ class ProductTemplate(models.Model):
                     ('location_id.usage', '=', 'internal'),
                 ])
                 for q in quants:
+                    if q.location_id.id in used_location_ids:
+                        continue
                     key = (wh.id, q.product_id.id)
                     qty_by_wh_variant[key] = qty_by_wh_variant.get(key, 0.0) + q.quantity
 
@@ -289,6 +325,7 @@ class ProductTemplate(models.Model):
             product.x_amazon_stock_generale = _sum_for(default_id)
             product.x_amazon_stock_fba = _sum_for(fba_id)
             product.x_amazon_stock_fbm = _sum_for(fbm_id)
+            product.x_amazon_stock_fba_used = sum(used_by_variant.get(vid, 0.0) for vid in variants)
 
     # store=True per essere ordinabile/filtrabile in lista. Nessuna dipendenza
     # reale possibile: la finestra "ultimi 30 giorni" scorre col passare del

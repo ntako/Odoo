@@ -19,7 +19,6 @@ Funzione 3 – sync_prices_and_quantities:
 import base64
 import logging
 import re
-import re
 from datetime import datetime, timezone
 
 import requests
@@ -454,14 +453,19 @@ def _is_grade_and_resell_sku(sku):
     return (sku or '').strip().lower().startswith('amzn.gr.')
 
 
-def _grade_and_resell_log_line(skus, prefix=''):
-    """Una riga di log riassuntiva (non una per SKU) per gli SKU Grade & Resell saltati."""
+def _grade_and_resell_log_line(skus, prefix='', tracked=False):
+    """
+    Una riga di log riassuntiva (non una per SKU) per gli SKU Grade & Resell
+    non trattati come prodotti. 'tracked': registrati come offerte usato
+    (ke.amazon.resell.offer) invece che solo saltati.
+    """
     if not skus:
         return None
     shown = ', '.join(sorted(skus)[:5])
     more = f' e altri {len(skus) - 5}' if len(skus) > 5 else ''
-    return (f'{prefix}SALTATI {len(skus)} SKU Grade & Resell (usato rivenduto da Amazon, '
-            f'non un prodotto del venditore): {shown}{more}')
+    what = 'registrati come offerte usato' if tracked else 'saltati'
+    return (f'{prefix}{len(skus)} SKU Grade & Resell (usato rivenduto da Amazon) {what}, '
+            f'non come prodotti: {shown}{more}')
 
 
 class _MatchMaps:
@@ -785,6 +789,9 @@ class SyncEngine:
             if _is_grade_and_resell_sku(sku):
                 skipped += 1
                 grade_resell_skus.add(sku)
+                resell_marketplace = self._current_marketplace()
+                if resell_marketplace:
+                    self._upsert_resell_offer(resell_marketplace, sku, self._resell_vals_from_listing(product))
                 continue
 
             # Arricchisci con dati catalogo (include relationships)
@@ -868,7 +875,7 @@ class SyncEngine:
             if (created + updated) % 50 == 0:
                 self.env.cr.commit()
 
-        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        gr_line = _grade_and_resell_log_line(grade_resell_skus, tracked=True)
         if gr_line:
             lines.append(gr_line)
         log_rec.write({
@@ -1053,6 +1060,7 @@ class SyncEngine:
         lines = []
 
         grade_resell_skus = set()
+        resell_marketplace = self._current_marketplace()
         for row in chunk:
             product = self._parse_listing_report(row)
             sku = product['sku']
@@ -1062,6 +1070,8 @@ class SyncEngine:
             if _is_grade_and_resell_sku(sku):
                 skipped += 1
                 grade_resell_skus.add(sku)
+                if resell_marketplace:
+                    self._upsert_resell_offer(resell_marketplace, sku, self._resell_vals_from_listing(product))
                 continue
 
             if asin and asin in catalog_by_asin:
@@ -1172,7 +1182,7 @@ class SyncEngine:
                 _log.error(msg, exc_info=True)
                 lines.append(msg)
 
-        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        gr_line = _grade_and_resell_log_line(grade_resell_skus, tracked=True)
         if gr_line:
             lines.append(gr_line)
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
@@ -1229,6 +1239,9 @@ class SyncEngine:
             if _is_grade_and_resell_sku(sku):
                 skipped += 1
                 grade_resell_skus.add(sku)
+                resell_marketplace = self._current_marketplace()
+                if resell_marketplace:
+                    self._upsert_resell_offer(resell_marketplace, sku, self._resell_vals_from_listing(product))
                 continue
 
             if asin:
@@ -1307,7 +1320,7 @@ class SyncEngine:
             lines.append(msg)
             _log.info(msg)
 
-        gr_line = _grade_and_resell_log_line(grade_resell_skus)
+        gr_line = _grade_and_resell_log_line(grade_resell_skus, tracked=True)
         if gr_line:
             lines.append(gr_line)
         new_total = log_rec.products_total + len(items)
@@ -3579,8 +3592,15 @@ class SyncEngine:
         items, new_page_token = self.client.fetch_inventory_page(page_token)
         # Le unità Grade & Resell sono usate: non vanno sommate alla giacenza
         # del prodotto nuovo con lo stesso ASIN, né scriverne la condizione.
-        grade_resell = {i.get('sku') for i in items if _is_grade_and_resell_sku(i.get('sku'))}
-        self._grade_resell_skipped = getattr(self, '_grade_resell_skipped', set()) | grade_resell
+        # Le unità Grade & Resell vanno nella giacenza "FBA – Usato" del
+        # prodotto originale (_sync_resell_inventory, sull'ultima pagina),
+        # mai in quella del nuovo. Accumulo azzerato sulla prima pagina: un
+        # riavvio da capo per token scaduto riparte da page_token=None.
+        if not page_token:
+            self._resell_inventory = {}
+        for item in items:
+            if _is_grade_and_resell_sku(item.get('sku')):
+                self._resell_inventory[item['sku'].strip()] = item
         items = [i for i in items if not _is_grade_and_resell_sku(i.get('sku'))]
         # Condizione per SKU, pagina per pagina: indipendente dalle quantità
         # (che si aggregano per ASIN e si scrivono solo sull'ultima pagina).
@@ -3605,10 +3625,7 @@ class SyncEngine:
         updated = errors = skipped = 0
         lines = [f'{mp_tag}Inventario scaricato: {len(asin_totals)} ASIN distinti.']
         lines.extend(self._condition_log_lines(mp_tag))
-        gr_line = _grade_and_resell_log_line(getattr(self, '_grade_resell_skipped', set()), mp_tag)
-        if gr_line:
-            lines.append(gr_line)
-        self._grade_resell_skipped = set()
+        lines.extend(self._sync_resell_inventory(marketplace, mp_tag))
 
         for asin, fba_qty in asin_totals.items():
             product_tmpl = self.env['product.template'].search(
@@ -4140,6 +4157,183 @@ class SyncEngine:
         self._conditions_updated = 0
         self._conditions_unknown = set()
         return lines
+
+    # ------------------------------------------------------------------
+    # Usato Amazon (Grade & Resell) — offerte collegate al prodotto
+    # originale e giacenza nell'ubicazione "FBA – Usato" (2026-11-03)
+    # ------------------------------------------------------------------
+
+    # Suffisso condizione degli SKU Grade & Resell (amzn.gr.…-LN). LN, VG e
+    # GD osservati sui dati reali (2026-11-03), AC è la stessa convenzione
+    # presunta: è solo un ripiego, la fonte affidabile resta
+    # InventorySummary.condition della sync giacenze.
+    _RESELL_SUFFIX_CONDITION = {
+        'LN': 'used_like_new', 'VG': 'used_very_good', 'GD': 'used_good', 'AC': 'used_acceptable',
+    }
+
+    @staticmethod
+    def _resell_vals_from_listing(product):
+        """Valori dell'offerta usato da una riga listing già interpretata (report o Listings API)."""
+        raw = (product.get('status') or '').strip().upper()
+        return {
+            'asin': product.get('asin') or None,
+            'status': 'active' if raw in ('BUYABLE', 'ACTIVE') else (raw.lower() or None),
+            'price': product.get('price') or None,
+            'fulfillment': product.get('fulfillment') or None,
+        }
+
+    def _resell_original_variant(self, sku, asin):
+        """
+        Prodotto originale di uno SKU Grade & Resell. Prima l'ASIN (è lo
+        stesso del prodotto): da una listing di uno SKU vero, poi dai campi
+        del prodotto. Poi lo SKU originale contenuto nello SKU di Amazon: è
+        troncato a 40 caratteri e seguito da una parte casuale di lunghezza
+        variabile, che può contenere '-' e '_' (es.
+        'amzn.gr.C4C-0MAC4PCOBK_-2-z2FzG0vyUks-LN' → 'C4C-0MAC4PCOBK'), quindi
+        si provano i tagli possibili dal più lungo, finché uno corrisponde a
+        un prodotto. Mai un prodotto che abbia esso stesso uno SKU Grade &
+        Resell (residuo di un import precedente alla correzione).
+        """
+        Product = self.env['product.product']
+
+        def usable(variant):
+            return variant and not _is_grade_and_resell_sku(variant.x_amazon_sku or variant.default_code)
+
+        if asin:
+            listings = self.env['ke.amazon.listing'].sudo().search([('asin', '=', asin)]).filtered(
+                lambda l: l.product_id and not _is_grade_and_resell_sku(l.sku)
+            )
+            if listings and usable(listings[0].product_id):
+                return listings[0].product_id
+            variant = self._find_amazon_product_variant('', asin)
+            if usable(variant):
+                return variant
+        body = (sku or '').strip()[len('amzn.gr.'):]
+        body = re.sub(r'-[A-Za-z]{1,3}$', '', body)
+        cuts = sorted({body[:i] for i, ch in enumerate(body) if ch in '-_' and i > 0}, key=len, reverse=True)
+        for candidate in cuts:
+            variant = self._find_amazon_product_variant(candidate, '')
+            if usable(variant):
+                return variant
+        return Product.browse()
+
+    def _upsert_resell_offer(self, marketplace, sku, vals):
+        """Crea/aggiorna l'offerta usato (sku+marketplace) e la collega al prodotto originale."""
+        Offer = self.env['ke.amazon.resell.offer'].sudo()
+        sku = sku.strip()
+        offer = Offer.search([('sku', '=', sku), ('marketplace_id', '=', marketplace.id)], limit=1)
+        vals = {key: value for key, value in vals.items() if value is not None}
+        if 'condition' not in vals and not offer.condition:
+            suffix = sku.rsplit('-', 1)[-1].upper()
+            if suffix in self._RESELL_SUFFIX_CONDITION:
+                vals['condition'] = self._RESELL_SUFFIX_CONDITION[suffix]
+        if not offer.product_id:
+            variant = self._resell_original_variant(sku, vals.get('asin') or offer.asin)
+            if variant:
+                vals['product_id'] = variant.id
+        if offer:
+            offer.write(vals)
+            return offer
+        return Offer.create({'sku': sku, 'marketplace_id': marketplace.id, **vals})
+
+    def _get_fba_used_location(self, marketplace=None):
+        """
+        Ubicazione "FBA – Usato" del magazzino FBA del marketplace: una per
+        magazzino, con la stessa regola del nuovo — il pool (marketplace senza
+        magazzino proprio, o con quello aziendale) usa quella configurata
+        sull'azienda, un marketplace con magazzino dedicato la sua. Se manca,
+        la crea accanto allo stock del magazzino (stesso livello del transito),
+        così non entra nella giacenza del nuovo, scritta sull'ubicazione
+        esatta dello stock (_set_product_stock).
+        """
+        company = self.env.company
+        warehouse = marketplace.get_fba_warehouse() if marketplace else company.amazon_fba_warehouse_id
+        if not warehouse:
+            return None
+        dedicated = bool(
+            marketplace and marketplace.fba_warehouse_id
+            and marketplace.fba_warehouse_id != company.amazon_fba_warehouse_id
+        )
+        location = marketplace.fba_used_location_id if dedicated else company.amazon_fba_used_location_id
+        if location:
+            return location
+        location = self.env['stock.location'].sudo().create({
+            'name': 'Usato', 'usage': 'internal', 'location_id': warehouse.view_location_id.id,
+        })
+        if dedicated:
+            marketplace.sudo().fba_used_location_id = location
+        else:
+            company.sudo().amazon_fba_used_location_id = location
+        return location
+
+    def _sync_resell_inventory(self, marketplace, mp_tag=''):
+        """
+        Ultima pagina della sync giacenze: aggiorna quantità/condizione delle
+        offerte usato del marketplace con l'inventario appena letto, azzera
+        quelle non più presenti, poi ricalcola la giacenza "FBA – Usato".
+        """
+        items = getattr(self, '_resell_inventory', {}) or {}
+        self._resell_inventory = {}
+        if not marketplace:
+            return []
+        Offer = self.env['ke.amazon.resell.offer'].sudo()
+        now = datetime.now()
+        seen = Offer.browse()
+        for sku, item in items.items():
+            key = (item.get('condition') or '').lower().replace(' ', '').replace('_', '').replace('-', '')
+            condition = self._CONDITION_MAP.get(key)
+            vals = {'asin': item.get('asin') or None, 'qty': int(item.get('qty') or 0), 'last_sync': now}
+            if condition and condition != 'new_new':
+                vals['condition'] = condition
+            seen |= self._upsert_resell_offer(marketplace, sku, vals)
+        Offer.search([
+            ('marketplace_id', '=', marketplace.id), ('id', 'not in', seen.ids), ('qty', '!=', 0),
+        ]).write({'qty': 0, 'last_sync': now})
+        location = self._get_fba_used_location(marketplace)
+        if not location:
+            return [f'{mp_tag}Usato Amazon: nessun magazzino FBA configurato, giacenza usato non aggiornata.']
+        units, unlinked = self._recompute_resell_stock(marketplace, location)
+        line = (f'{mp_tag}Usato Amazon: {len(items)} offerte nell\'inventario, {units} unità '
+                f'in "{location.display_name}"')
+        if unlinked:
+            line += f'; {unlinked} offerte con unità ma senza prodotto originale in Odoo (non in giacenza)'
+        return [line]
+
+    def _recompute_resell_stock(self, marketplace, location):
+        """
+        Giacenza "FBA – Usato" = somma delle quantità delle offerte usato di
+        TUTTI i marketplace che condividono quel magazzino, in valore
+        assoluto: lo stesso SKU visto da più marketplace del pool conta una
+        volta sola (massimo), così ripetere la sync da IT, ES e FR dà sempre
+        lo stesso risultato. Un prodotto senza più offerte con unità torna a 0.
+        Ritorna (unità totali, offerte con unità ma senza prodotto originale).
+        """
+        warehouse = marketplace.get_fba_warehouse()
+        pool = self.env['ke.amazon.marketplace'].sudo().search([('active', '=', True)]).filtered(
+            lambda m: m.get_fba_warehouse() == warehouse
+        ) | marketplace
+        offers = self.env['ke.amazon.resell.offer'].sudo().search([('marketplace_id', 'in', pool.ids)])
+        qty_by_sku, product_by_sku = {}, {}
+        for offer in offers:
+            qty_by_sku[offer.sku] = max(qty_by_sku.get(offer.sku, 0), offer.qty)
+            if offer.product_id:
+                product_by_sku[offer.sku] = offer.product_id
+        totals = {}
+        unlinked = 0
+        for sku, qty in qty_by_sku.items():
+            product = product_by_sku.get(sku)
+            if product:
+                totals[product] = totals.get(product, 0) + qty
+            elif qty:
+                unlinked += 1
+        for product, qty in totals.items():
+            self._set_product_stock(product, location, qty)
+        for quant in self.env['stock.quant'].sudo().search([
+            ('location_id', '=', location.id), ('quantity', '!=', 0),
+        ]):
+            if quant.product_id not in totals:
+                self._set_product_stock(quant.product_id, location, 0)
+        return sum(totals.values()), unlinked
 
     def _find_fnsku_variant(self, sku, report_skus):
         """
