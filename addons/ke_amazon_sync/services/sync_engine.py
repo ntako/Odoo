@@ -109,6 +109,53 @@ def _gallery_images(catalog):
     ]
 
 
+# Separatori in coda al nome comune di una famiglia (es. "Carrete Test 1000, gris"
+# e "Carrete Test 2000, rojo" → "Carrete Test").
+_NAME_TRAILING = ' ,;:-–—|/(['
+_NAME_SEGMENT_SPLIT = re.compile(r'\s*(?:,|\s[-–—|]\s|\()\s*')
+
+
+def _family_common_name(titles, variant_values=()):
+    """
+    Nome di una famiglia dai titoli delle sue varianti in UNA lingua: la parte
+    iniziale comune, a parole intere, senza separatori in coda. Con un solo
+    titolo (o parte comune troppo corta: < 2 parole o < 12 caratteri) si
+    parte dal primo titolo e si tolgono in coda il suffisso tra parentesi e i
+    segmenti (separati da virgola, " - ", "(") che contengono i valori di
+    variante noti (colore, taglia…). Stesso metodo per tutte le lingue.
+    """
+    titles = [t.strip() for t in titles if t and t.strip()]
+    if not titles:
+        return ''
+    if len(titles) > 1:
+        words = [t.split() for t in titles]
+        common = []
+        for group in zip(*words):
+            if all(w.casefold() == group[0].casefold() for w in group):
+                common.append(group[0])
+            else:
+                break
+        name = ' '.join(common).rstrip(_NAME_TRAILING).strip()
+        if len(name.split()) >= 2 and len(name) >= 12:
+            return name
+    name = _strip_variant_suffix(titles[0])
+    values = [v.casefold().strip() for v in variant_values if v and len(v.strip()) >= 2]
+    if values:
+        bounds, last = [], 0
+        for m in _NAME_SEGMENT_SPLIT.finditer(name):
+            bounds.append((last, m.start()))
+            last = m.end()
+        bounds.append((last, len(name)))
+        while len(bounds) > 1:
+            seg = name[bounds[-1][0]:bounds[-1][1]].strip().casefold()
+            if seg and any(v in seg or (len(seg) >= 2 and seg in v) for v in values):
+                bounds.pop()
+            else:
+                break
+        name = name[:bounds[-1][1]]
+    return name.rstrip(_NAME_TRAILING).strip() or titles[0]
+
+
 def _fetch_image_b64(url):
     """Downloads an image URL and returns base64-encoded bytes, or None on failure."""
     if not url:
@@ -887,7 +934,11 @@ class SyncEngine:
             'qty': data.get('qty_available') or 0,
             'category': data.get('category', ''),
             'browse_node_id': data.get('browse_node_id', ''),
+            'parent_asin': data.get('parent_asin') or False,
         }
+        # Titolo: solo se presente (le righe senza titolo non cancellano quello noto).
+        if data.get('name'):
+            vals['item_name'] = data['name']
         if invalidate_fnsku:
             vals['fnsku'] = False
         listing = Listing.search([
@@ -2068,6 +2119,76 @@ class SyncEngine:
             name=_strip_variant_suffix(name) or name or None,
             description_sale=self._format_description(product) or None,
         )
+
+    @staticmethod
+    def _is_import_family_name(current, titles):
+        """
+        True se il nome attuale della famiglia è uno scritto dall'import (uguale
+        o l'inizio di uno dei titoli Amazon, anche senza il suffisso tra
+        parentesi) e non un nome scelto a mano: solo quelli vengono ricalcolati.
+        """
+        cur = (current or '').strip().casefold()
+        if not cur:
+            return True
+        for title in titles:
+            t = (title or '').strip().casefold()
+            if t.startswith(cur) or cur == (_strip_variant_suffix(title) or '').strip().casefold():
+                return True
+        return False
+
+    def recompute_family_names(self, templates=None):
+        """
+        Nome delle famiglie in ogni lingua dei marketplace attivi: la parte
+        comune ai titoli Amazon delle varianti su quel marketplace
+        (ke.amazon.listing.item_name, vedi _family_common_name). Stesso metodo
+        per tutte le lingue, italiano compreso — prima il nome era il titolo
+        della prima variante senza il suffisso tra parentesi, e su ES/FR/UK
+        (attributi in coda dopo la virgola) restava la variante nel nome della
+        famiglia (es. "…, gris oscuro, XL"). Sostituisce solo un nome vuoto o
+        scritto dall'import (_is_import_family_name), mai uno scelto a mano.
+        Nessuna chiamata Amazon. Ritorna il numero di nomi aggiornati.
+        """
+        Tmpl = self.env['product.template'].with_context(active_test=False)
+        if templates is None:
+            templates = Tmpl.search([('x_amazon_parent_asin', '!=', False)])
+        if not templates:
+            return 0
+        marketplaces = self.env['ke.amazon.marketplace'].search([
+            ('active', '=', True), ('lang_id', '!=', False), ('lang_id.active', '=', True),
+        ], order='sequence, id')
+        lang_by_marketplace = {}
+        for marketplace in marketplaces:
+            if marketplace.lang_id.code not in lang_by_marketplace.values():
+                lang_by_marketplace[marketplace.id] = marketplace.lang_id.code
+        if not lang_by_marketplace:
+            return 0
+        self.env.flush_all()
+        self.env.cr.execute(
+            """SELECT p.product_tmpl_id, l.marketplace_id, l.item_name
+                 FROM ke_amazon_listing l JOIN product_product p ON p.id = l.product_id
+                WHERE p.product_tmpl_id = ANY(%s) AND l.marketplace_id = ANY(%s)
+                  AND l.item_name IS NOT NULL AND l.item_name <> ''
+                ORDER BY p.id""",
+            (list(templates.ids), list(lang_by_marketplace)),
+        )
+        titles = {}
+        for tmpl_id, marketplace_id, title in self.env.cr.fetchall():
+            titles.setdefault((tmpl_id, lang_by_marketplace[marketplace_id]), []).append(title)
+        self.env.cr.execute('SELECT id, name FROM product_template WHERE id = ANY(%s)', (list(templates.ids),))
+        current_names = {tid: (name or {}) for tid, name in self.env.cr.fetchall()}
+        updated = 0
+        for (tmpl_id, lang), tmpl_titles in titles.items():
+            tmpl = Tmpl.browse(tmpl_id)
+            values = tmpl.product_variant_ids.product_template_attribute_value_ids.mapped('name')
+            new_name = _family_common_name(tmpl_titles, values)
+            current = current_names.get(tmpl_id, {}).get(lang) or ''
+            if not new_name or new_name == current:
+                continue
+            if not self._is_import_family_name(current, tmpl_titles):
+                continue
+            tmpl.with_context(lang=lang).write({'name': new_name})
+            updated += 1
+        return updated
 
     def _create_product(self, data, product_type_odoo):
         categ = _get_or_create_category(self.env, data.get('category', ''))

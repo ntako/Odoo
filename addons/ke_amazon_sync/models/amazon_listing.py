@@ -24,6 +24,18 @@ class AmazonListing(models.Model):
 
     sku = fields.Char('SKU', index=True)
     asin = fields.Char('ASIN', index=True)
+    item_name = fields.Char(
+        'Titolo Amazon', help="Titolo dell'annuncio su questo marketplace, nella sua lingua "
+                             "(dal report listing del Full Import). Usato per il nome delle "
+                             "famiglie (parte comune ai titoli delle varianti).",
+    )
+    parent_asin = fields.Char(
+        'Parent ASIN (marketplace)', index=True,
+        help='Famiglia a cui Amazon assegna la variante su QUESTO marketplace (Catalog API). '
+             'Può differire da quella del prodotto in Odoo (x_amazon_parent_asin, dal '
+             'marketplace che ha creato la famiglia): Amazon non raggruppa sempre allo stesso '
+             'modo su tutti i marketplace. Vuoto per i prodotti semplici o se non noto.',
+    )
     fnsku = fields.Char('FNSKU')
     product_type = fields.Char('Amazon Product Type')
 

@@ -283,6 +283,23 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_seed_fbm_stock', log_rec.id)
         return self._open_log_action()
 
+    def action_recompute_family_names(self):
+        """
+        Ricalcola il nome delle famiglie in ogni lingua dei marketplace attivi
+        dai titoli Amazon delle varianti (SyncEngine.recompute_family_names).
+        Nessuna chiamata Amazon, solo dati già salvati: gira subito, senza log.
+        """
+        from ..services.sync_engine import SyncEngine
+        updated = SyncEngine(self.env, None).recompute_family_names()
+        return {
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'title': 'Nomi famiglie', 'type': 'success', 'sticky': False,
+                'message': f'Nomi aggiornati: {updated} (famiglia × lingua). Restano invariati '
+                           f'i nomi scelti a mano.',
+            },
+        }
+
     def action_run_recover_renamed_families(self):
         """
         Operazione di recupero: rilegge l'ultimo Full Import con un log

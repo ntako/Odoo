@@ -53,6 +53,8 @@
                 <field name="marketplace_id"/>
                 <field name="sku"/>
                 <field name="asin"/>
+                <field name="item_name" optional="hide"/>
+                <field name="parent_asin" optional="hide"/>
                 <field name="fulfillment"/>
                 <field name="status" widget="badge"
                        decoration-success="status == 'active'"

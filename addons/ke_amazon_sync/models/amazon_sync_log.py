@@ -744,6 +744,17 @@ class AmazonSyncLog(models.Model):
                 except Exception as exc:
                     _log.warning('Rilevamento SKU duplicati fallito (non bloccante): %s', exc)
 
+                # Nomi delle famiglie in ogni lingua dai titoli delle varianti
+                # appena importati (vedi SyncEngine.recompute_family_names).
+                # Non bloccante, come il controllo duplicati sopra.
+                try:
+                    with env.cr.savepoint():
+                        n_names = SyncEngine(env, None).recompute_family_names()
+                    SyncLog._append_log_line(log_rec, f'Nomi famiglie ricalcolati: {n_names} (famiglia × lingua).')
+                    env.cr.commit()
+                except Exception as exc:
+                    _log.warning('Ricalcolo nomi famiglie fallito (non bloccante): %s', exc)
+
                 SyncLog._finish_full_import(log_rec)
             except Exception as exc:
                 _log.error('Thread full_import fallito: %s', exc, exc_info=True)

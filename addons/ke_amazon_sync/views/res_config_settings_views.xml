@@ -50,6 +50,13 @@
                                     class="btn btn-secondary"
                                     confirm="Avvio il download delle immagini mancanti in background. Continuare?"/>
                         </setting>
+                        <setting string="Nomi famiglie"
+                                 help="Nome di ogni famiglia in ogni lingua dei marketplace attivi: la parte comune ai titoli Amazon delle sue varianti. Gira anche da solo a fine Full Import. Non tocca i nomi scelti a mano. Nessuna chiamata Amazon.">
+                            <button name="action_recompute_family_names"
+                                    string="Ricalcola nomi famiglie"
+                                    type="object"
+                                    class="btn btn-secondary"/>
+                        </setting>
                         <setting string="Famiglie rinominate da Amazon"
                                  help="Rilegge l'ultimo Full Import e ripara le famiglie che Amazon ha solo rinominato (stesso gruppo di varianti, nuovo parent ASIN) — non tocca famiglie che Amazon ha diviso o unito con altre, quelle restano segnalate per una verifica manuale. Nessuna chiamata Amazon.">
                             <button name="action_run_recover_renamed_families"

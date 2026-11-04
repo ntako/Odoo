@@ -12,6 +12,7 @@ Scarica l'intero catalogo dallo store Amazon e crea o aggiorna i prodotti in Odo
 - Legge le quantità FBA tramite Inventory API
 - Crea `product.template` in Odoo con tutti i campi Amazon valorizzati
 - Se il prodotto esiste già (per SKU, ASIN o barcode EAN), lo aggiorna opzionalmente
+- Per ogni annuncio salva anche il titolo e la famiglia (parent ASIN) di quel marketplace; a fine import il nome delle famiglie viene ricalcolato in ogni lingua come parte comune ai titoli delle varianti (anche dal pulsante "Ricalcola nomi famiglie"; i nomi scelti a mano restano)
 - Salva l'indirizzo dell'immagine principale (scaricata poi da "Scarica immagini mancanti", avviato a mano) e gli indirizzi di **tutte** le immagini Amazon della variante nella galleria di `ke_product_catalog` (scheda "Galleria" del prodotto; una per ruolo MAIN/PTxx/SWCH, la più grande; il marketplace principale aggiorna, i secondari solo se manca), senza scaricarle. Durante l'import le immagini sono solo annotate sulla variante; la galleria la scrive "Scarica immagini mancanti" (avvio manuale), senza altre chiamate ad Amazon
 - Avviabile da **Magazzino → Amazon Sync → Import Completo**
 
