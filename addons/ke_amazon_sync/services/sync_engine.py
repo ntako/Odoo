@@ -927,6 +927,74 @@ class SyncEngine:
         self._write_family_text(variant.product_tmpl_id, product)
         return variant
 
+    def _attach_listing_by_sku(self, product, family_tmpl):
+        """
+        Riga del report SENZA ASIN il cui SKU è esattamente quello di una
+        variante della famiglia 'family_tmpl': registra l'annuncio del
+        marketplace corrente su quella variante (ASIN preso dalla variante),
+        senza toccare il template — prima la riga veniva solo saltata. Nel
+        report FR del 2026-11-04 l'ASIN mancava per 4.051 righe su 8.254,
+        quasi tutte varianti di famiglia: senza questo l'annuncio FR non
+        veniva mai registrato. Ritorna la variante, o None.
+        """
+        sku = product.get('sku')
+        if not sku or not family_tmpl or not self._current_marketplace():
+            return None
+        variants = family_tmpl.product_variant_ids
+        variant = (
+            variants.filtered(lambda v: v.x_amazon_sku == sku)[:1]
+            or variants.filtered(lambda v: v.default_code == sku)[:1]
+            or self.env['ke.amazon.listing'].sudo().search([
+                ('sku', '=', sku), ('product_id', 'in', variants.ids),
+            ], limit=1).product_id
+        )
+        if not variant:
+            return None
+        product['asin'] = variant.x_amazon_asin or ''
+        self._upsert_listing(variant, product)
+        return variant
+
+    def _register_listing_for_replaced(self, record, plus_sku, product):
+        """
+        Riga con il vecchio SKU (senza '+') di un prodotto che in Odoo ha già
+        la versione '+': la variante tiene lo SKU '+' (nessun rimbalzo fra
+        le due forme), ma se su QUESTO marketplace la variante non ha ancora
+        un annuncio, lo registra con lo SKU di questo marketplace — su UK
+        (magazzino e FNSKU propri) il report del 2026-11-04 aveva ancora il
+        vecchio SKU per ~800 prodotti già passati al '+' su IT/ES, e
+        l'annuncio UK non veniva mai registrato. 'record' è la variante o il
+        template che porta lo SKU '+'. Ritorna True se ha registrato.
+        """
+        marketplace = self._current_marketplace()
+        if not record or not marketplace:
+            return False
+        if record._name == 'product.template':
+            variants = record.product_variant_ids
+            variant = (
+                variants.filtered(lambda v: v.x_amazon_sku == plus_sku)[:1]
+                or variants.filtered(lambda v: v.default_code == plus_sku)[:1]
+                or (variants if len(variants) == 1 else variants.browse())
+            )
+        else:
+            variant = record
+        if not variant:
+            return False
+        Listing = self.env['ke.amazon.listing'].sudo()
+        existing = Listing.search([
+            ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
+        ], limit=1)
+        if existing and existing.sku != product.get('sku'):
+            return False
+        if not product.get('asin'):
+            product['asin'] = variant.x_amazon_asin or variant.product_tmpl_id.x_amazon_asin or ''
+        self._upsert_listing(variant, product)
+        return True
+
+    @staticmethod
+    def _replaced_listing_msg(sku, plus_sku):
+        return (f'COLLEGATO (SKU senza "+" su questo marketplace): {sku} → annuncio registrato '
+                f'sul prodotto {plus_sku}')
+
     def _attached_listing_msg(self, product, variant, reason):
         marketplace = self._current_marketplace()
         return (
@@ -1035,11 +1103,19 @@ class SyncEngine:
                         # report — salta invece di creare un duplicato o
                         # corrompere il template famiglia con campi "semplice".
                         variant_tmpl = maps.find_known_family(sku)
-                        skipped += 1
-                        msg = (
-                            f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
-                            f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
-                        )
+                        attached = self._attach_listing_by_sku(product, variant_tmpl)
+                        if attached:
+                            updated += 1
+                            msg = (
+                                f'COLLEGATO (riga senza ASIN nel report, per SKU): {sku} → variante '
+                                f'id={attached.id} della famiglia "{variant_tmpl.name[:40]}"'
+                            )
+                        else:
+                            skipped += 1
+                            msg = (
+                                f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
+                                f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
+                            )
                         result_tmpl = None
                     else:
                         result_tmpl = self._create_product(product, product_type_odoo)
@@ -1303,6 +1379,11 @@ class SyncEngine:
                         existing = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
                         if existing:
                             existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
+                        plus_tmpl = maps.by_sku.get(best_sku) or maps.by_default_code.get(best_sku)
+                        if self._register_listing_for_replaced(plus_tmpl, best_sku, product):
+                            updated += 1
+                            lines.append(self._replaced_listing_msg(sku, best_sku))
+                            continue
                         skipped += 1
                         lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
                         continue
@@ -1310,6 +1391,10 @@ class SyncEngine:
                     # Stessa guardia, ma con la versione '+' già in Odoo invece
                     # che nello stesso report (vedi _MatchMaps.find_superseding).
                     superseding = maps.find_superseding(sku)
+                    if superseding and self._register_listing_for_replaced(superseding, sku + '+', product):
+                        updated += 1
+                        lines.append(self._replaced_listing_msg(sku, sku + '+'))
+                        continue
                     if superseding:
                         skipped += 1
                         lines.append(
@@ -1361,11 +1446,19 @@ class SyncEngine:
                         # (corrompendolo). Meglio saltare che creare un duplicato o
                         # corrompere la famiglia.
                         variant_tmpl = maps.find_known_family(sku)
-                        skipped += 1
-                        msg = (
-                            f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
-                            f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
-                        )
+                        attached = self._attach_listing_by_sku(product, variant_tmpl)
+                        if attached:
+                            updated += 1
+                            msg = (
+                                f'COLLEGATO (riga senza ASIN nel report, per SKU): {sku} → variante '
+                                f'id={attached.id} della famiglia "{variant_tmpl.name[:40]}"'
+                            )
+                        else:
+                            skipped += 1
+                            msg = (
+                                f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
+                                f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
+                            )
                         result_tmpl = None
                     else:
                         result_tmpl = self._create_product(product, product_type_odoo)
@@ -1511,11 +1604,19 @@ class SyncEngine:
                         # report — salta invece di creare un duplicato o
                         # corrompere il template famiglia con campi "semplice".
                         variant_tmpl = maps.find_known_family(sku)
-                        skipped += 1
-                        msg = (
-                            f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
-                            f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
-                        )
+                        attached = self._attach_listing_by_sku(product, variant_tmpl)
+                        if attached:
+                            updated += 1
+                            msg = (
+                                f'COLLEGATO (riga senza ASIN nel report, per SKU): {sku} → variante '
+                                f'id={attached.id} della famiglia "{variant_tmpl.name[:40]}"'
+                            )
+                        else:
+                            skipped += 1
+                            msg = (
+                                f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
+                                f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
+                            )
                         result_tmpl = None
                     else:
                         result_tmpl = self._create_product(product, product_type_odoo)
@@ -2361,6 +2462,19 @@ class SyncEngine:
                 _log.warning(msg)
                 return 'skipped', msg
             else:
+                # L'ASIN è già una variante di un'altra famiglia (su questo
+                # marketplace Amazon la raggruppa in modo diverso, e lo SKU
+                # non ha trovato conflitti, es. SKU diverso fra marketplace):
+                # collega l'annuncio a quella variante SENZA creare la
+                # famiglia — prima la famiglia nasceva comunque e restava
+                # vuota (325 famiglie fantasma su ES nell'import del
+                # 2026-11-04, una variante segnaposto senza codice né annunci).
+                existing_elsewhere = maps.variant_by_asin.get(asin)
+                if existing_elsewhere:
+                    attached = self._attach_listing_to_existing_variant(product, maps)
+                    if attached:
+                        return 'updated', self._attached_listing_msg(
+                            product, attached, f'su Amazon appartiene alla famiglia {parent_asin}')
                 tmpl = self._create_configurable_template(product, parent_asin, product_type_odoo)
             maps.register_family(parent_asin, tmpl)
         elif conflict and conflict.id != tmpl.id and not (
@@ -2404,6 +2518,8 @@ class SyncEngine:
                 # Import del 2026-10-13 (C4C-0BELTC4MANYGO+ → senza '+' da un
                 # marketplace, poi una riga successiva con '+' non trovava
                 # più nulla e duplicava).
+                if self._register_listing_for_replaced(existing_variant, existing_variant.x_amazon_sku, product):
+                    return 'updated', self._replaced_listing_msg(sku, existing_variant.x_amazon_sku)
                 msg = f'SALTATO (sostituito da {existing_variant.x_amazon_sku}): {sku}'
                 return 'skipped', msg
             if update_existing:

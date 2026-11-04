@@ -77,6 +77,88 @@ class TestFullImportRobustness(TransactionCase):
         self.assertIn('COLLEGATO (famiglia diversa su ZZRE)', log.log_lines)
         self.assertEqual(log.products_updated, 1)
 
+    def test_different_family_with_different_sku_creates_no_empty_family(self):
+        # Import del 2026-11-04: su ES la prima riga di una famiglia "diversa"
+        # aveva uno SKU diverso da IT → nessun conflitto di SKU → la famiglia
+        # ES veniva creata e restava vuota (325 famiglie fantasma).
+        child, sibling = 'B0ZZROBSK1', 'B0ZZROBSK2'
+        it_client = FakeSpApiClient({child: 'B0ZZROBSKPA', sibling: 'B0ZZROBSKPA'}, marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [
+            make_report_row('ZZT-ROBSK-1', asin=child), make_report_row('ZZT-ROBSK-2', asin=sibling),
+        ])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', child)])
+        templates_before = self.env['product.template'].search_count([])
+
+        es_client = FakeSpApiClient({child: 'B0ZZROBSKPB'}, marketplace_id='ZZ_ROB_ES')
+        log, _eng = self._run(es_client, [make_report_row('ZZT-ROBSK-1-ES', asin=child)])
+
+        self.assertFalse(
+            self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZROBSKPB')]),
+            'nessuna famiglia vuota creata',
+        )
+        self.assertEqual(self.env['product.template'].search_count([]), templates_before)
+        self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBSK-1-ES')
+        self.assertIn('COLLEGATO (famiglia diversa su ZZRE)', log.log_lines)
+
+    def test_row_without_asin_attaches_listing_to_variant_by_sku(self):
+        # Report FR del 2026-11-04: ASIN vuoto per 4.051 righe su 8.254,
+        # quasi tutte varianti di famiglia → prima la riga era solo saltata.
+        child, sibling = 'B0ZZROBNA1', 'B0ZZROBNA2'
+        it_client = FakeSpApiClient({child: 'B0ZZROBNAPA', sibling: 'B0ZZROBNAPA'}, marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [
+            make_report_row('ZZT-ROBNA-1', asin=child), make_report_row('ZZT-ROBNA-2', asin=sibling),
+        ])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', child)])
+        family = variant.product_tmpl_id
+        variant_count = len(family.product_variant_ids)
+
+        es_client = FakeSpApiClient(marketplace_id='ZZ_ROB_ES')
+        log, _eng = self._run(es_client, [make_report_row('ZZT-ROBNA-1', asin='', price='12.50')])
+
+        listing = self._listing(variant, self.es)
+        self.assertEqual((listing.sku, listing.asin, listing.price), ('ZZT-ROBNA-1', child, 12.5))
+        self.assertEqual(len(family.product_variant_ids), variant_count, 'famiglia non modificata')
+        self.assertEqual(log.products_skipped, 0)
+        self.assertIn('COLLEGATO (riga senza ASIN nel report, per SKU)', log.log_lines)
+
+    def test_old_sku_on_secondary_marketplace_registers_listing(self):
+        # UK del 2026-11-04: il report aveva ancora il vecchio SKU (senza '+')
+        # di prodotti già passati al '+' su IT → annuncio UK mai registrato.
+        it_client = FakeSpApiClient({'B0ZZROBPL2': 'B0ZZROBPLPA', 'B0ZZROBPL3': 'B0ZZROBPLPA'},
+                                    marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [
+            make_report_row('ZZT-ROBPL-1+', asin='B0ZZROBPL1'),
+            make_report_row('ZZT-ROBPL-2+', asin='B0ZZROBPL2'),
+            make_report_row('ZZT-ROBPL-3', asin='B0ZZROBPL3'),
+        ])
+        simple = self.env['product.template'].search([('default_code', '=', 'ZZT-ROBPL-1+')]).product_variant_id
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', 'B0ZZROBPL2')])
+
+        es_client = FakeSpApiClient({'B0ZZROBPL2': 'B0ZZROBPLPA', 'B0ZZROBPL3': 'B0ZZROBPLPA'},
+                                    marketplace_id='ZZ_ROB_ES')
+        log, _eng = self._run(es_client, [
+            make_report_row('ZZT-ROBPL-1', asin='B0ZZROBPL1', price='11.00'),
+            make_report_row('ZZT-ROBPL-1', asin='', price='11.00'),
+            make_report_row('ZZT-ROBPL-2', asin='B0ZZROBPL2'),
+        ])
+        self.assertEqual(self._listing(simple, self.es).sku, 'ZZT-ROBPL-1')
+        self.assertEqual(self._listing(simple, self.es).asin, 'B0ZZROBPL1')
+        self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBPL-2')
+        self.assertEqual(simple.x_amazon_sku or simple.product_tmpl_id.x_amazon_sku, 'ZZT-ROBPL-1+',
+                         "lo SKU '+' del prodotto non cambia")
+        self.assertEqual(variant.x_amazon_sku, 'ZZT-ROBPL-2+')
+        self.assertIn('COLLEGATO (SKU senza "+" su questo marketplace)', log.log_lines)
+
+    def test_old_sku_skipped_when_marketplace_listing_has_plus(self):
+        it_client = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1')])
+        simple = self.env['product.template'].search([('default_code', '=', 'ZZT-ROBPK-1+')]).product_variant_id
+        es_client = FakeSpApiClient(marketplace_id='ZZ_ROB_ES')
+        self._run(es_client, [make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1')])
+        log, _eng = self._run(es_client, [make_report_row('ZZT-ROBPK-1', asin='B0ZZROBPK1')])
+        self.assertEqual(self._listing(simple, self.es).sku, 'ZZT-ROBPK-1+')
+        self.assertIn('SALTATO (sostituito', log.log_lines)
+
     def test_row_not_recognized_as_variant_attaches_listing(self):
         child = 'B0ZZROBNV1'
         it_client = FakeSpApiClient({child: 'B0ZZROBPARN', 'B0ZZROBNV2': 'B0ZZROBPARN'}, marketplace_id='ZZ_ROB_IT')
