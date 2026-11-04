@@ -203,11 +203,11 @@ _SPEC_ATTRIBUTES = {
 }
 
 
-def _extract_spec_attrs(attrs):
+def _extract_spec_attrs(attrs, lang=None):
     """Returns {label: value} for known spec attributes found in an Amazon attrs dict."""
     result = {}
     for key, label in _SPEC_ATTRIBUTES.items():
-        val = _cat_val(attrs, key)
+        val = _cat_val(attrs, key, lang)
         if val:
             result[label] = val
     return result
@@ -217,7 +217,7 @@ def _extract_spec_attrs(attrs):
 # Helpers condivisi
 # ---------------------------------------------------------------------------
 
-def _parse_listing(listing):
+def _parse_listing(listing, lang=None):
     """Struttura normalizzata da un listing raw SP-API."""
     summaries = listing.get('summaries', [{}])
     summary = summaries[0] if summaries else {}
@@ -241,24 +241,28 @@ def _parse_listing(listing):
             price = 0.0
 
     # Extract description and specs directly from listing attributes as baseline
-    bullets = [str(v.get('value', '')) for v in attributes.get('bullet_point', []) if v.get('value')]
+    bullets = _bullets(attributes, lang)
     return {
         'sku': (listing.get('sku') or '').strip(),
         'asin': (summary.get('asin') or '').strip(),
-        'name': summary.get('itemName', '') or _cat_val(attributes, 'item_name'),
+        'name': summary.get('itemName', '') or _cat_val(attributes, 'item_name', lang),
         'status': ', '.join(summary.get('status', [])),
         'product_type': summary.get('productType', ''),
         'price': price or 0.0,
         'fulfillment': 'fba' if channel == 'AMAZON_NA' else 'fbm',
         'attributes': attributes,
-        'description': _cat_val(attributes, 'product_description'),
+        'description': _cat_val(attributes, 'product_description', lang),
         'bullet_points': bullets,
-        'spec_attrs': _extract_spec_attrs(attributes),
+        'spec_attrs': _extract_spec_attrs(attributes, lang),
     }
 
 
-def _merge_catalog(product, catalog):
-    """Arricchisce il dict prodotto con i dati del Catalog v2022."""
+def _merge_catalog(product, catalog, lang=None):
+    """
+    Arricchisce il dict prodotto con i dati del Catalog v2022. 'lang' è il
+    locale della chiamata (lingua del marketplace): sceglie descrizione,
+    bullet point e specifiche in quella lingua quando Amazon ne manda più.
+    """
     if not catalog:
         return
 
@@ -287,15 +291,15 @@ def _merge_catalog(product, catalog):
                 break
 
     # Descrizione + bullet points (catalog ha la precedenza su listing)
-    cat_desc = _cat_val(cat_attrs, 'product_description')
+    cat_desc = _cat_val(cat_attrs, 'product_description', lang)
     if cat_desc:
         product['description'] = cat_desc
-    cat_bullets = [str(v.get('value', '')) for v in cat_attrs.get('bullet_point', []) if v.get('value')]
+    cat_bullets = _bullets(cat_attrs, lang)
     if cat_bullets:
         product['bullet_points'] = cat_bullets
 
     # Specifiche dal catalog (integrano quelle del listing)
-    cat_specs = _extract_spec_attrs(cat_attrs)
+    cat_specs = _extract_spec_attrs(cat_attrs, lang)
     existing_specs = product.get('spec_attrs', {})
     existing_specs.update(cat_specs)
     product['spec_attrs'] = existing_specs
@@ -332,11 +336,38 @@ def _merge_catalog(product, catalog):
         product['variation_attr'] = _get_variant_attr_info(product, catalog)
 
 
-def _cat_val(attrs, key):
-    val = attrs.get(key, [])
-    if val and isinstance(val, list):
+def _norm_lang(tag):
+    return (tag or '').replace('-', '_').lower()
+
+
+def _lang_entries(entries, lang=None):
+    """
+    Voci di un attributo Amazon nella lingua 'lang' (es. 'es_ES'), se ce ne
+    sono; altrimenti tutte. Il Catalog API può restituire lo stesso
+    attributo (descrizione, bullet point) in più lingue, ciascuna con il suo
+    'language_tag': prima si prendeva sempre la prima voce, che non è
+    detto sia quella del marketplace (2026-11-04: descrizioni ES/FR/UK in
+    italiano). Le voci senza language_tag (brand, numeri) restano valide.
+    """
+    if not entries or not isinstance(entries, list):
+        return []
+    if lang:
+        wanted = _norm_lang(lang)
+        matching = [e for e in entries if _norm_lang(e.get('language_tag')) == wanted]
+        if matching:
+            return matching
+    return entries
+
+
+def _cat_val(attrs, key, lang=None):
+    val = _lang_entries(attrs.get(key, []), lang)
+    if val:
         return str(val[0].get('value', ''))
     return ''
+
+
+def _bullets(attrs, lang=None):
+    return [str(v.get('value', '')) for v in _lang_entries(attrs.get('bullet_point', []), lang) if v.get('value')]
 
 
 def _convert_weight(w):
@@ -396,7 +427,7 @@ def _storable_vals(env):
     return {}
 
 
-def _needs_catalog_data(template):
+def _needs_catalog_data(template, lang=None):
     """
     True se a questo product.template manca almeno uno dei campi che il
     Catalog API può fornire — stessa condizione usata da
@@ -411,8 +442,27 @@ def _needs_catalog_data(template):
         or not template.x_amazon_product_type
         or not template.x_amazon_browse_node_id
         or not template.x_amazon_brand
-        or not template.description_sale
+        or not _has_text_in_lang(template, 'description_sale', lang)
     )
+
+
+def _has_text_in_lang(template, field, lang=None):
+    """
+    True se 'field' (traducibile) ha un testo proprio nella lingua 'lang'.
+    Senza 'lang' basta il valore normale. Con 'lang' serve la colonna JSON
+    grezza: letto con with_context(lang=...) Odoo restituisce il testo di
+    ripiego di un'altra lingua, e la descrizione italiana bastava a far
+    saltare la chiamata Catalog per ES/FR/UK — per questo le traduzioni
+    non arrivavano mai (2026-11-04, solo 714 descrizioni es_ES su 2.835).
+    """
+    if not lang:
+        return bool(template[field])
+    template.flush_recordset([field])
+    template.env.cr.execute(
+        f'SELECT ({field}->>%s) FROM product_template WHERE id = %s', (lang, template.id),
+    )
+    row = template.env.cr.fetchone()
+    return bool(row and row[0])
 
 
 def _resolve_product_type(env, requested):
@@ -882,7 +932,7 @@ class SyncEngine:
         grade_resell_skus = set()
 
         for listing in self.client.iter_seller_skus(max_products=limit):
-            product = _parse_listing(listing)
+            product = _parse_listing(listing, self._catalog_lang())
             sku = product['sku']
             asin = product['asin']
             if _is_grade_and_resell_sku(sku):
@@ -896,7 +946,7 @@ class SyncEngine:
             # Arricchisci con dati catalogo (include relationships)
             if asin:
                 catalog = self.client.get_catalog_item(asin)
-                _merge_catalog(product, catalog)
+                _merge_catalog(product, catalog, self._catalog_lang())
 
             product.setdefault('ean', '')
             product['qty_available'] = inventory_map.get(sku, 0)
@@ -1127,7 +1177,7 @@ class SyncEngine:
         asins_to_fetch = []
         for asin in chunk_asins:
             existing = maps.by_asin.get(asin)
-            if existing and not existing.x_amazon_parent_asin and not _needs_catalog_data(existing):
+            if existing and not existing.x_amazon_parent_asin and not _needs_catalog_data(existing, self._marketplace_lang_context().get('lang')):
                 skipped_catalog_calls += 1
                 continue
             asins_to_fetch.append(asin)
@@ -1184,7 +1234,7 @@ class SyncEngine:
                 continue
 
             if asin and asin in catalog_by_asin:
-                _merge_catalog(product, catalog_by_asin[asin])
+                _merge_catalog(product, catalog_by_asin[asin], self._catalog_lang())
 
             try:
                 with self.env.cr.savepoint():
@@ -1362,7 +1412,7 @@ class SyncEngine:
         grade_resell_skus = set()
 
         for listing in items:
-            product = _parse_listing(listing)
+            product = _parse_listing(listing, self._catalog_lang())
             sku = product['sku']
             asin = product['asin']
             if _is_grade_and_resell_sku(sku):
@@ -1375,7 +1425,7 @@ class SyncEngine:
 
             if asin:
                 catalog = self.client.get_catalog_item(asin)
-                _merge_catalog(product, catalog)
+                _merge_catalog(product, catalog, self._catalog_lang())
 
             product.setdefault('ean', '')
             product['qty_available'] = 0
@@ -1816,6 +1866,10 @@ class SyncEngine:
             )
             return {}
         return {'lang': lang.code}
+
+    def _catalog_lang(self):
+        """Locale con cui il client interroga il Catalog API (vedi SpApiClient.locale)."""
+        return getattr(self.client, 'locale', None) or None
 
     def _has_translation(self, template, field, lang):
         """
@@ -2487,6 +2541,14 @@ class SyncEngine:
             # Mai sovrascrivere un EAN che la variante ha già (caso SKU).
             if ean and not variant.barcode:
                 variant.write({'barcode': ean})
+            # Costo d'acquisto: prima restava sul prodotto archiviato (485 su
+            # 1.013 unioni nell'import del 2026-11-03, e nel resto del
+            # catalogo il costo c'è solo su 151 prodotti su 18.628). Copiato
+            # solo se la variante non ne ha già uno.
+            cost = mv.standard_price
+            cost_copied = bool(cost and not variant.standard_price)
+            if cost_copied:
+                variant.write({'standard_price': cost})
             self.env['ke.amazon.listing'].sudo().search([('product_id', '=', mv.id)]).unlink()
             moved = sum(qty for _loc, qty in to_move)
             manual.message_post(body=(
@@ -2494,6 +2556,7 @@ class SyncEngine:
                 f'{variant.default_code or variant.display_name} della famiglia '
                 f'"{variant.product_tmpl_id.name}" (stesso {merge_by}; EAN {ean or "-"}). '
                 f'Giacenza spostata sulla variante: {moved:g}.'
+                + (f' Costo d\'acquisto copiato: {cost:g}.' if cost_copied else '')
             ))
             variant.product_tmpl_id.message_post(body=(
                 f'Variante {variant.default_code or variant.display_name}: unito il prodotto '
@@ -3225,7 +3288,7 @@ class SyncEngine:
                 skipped += 1
                 msg_by_product_id[product.id] = f'SKIP {ref}: famiglia senza varianti con ASIN, impossibile interrogare Amazon'
                 continue
-            if _needs_catalog_data(product):
+            if _needs_catalog_data(product, self._marketplace_lang_context().get('lang')):
                 to_fetch.append((product, query_asin))
             else:
                 skipped += 1
@@ -3279,8 +3342,8 @@ class SyncEngine:
                     # scaricati e finora scartati.
                     cat_attrs = catalog.get('attributes', {})
                     brand = s0.get('brand', '') or _cat_val(cat_attrs, 'brand')
-                    description = _cat_val(cat_attrs, 'product_description')
-                    bullets = [str(v.get('value', '')) for v in cat_attrs.get('bullet_point', []) if v.get('value')]
+                    description = _cat_val(cat_attrs, 'product_description', self._catalog_lang())
+                    bullets = _bullets(cat_attrs, self._catalog_lang())
 
                     vals = {}
                     if category:
@@ -3305,13 +3368,19 @@ class SyncEngine:
                     # impostati a mano in Odoo con quanto trovato su Amazon.
                     if brand and not product.x_amazon_brand:
                         vals['x_amazon_brand'] = brand
-                    if (description or bullets) and not product.description_sale:
+                    # Nella lingua del marketplace (stesso slot controllato da
+                    # _needs_catalog_data), altrimenti la descrizione ES/FR/UK
+                    # non arriverebbe mai e il prodotto verrebbe richiesto a
+                    # ogni giro.
+                    lang_ctx = self._marketplace_lang_context()
+                    if (description or bullets) and not _has_text_in_lang(
+                            product, 'description_sale', lang_ctx.get('lang')):
                         formatted = self._format_description({'description': description, 'bullet_points': bullets})
                         if formatted:
                             vals['description_sale'] = formatted
 
                     if vals:
-                        product.write(vals)
+                        product.with_context(**lang_ctx).write(vals)
                         updated += 1
                         msg = f'OK {ref}: type="{product_type}" cat="{category}" L={length_cm} W={width_cm} H={height_cm}'
                         if 'x_amazon_brand' in vals or 'description_sale' in vals:

@@ -112,7 +112,7 @@ class SpApiClient:
     """
 
     def __init__(self, env=None, credentials=None, seller_id=None,
-                 marketplace_id=None, locale='it_IT'):
+                 marketplace_id=None, locale=None):
         self._env = env
         self._credentials_override = credentials
         self._seller_id_override = seller_id
@@ -152,9 +152,32 @@ class SpApiClient:
 
     @property
     def locale(self):
+        """
+        Lingua dei testi chiesti ad Amazon (Catalog API, tipi prodotto). Senza
+        un valore esplicito è la lingua del marketplace del client
+        (ke.amazon.marketplace.lang_id, se attiva); poi l'impostazione
+        generale, infine it_IT. Prima era sempre it_IT, anche per ES/FR/UK:
+        Amazon rispondeva in italiano e le traduzioni non arrivavano mai
+        (2026-11-04).
+        """
         if self._locale:
             return self._locale
+        lang = self._marketplace_lang_code()
+        if lang:
+            return lang
         return self._get_param('ke_amazon_sync.locale', 'it_IT')
+
+    def _marketplace_lang_code(self):
+        if not hasattr(self, '_marketplace_lang_cache'):
+            code = ''
+            if self._env is not None and 'ke.amazon.marketplace' in self._env:
+                marketplace = self._env['ke.amazon.marketplace'].sudo().with_context(active_test=False).search([
+                    ('marketplace_id', '=', self.marketplace_id),
+                    ('lang_id', '!=', False), ('lang_id.active', '=', True),
+                ], order='active desc, id', limit=1)
+                code = marketplace.lang_id.code or ''
+            self._marketplace_lang_cache = code
+        return self._marketplace_lang_cache
 
     def _marketplace(self):
         from sp_api.base import Marketplaces

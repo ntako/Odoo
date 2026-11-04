@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<odoo>
+<!-- noupdate="1": i cron vengono creati all'installazione e poi NON più
+     riscritti dagli aggiornamenti del modulo. Prima ogni -u rimetteva
+     "active" al valore di questo file: riaccendeva "Aggiorna Vista
+     Inventario" e il watchdog spenti a mano, e SPEGNEVA gli altri otto
+     accesi dall'utente (es. Giacenze FBA, Import FNSKU) — trovato il
+     2026-11-04. Le righe <delete> qui sotto vengono eseguite comunque
+     (verificato su odoo/tools/convert.py: _tag_delete non guarda noupdate).
+     Conseguenza da sapere: una modifica futura a un cron di questo file
+     (intervallo, codice) non arriva più con un -u — va applicata a mano o
+     con uno script di migrazione. -->
+<odoo noupdate="1">
     <!-- Funzione 1 (RIMOSSA): il full import ora gira su thread di background
          continuo (_thread_full_import in amazon_sync_log.py), non più su
          questo cron a tick — vedi progetto-sync-thread-invece-di-cron.md.

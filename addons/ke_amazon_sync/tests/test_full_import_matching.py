@@ -638,6 +638,37 @@ class TestFullImportMatching(TransactionCase):
         self.assertFalse(manual.active, 'il manuale viene archiviato')
         self.assertFalse(manual_variant.barcode)
 
+    def test_merge_copies_purchase_cost_to_variant(self):
+        # 2026-11-03: il costo restava sul prodotto archiviato (485 unioni su
+        # 1.013 nell'import da capo).
+        manual, _location = self._make_manual('ZZT-SVS-COST', '5700000000024', 0)
+        manual.product_variant_id.standard_price = 12.34
+        client = FakeSpApiClient({'B0ZZCOST1': 'B0ZZCOSTPARENT'}, {'B0ZZCOST1': '5700000000024'})
+        eng = self.SyncEngine(self.env, client)
+        log = self._make_log('test costo unione')
+        self._run(eng, log, [make_report_row('ZZT-SAV-COST', asin='B0ZZCOST1')])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', 'B0ZZCOST1')])
+        self.assertEqual(variant.standard_price, 12.34)
+        self.assertIn("Costo d'acquisto copiato", ' '.join(manual.message_ids.mapped('body')))
+
+    def test_merge_does_not_overwrite_existing_variant_cost(self):
+        manual, _location = self._make_manual('ZZT-SVS-COST2', '5700000000031', 0)
+        manual.product_variant_id.standard_price = 12.34
+        variant = self.env['product.product'].create({
+            'name': 'ZZT variante con costo', 'type': 'consu', 'standard_price': 5.0,
+        })
+
+        class _Maps:
+            by_barcode = {}
+
+            def forget(self, _manual):
+                pass
+
+        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        eng._merge_manual_into_variant(_Maps(), manual, variant, 'EAN')
+        self.assertEqual(variant.standard_price, 5.0, 'un costo già presente sulla variante non si tocca')
+        self.assertNotIn("Costo d'acquisto copiato", ' '.join(manual.message_ids.mapped('body')))
+
     def test_manual_with_leading_zero_ean_mismatch_still_merges(self):
         """
         Bug reale trovato il 2026-10-23 (Full Import su DB resettato alla
