@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_ke_product_media_list" model="ir.ui.view">
+        <field name="name">ke.product.media.list</field>
+        <field name="model">ke.product.media</field>
+        <field name="arch" type="xml">
+            <list editable="bottom">
+                <field name="sequence" widget="handle"/>
+                <field name="url" widget="image_url" options="{'size': [64, 64]}" string="Anteprima"
+                       readonly="1" nolabel="1"/>
+                <field name="product_tmpl_id" optional="hide"/>
+                <field name="product_id" optional="show"/>
+                <field name="source"/>
+                <field name="role"/>
+                <field name="width" optional="show"/>
+                <field name="height" optional="show"/>
+                <field name="source_ref" optional="hide"/>
+                <field name="url" widget="url"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_product_media_search" model="ir.ui.view">
+        <field name="name">ke.product.media.search</field>
+        <field name="model">ke.product.media</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="product_tmpl_id"/>
+                <field name="product_id"/>
+                <field name="role"/>
+                <filter name="amazon" string="Amazon" domain="[('source', '=', 'amazon')]"/>
+                <filter name="supplier" string="Fornitore" domain="[('source', '=', 'supplier')]"/>
+                <filter name="manual" string="Manuale" domain="[('source', '=', 'manual')]"/>
+                <group>
+                    <filter name="group_source" string="Fonte" context="{'group_by': 'source'}"/>
+                    <filter name="group_tmpl" string="Prodotto" context="{'group_by': 'product_tmpl_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- Scheda "Galleria" sul prodotto. La scheda variante (product_normal_form_view)
+         eredita questa vista: lì ke_media_ids è il campo di product.product e
+         mostra le sole immagini della variante. -->
+    <record id="view_product_template_form_media" model="ir.ui.view">
+        <field name="name">product.template.form.ke.media</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Galleria" name="ke_media">
+                    <p class="text-muted">
+                        Indirizzi delle immagini del prodotto per fonte (Amazon, fornitore,
+                        manuale): non vengono scaricate in Odoo, si usano per la pubblicazione.
+                    </p>
+                    <field name="ke_media_ids" context="{'list_view_ref': 'ke_product_catalog.view_ke_product_media_list'}"/>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -20,3 +20,4 @@ from . import test_item_condition_and_amazon_labels
 from . import test_grade_and_resell
 from . import test_full_import_robustness
 from . import test_catalog_language
+from . import test_gallery_images

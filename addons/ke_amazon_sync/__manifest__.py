@@ -13,7 +13,7 @@
     'author': 'KE',
     # sale_management (non solo 'sale'): serve per avere l'app Vendite completa
     # con il menu Configurazione → Listini Prezzi, usato per il listino "Amazon".
-    'depends': ['stock', 'product', 'base_setup', 'sale', 'sale_management', 'ke_product_dimensions'],
+    'depends': ['stock', 'product', 'base_setup', 'sale', 'sale_management', 'ke_product_dimensions', 'ke_product_catalog'],
     'data': [
         'security/ir.model.access.csv',
         'data/ir_cron.xml',

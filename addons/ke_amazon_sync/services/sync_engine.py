@@ -74,6 +74,41 @@ def _best_image_url(catalog):
     return ''
 
 
+def _image_role_order(role):
+    """Ordine della galleria: MAIN, poi PT01…PTnn, poi SWCH, poi gli altri ruoli."""
+    role = role or ''
+    if role == 'MAIN':
+        return (0, 0, '')
+    if role.startswith('PT') and role[2:].isdigit():
+        return (1, int(role[2:]), '')
+    if role == 'SWCH':
+        return (2, 0, '')
+    return (3, 0, role)
+
+
+def _gallery_images(catalog):
+    """
+    Tutte le immagini di un articolo del Catalog API, una per ruolo (la
+    versione più grande, come _best_image_url), in ordine di galleria. Per
+    la galleria di ke_product_catalog (ke.product.media): solo indirizzi,
+    niente download.
+    """
+    best_by_role = {}
+    for block in (catalog or {}).get('images') or []:
+        for image in block.get('images') or []:
+            role, link = image.get('variant') or '', image.get('link')
+            if not link:
+                continue
+            size = (image.get('width') or 0) * (image.get('height') or 0)
+            current = best_by_role.get(role)
+            if current is None or size > (current.get('width') or 0) * (current.get('height') or 0):
+                best_by_role[role] = image
+    return [
+        {'url': i['link'], 'role': role or False, 'width': i.get('width') or 0, 'height': i.get('height') or 0}
+        for role, i in sorted(best_by_role.items(), key=lambda item: _image_role_order(item[0]))
+    ]
+
+
 def _fetch_image_b64(url):
     """Downloads an image URL and returns base64-encoded bytes, or None on failure."""
     if not url:
@@ -320,6 +355,7 @@ def _merge_catalog(product, catalog, lang=None):
 
     # Immagine principale: ruolo e dimensione migliori (vedi _best_image_url)
     product['image_url'] = _best_image_url(catalog)
+    product['images'] = _gallery_images(catalog)
 
     # Categoria
     summaries_block = catalog.get('summaries', [{}])
@@ -1970,6 +2006,7 @@ class SyncEngine:
         )
         self._upsert_listing(template.product_variant_id, data)
         self._remember_image_url(template.product_variant_id, data.get('image_url'))
+        self._remember_gallery(template.product_variant_id, data)
         return template
 
     @staticmethod
@@ -1977,6 +2014,29 @@ class SyncEngine:
         """Salva l'indirizzo dell'immagine principale da scaricare dopo (vedi x_amazon_image_url)."""
         if url and variant.x_amazon_image_url != url:
             variant.x_amazon_image_url = url
+
+    def _remember_gallery(self, variant, data):
+        """
+        Salva gli indirizzi di tutte le immagini Amazon della variante nella
+        galleria (ke.product.media, fonte Amazon) — per la pubblicazione su
+        PrestaShop, senza scaricarle. Il marketplace principale aggiorna
+        sempre; i secondari scrivono solo se la variante non ha ancora
+        immagini Amazon, così la galleria non cambia a ogni marketplace
+        importato (stessa regola dei campi Amazon "legacy").
+        """
+        images = data.get('images')
+        if not images or not variant:
+            return
+        Media = self.env['ke.product.media'].sudo()
+        if not self._is_primary_marketplace() and Media.search_count([
+            ('product_id', '=', variant.id), ('source', '=', 'amazon'),
+        ], limit=1):
+            return
+        marketplace = self._current_marketplace()
+        Media._set_source_images(
+            variant.product_tmpl_id, variant, 'amazon', images,
+            source_ref=f'Amazon {marketplace.code}' if marketplace else 'Amazon',
+        )
 
     def _set_product_attributes(self, template, spec_attrs):
         """Creates product.attribute.line entries as specifications (no variant generation)."""
@@ -2104,6 +2164,8 @@ class SyncEngine:
         self._write_localized_text(
             product, name=data.get('name'), description_sale=self._format_description(data),
         )
+        if len(product.product_variant_ids) == 1:
+            self._remember_gallery(product.product_variant_id, data)
         if not product.barcode and data.get('ean'):
             if self._barcode_free(data['ean'], exclude_product_ids=product.product_variant_ids.ids):
                 try:
@@ -2354,6 +2416,7 @@ class SyncEngine:
                 # — solo se manca ancora, non riscarica a ogni giro.
                 if not existing_variant.image_variant_1920:
                     self._remember_image_url(existing_variant, product.get('image_url'))
+                self._remember_gallery(existing_variant, product)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
                 # L'FNSKU della LISTING di questo marketplace va invalidato
@@ -2689,6 +2752,7 @@ class SyncEngine:
         # primo figlio anche per colori/taglie visibilmente diversi.
         # Trovato dal vivo il 2026-10-27, segnalato dall'utente.
         self._remember_image_url(variant, product.get('image_url'))
+        self._remember_gallery(variant, product)
         return variant
 
     @staticmethod

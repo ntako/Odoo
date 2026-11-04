@@ -12,6 +12,7 @@ Scarica l'intero catalogo dallo store Amazon e crea o aggiorna i prodotti in Odo
 - Legge le quantità FBA tramite Inventory API
 - Crea `product.template` in Odoo con tutti i campi Amazon valorizzati
 - Se il prodotto esiste già (per SKU, ASIN o barcode EAN), lo aggiorna opzionalmente
+- Salva l'indirizzo dell'immagine principale (scaricata poi da "Scarica immagini mancanti", avviato a fine catena) e gli indirizzi di **tutte** le immagini Amazon della variante nella galleria di `ke_product_catalog` (scheda "Galleria" del prodotto; una per ruolo MAIN/PTxx/SWCH, la più grande; il marketplace principale aggiorna, i secondari solo se manca), senza scaricarle
 - Avviabile da **Magazzino → Amazon Sync → Import Completo**
 
 > **Nota tecnica:** la Listings Items API ha un limite fisso di 1.000 prodotti per sessione di paginazione. Per superarlo, l'import usa la **Reports API** (`GET_MERCHANT_LISTINGS_ALL_DATA`), che non ha questo limite.
@@ -144,9 +145,9 @@ pip install python-amazon-sp-api requests
 ```
 
 ### Deploy
-Copia la cartella `ke_amazon_sync` nella directory addons di Odoo, poi installa il modulo dall'interfaccia (**Impostazioni → Applicazioni**).
+Copia le cartelle `ke_amazon_sync`, `ke_product_dimensions` e `ke_product_catalog` nella directory addons di Odoo, poi installa il modulo dall'interfaccia (**Impostazioni → Applicazioni**).
 
-Il modulo dipende da: `stock`, `product`, `base_setup`, `sale`.
+Il modulo dipende da: `stock`, `product`, `base_setup`, `sale`, `sale_management`, `ke_product_dimensions`, `ke_product_catalog`. Su un DB dove `ke_amazon_sync` è già installato, una dipendenza nuova va installata esplicitamente: `-i ke_product_catalog -u ke_amazon_sync` (con il solo `-u` Odoo rifiuta l'aggiornamento).
 
 ---
 
