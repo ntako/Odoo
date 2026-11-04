@@ -19,6 +19,8 @@ Funzione 3 – sync_prices_and_quantities:
 import base64
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -28,12 +30,28 @@ from odoo.exceptions import UserError
 _log = logging.getLogger(__name__)
 
 
+# Una sessione HTTP per thread, riusata da tutte le immagini: con
+# requests.get() ogni immagine apriva una connessione nuova (DNS, TCP,
+# handshake TLS e caricamento dei certificati ogni volta) — misurato il
+# 2026-11-03 sul Full Import: ~3,5 s ogni 30 prodotti solo di connessioni.
+# Per thread perché Full Import e "Scarica immagini mancanti" possono girare
+# insieme e requests.Session non è garantita thread-safe.
+_http_local = threading.local()
+
+
+def _http_session():
+    session = getattr(_http_local, 'session', None)
+    if session is None:
+        session = _http_local.session = requests.Session()
+    return session
+
+
 def _fetch_image_b64(url):
     """Downloads an image URL and returns base64-encoded bytes, or None on failure."""
     if not url:
         return None
     try:
-        resp = requests.get(url, timeout=10)
+        resp = _http_session().get(url, timeout=10)
         resp.raise_for_status()
         return base64.b64encode(resp.content)
     except Exception as exc:
@@ -437,6 +455,26 @@ def _ean_search_variants(code):
     return variants
 
 
+# Contesto per le scritture massive dell'import: niente messaggio automatico
+# "prodotto creato", niente iscrizione dell'utente ai follower e niente
+# tracciamento dei campi nello storico (mail.thread) per ognuno delle
+# migliaia di prodotti — misurato il 2026-11-03: fino a ~5 s ogni 30 prodotti
+# creati. Le note scritte apposta con message_post (es. le unioni con il
+# gestionale) restano: message_post non dipende da queste chiavi (verificato
+# su mail/models/mail_thread.py).
+_IMPORT_MAIL_CTX = {
+    'tracking_disable': True, 'mail_create_nolog': True,
+    'mail_create_nosubscribe': True, 'mail_notrack': True,
+}
+
+# Errori di concorrenza di PostgreSQL per cui ripetere una riga ha senso
+# (deadlock con un altro processo, conflitto di serializzazione): l'import
+# del 2026-11-03 è caduto per un deadlock con il cron "Aggiorna Vista
+# Inventario" che aggiornava gli stessi prodotti.
+_RETRYABLE_PGCODES = {'40P01', '40001'}
+_ROW_RETRY_MAX = 2
+
+
 def _is_grade_and_resell_sku(sku):
     """
     True per uno SKU creato da Amazon con il programma Grade & Resell
@@ -751,6 +789,42 @@ class SyncEngine:
             vals.update({'product_id': variant.id, 'marketplace_id': marketplace.id})
             Listing.create(vals)
 
+    def _attach_listing_to_existing_variant(self, product, maps):
+        """
+        Registra l'annuncio del marketplace corrente sulla variante che in
+        Odoo ha già questo ASIN (o, in mancanza, questo SKU), senza toccare
+        la struttura della famiglia. Per le righe che prima venivano solo
+        saltate perché Amazon, su quel marketplace, raggruppa le famiglie in
+        modo diverso (conflitto di parent_asin, o riga non riconosciuta come
+        variante): la variante c'era già, ma il suo annuncio su quel
+        marketplace non veniva mai registrato — import del 2026-11-03,
+        ~2.700 righe ES su 8.263, 0 su IT (il primo marketplace crea le
+        famiglie). Ritorna la variante, o None se non ce n'è una sicura.
+        """
+        if not self._current_marketplace():
+            return None
+        sku, asin = product.get('sku'), product.get('asin')
+        variant = maps.variant_by_asin.get(asin) if asin else None
+        if not variant and sku:
+            Product = self.env['product.product']
+            variant = (
+                Product.search([('x_amazon_sku', '=', sku)], limit=1)
+                or Product.search([('default_code', '=', sku)], limit=1)
+            )
+        if not variant:
+            return None
+        self._upsert_listing(variant, product)
+        return variant
+
+    def _attached_listing_msg(self, product, variant, reason):
+        marketplace = self._current_marketplace()
+        return (
+            f'COLLEGATO (famiglia diversa su {marketplace.code}): {product.get("sku")} / '
+            f'{product.get("asin")} → variante id={variant.id} della famiglia '
+            f'"{variant.product_tmpl_id.name[:40]}" — annuncio registrato, struttura non '
+            f'modificata ({reason})'
+        )
+
     # -----------------------------------------------------------------------
     # Funzione 1: Import completo (solo manuale)
     # -----------------------------------------------------------------------
@@ -760,6 +834,7 @@ class SyncEngine:
         Scarica tutti i listing Amazon e crea/aggiorna product.template in Odoo.
         log_cb: callable(str) per messaggi di progresso in tempo reale.
         """
+        self.env = self.env(context=dict(self.env.context, **_IMPORT_MAIL_CTX))
         def _log_line(msg):
             _log.info(msg)
             if log_cb:
@@ -959,7 +1034,14 @@ class SyncEngine:
         Catalog API" (che però non potrà mai retroattivamente trasformarli in
         varianti collegate, solo backfillare categoria/dimensioni/brand/testo).
         Ritorna il prossimo row_offset, oppure None se tutte le righe sono state elaborate.
+
+        Ogni riga gira in un proprio savepoint: un errore annulla solo quella
+        riga invece di lasciare la transazione dell'intero blocco in stato
+        "aborted" (prima ogni riga successiva falliva a cascata e il blocco
+        andava perso — import del 2026-11-03); un deadlock o un conflitto di
+        serializzazione ripete la riga fino a _ROW_RETRY_MAX volte.
         """
+        self.env = self.env(context=dict(self.env.context, **_IMPORT_MAIL_CTX))
         product_type_odoo = _resolve_product_type(
             self.env,
             self.env['ir.config_parameter'].sudo().get_param(
@@ -1061,7 +1143,10 @@ class SyncEngine:
 
         grade_resell_skus = set()
         resell_marketplace = self._current_marketplace()
-        for row in chunk:
+        pending = list(chunk)
+        attempts = {}
+        while pending:
+            row = pending.pop(0)
             product = self._parse_listing_report(row)
             sku = product['sku']
             asin = product['asin']
@@ -1078,105 +1163,124 @@ class SyncEngine:
                 _merge_catalog(product, catalog_by_asin[asin])
 
             try:
-                # Contenitore della famiglia (non un'offerta vendibile a sé) — salta.
-                if product.get('is_parent_listing'):
-                    skipped += 1
-                    lines.append(f'SALTATO (parent listing): {sku} / {asin}')
-                    continue
-
-                parent_asin = product.get('parent_asin')
-                if parent_asin:
-                    # --- Variante di una famiglia (relationships dal Catalog API) ---
-                    res, msg = self._process_variant_listing(
-                        product, parent_asin, product_type_odoo, maps, update_existing,
-                    )
-                    if res == 'created':
-                        created += 1
-                    elif res == 'updated':
-                        updated += 1
-                    else:
+                with self.env.cr.savepoint():
+                    # Contenitore della famiglia (non un'offerta vendibile a sé) — salta.
+                    if product.get('is_parent_listing'):
                         skipped += 1
-                    lines.append(msg)
-                    continue
+                        lines.append(f'SALTATO (parent listing): {sku} / {asin}')
+                        continue
 
-                # --- Prodotto semplice (comportamento invariato) ---
-                # SKU superato dalla versione '+' con lo stesso ASIN: marca inattivo e salta.
-                best_sku = best_sku_by_asin.get(asin) if asin else None
-                if best_sku and best_sku != sku and best_sku.endswith('+'):
-                    existing = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
+                    parent_asin = product.get('parent_asin')
+                    if parent_asin:
+                        # --- Variante di una famiglia (relationships dal Catalog API) ---
+                        res, msg = self._process_variant_listing(
+                            product, parent_asin, product_type_odoo, maps, update_existing,
+                        )
+                        if res == 'created':
+                            created += 1
+                        elif res == 'updated':
+                            updated += 1
+                        else:
+                            skipped += 1
+                        lines.append(msg)
+                        continue
+
+                    # --- Prodotto semplice (comportamento invariato) ---
+                    # SKU superato dalla versione '+' con lo stesso ASIN: marca inattivo e salta.
+                    best_sku = best_sku_by_asin.get(asin) if asin else None
+                    if best_sku and best_sku != sku and best_sku.endswith('+'):
+                        existing = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
+                        if existing:
+                            existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
+                        skipped += 1
+                        lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
+                        continue
+
+                    # Stessa guardia, ma con la versione '+' già in Odoo invece
+                    # che nello stesso report (vedi _MatchMaps.find_superseding).
+                    superseding = maps.find_superseding(sku)
+                    if superseding:
+                        skipped += 1
+                        lines.append(
+                            f'SALTATO (sostituito da {sku}+ già in Odoo, id={superseding.id}): {sku}'
+                        )
+                        continue
+
+                    # ASIN di una variante di famiglia già esistente, ma riga non
+                    # riconosciuta come variante: saltare invece di creare un
+                    # semplice duplicato (vedi _MatchMaps.find_family_by_variant_asin).
+                    family = maps.find_family_by_variant_asin(asin)
+                    if family:
+                        attached = self._attach_listing_to_existing_variant(product, maps)
+                        if attached:
+                            updated += 1
+                            lines.append(self._attached_listing_msg(
+                                product, attached, 'riga non riconosciuta come variante'))
+                            continue
+                        skipped += 1
+                        lines.append(
+                            f'SALTATO (ASIN di una variante della famiglia "{family.name[:40]}" '
+                            f'id={family.id}, riga non riconosciuta come variante): {sku} / {asin}'
+                        )
+                        continue
+
+                    # find_simple ritorna None anche quando il match trovato è in
+                    # realtà un template famiglia (vedi _MatchMaps.find_simple) —
+                    # ricade sul controllo variant_tmpl_by_sku sotto invece di
+                    # corrompere la famiglia con _update_product.
+                    existing = maps.find_simple(sku, asin, product['ean'])
                     if existing:
-                        existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
-                    skipped += 1
-                    lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
-                    continue
-
-                # Stessa guardia, ma con la versione '+' già in Odoo invece
-                # che nello stesso report (vedi _MatchMaps.find_superseding).
-                superseding = maps.find_superseding(sku)
-                if superseding:
-                    skipped += 1
-                    lines.append(
-                        f'SALTATO (sostituito da {sku}+ già in Odoo, id={superseding.id}): {sku}'
-                    )
-                    continue
-
-                # ASIN di una variante di famiglia già esistente, ma riga non
-                # riconosciuta come variante: saltare invece di creare un
-                # semplice duplicato (vedi _MatchMaps.find_family_by_variant_asin).
-                family = maps.find_family_by_variant_asin(asin)
-                if family:
-                    skipped += 1
-                    lines.append(
-                        f'SALTATO (ASIN di una variante della famiglia "{family.name[:40]}" '
-                        f'id={family.id}, riga non riconosciuta come variante): {sku} / {asin}'
-                    )
-                    continue
-
-                # find_simple ritorna None anche quando il match trovato è in
-                # realtà un template famiglia (vedi _MatchMaps.find_simple) —
-                # ricade sul controllo variant_tmpl_by_sku sotto invece di
-                # corrompere la famiglia con _update_product.
-                existing = maps.find_simple(sku, asin, product['ean'])
-                if existing:
-                    if update_existing:
-                        self._update_product(existing, product)
-                        updated += 1
-                        msg = f'AGGIORNATO: {sku} / {product["asin"]} — {product["name"][:50]}'
-                    else:
+                        if update_existing:
+                            self._update_product(existing, product)
+                            updated += 1
+                            msg = f'AGGIORNATO: {sku} / {product["asin"]} — {product["name"][:50]}'
+                        else:
+                            skipped += 1
+                            msg = f'SALTATO (già esiste): {sku}'
+                        result_tmpl = existing
+                    elif maps.find_known_family(sku):
+                        # Vedi commento su _MatchMaps.find_known_family: SKU già
+                        # di una famiglia esistente, riga senza ASIN nel report
+                        # (quirk noto del report bulk Amazon: a volte omette
+                        # l'ASIN anche se il listing ce l'ha, verificato dal vivo
+                        # via Listings API in tempo reale sullo stesso SKU) —
+                        # senza ASIN non possiamo instradare su
+                        # _process_variant_listing, e chiamare _update_product qui
+                        # scriverebbe campi "semplice" su un template famiglia
+                        # (corrompendolo). Meglio saltare che creare un duplicato o
+                        # corrompere la famiglia.
+                        variant_tmpl = maps.find_known_family(sku)
                         skipped += 1
-                        msg = f'SALTATO (già esiste): {sku}'
-                    result_tmpl = existing
-                elif maps.find_known_family(sku):
-                    # Vedi commento su _MatchMaps.find_known_family: SKU già
-                    # di una famiglia esistente, riga senza ASIN nel report
-                    # (quirk noto del report bulk Amazon: a volte omette
-                    # l'ASIN anche se il listing ce l'ha, verificato dal vivo
-                    # via Listings API in tempo reale sullo stesso SKU) —
-                    # senza ASIN non possiamo instradare su
-                    # _process_variant_listing, e chiamare _update_product qui
-                    # scriverebbe campi "semplice" su un template famiglia
-                    # (corrompendolo). Meglio saltare che creare un duplicato o
-                    # corrompere la famiglia.
-                    variant_tmpl = maps.find_known_family(sku)
-                    skipped += 1
-                    msg = (
-                        f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
-                        f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
-                    )
-                    result_tmpl = None
-                else:
-                    result_tmpl = self._create_product(product, product_type_odoo)
-                    created += 1
-                    msg = f'CREATO: {sku} / {product["asin"]} — {product["name"][:50]}'
+                        msg = (
+                            f'SALTATO (SKU già di una famiglia esistente "{variant_tmpl.name[:40]}" '
+                            f'id={variant_tmpl.id} — riga senza ASIN nel report): {sku}'
+                        )
+                        result_tmpl = None
+                    else:
+                        result_tmpl = self._create_product(product, product_type_odoo)
+                        created += 1
+                        msg = f'CREATO: {sku} / {product["asin"]} — {product["name"][:50]}'
 
-                # Aggiorna le mappe in-memory: senza questo, un ASIN che compare più
-                # volte nello stesso chunk sotto SKU diversi (listing raggruppati
-                # 'amzn.gr.*', varianti 'stickerless', typo nello SKU) non verrebbe
-                # riconosciuto come lo stesso prodotto e finirebbe duplicato.
-                if result_tmpl:
-                    maps.register_simple(sku, asin, product['ean'], result_tmpl)
-                lines.append(msg)
+                    # Aggiorna le mappe in-memory: senza questo, un ASIN che compare più
+                    # volte nello stesso chunk sotto SKU diversi (listing raggruppati
+                    # 'amzn.gr.*', varianti 'stickerless', typo nello SKU) non verrebbe
+                    # riconosciuto come lo stesso prodotto e finirebbe duplicato.
+                    if result_tmpl:
+                        maps.register_simple(sku, asin, product['ean'], result_tmpl)
+                    lines.append(msg)
             except Exception as exc:
+                # Il savepoint ha già annullato solo questa riga; la cache
+                # dell'ambiente può però ancora contenere valori scritti
+                # prima dell'annullamento.
+                self.env.invalidate_all()
+                key = id(row)
+                if getattr(exc, 'pgcode', None) in _RETRYABLE_PGCODES and attempts.get(key, 0) < _ROW_RETRY_MAX:
+                    attempts[key] = attempts.get(key, 0) + 1
+                    _log.warning('Full import: %s su %s, ripeto la riga (tentativo %d/%d)',
+                                 exc.pgcode, sku, attempts[key], _ROW_RETRY_MAX)
+                    time.sleep(attempts[key])
+                    pending.insert(0, row)
+                    continue
                 errors += 1
                 msg = f'ERRORE {sku}: {exc}'
                 _log.error(msg, exc_info=True)
@@ -1204,6 +1308,7 @@ class SyncEngine:
         Processa una pagina di listing Amazon (~20 prodotti).
         Ritorna il next_token per la pagina successiva, o None se l'import è completo.
         """
+        self.env = self.env(context=dict(self.env.context, **_IMPORT_MAIL_CTX))
         items, next_token = self.client.fetch_listings_page(page_token)
         if not items:
             return None
@@ -2040,6 +2145,10 @@ class SyncEngine:
                 # perché la vecchia versione di questo controllo nullificava
                 # 'conflict' ogni volta che era già una famiglia, nascondendo
                 # anche questo caso genuino invece di segnalarlo.
+                attached = self._attach_listing_to_existing_variant(product, maps)
+                if attached:
+                    return 'updated', self._attached_listing_msg(
+                        product, attached, f'parent_asin {parent_asin} invece di {conflict.x_amazon_parent_asin}')
                 msg = (
                     f'SALTATO (conflitto): {sku} / {asin} risulta già nella famiglia '
                     f'"{conflict.name[:40]}" (id={conflict.id}, parent_asin={conflict.x_amazon_parent_asin}) '
@@ -2061,6 +2170,11 @@ class SyncEngine:
             # stock.quant/righe ordine, troppo rischioso in automatico
             # dentro il loop di import. Segnala, non creare un'altra
             # variante duplicata.
+            if conflict.x_amazon_parent_asin:
+                attached = self._attach_listing_to_existing_variant(product, maps)
+                if attached:
+                    return 'updated', self._attached_listing_msg(
+                        product, attached, f'su Amazon appartiene alla famiglia {parent_asin}')
             msg = (
                 f'SALTATO (conflitto): {sku} / {asin} esiste già come '
                 f'{"prodotto semplice" if not conflict.x_amazon_parent_asin else "famiglia diversa"} '

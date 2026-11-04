@@ -577,10 +577,12 @@ class AmazonSyncLog(models.Model):
     # report: non serve a rispettare un rate limit (full_import_report_rows
     # non chiama mai Amazon, verificato nel codice), solo a non perdere tutto
     # il lavoro fatto se il thread venisse interrotto a metà (vedi
-    # _start_thread). 10x il vecchio _REPORT_CHUNK_SIZE (200, dimensionato
-    # per il tick di cron, non per un limite reale) — valore di partenza,
-    # non ancora misurato a fondo su un catalogo molto grande.
-    _ROW_COMMIT_BATCH = 2000
+    # _start_thread). Era 2000: per tutto il blocco (~45 minuti al ritmo
+    # misurato il 2026-11-03) il lavoro restava in una transazione non
+    # salvata — invisibile da fuori, e perso per intero quando l'import è
+    # caduto per un deadlock. 500: avanzamento visibile ogni pochi minuti, e
+    # il costo fisso per blocco (mappe di abbinamento, ~4 s) resta piccolo.
+    _ROW_COMMIT_BATCH = 500
 
     @api.model
     def _thread_full_import(self, db, uid, ctx, log_id):
@@ -719,6 +721,10 @@ class AmazonSyncLog(models.Model):
                                 log_rec, rows, row_offset, SyncLog._ROW_COMMIT_BATCH, update_existing,
                             )
                             env.cr.commit()
+                            # Cache dell'ambiente svuotata a ogni blocco: con
+                            # migliaia di prodotti creati nello stesso thread
+                            # continuava a crescere.
+                            env.invalidate_all()
 
                     msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
                     SyncLog._append_log_line(log_rec, msg)
@@ -741,6 +747,10 @@ class AmazonSyncLog(models.Model):
                 SyncLog._finish_full_import(log_rec)
             except Exception as exc:
                 _log.error('Thread full_import fallito: %s', exc, exc_info=True)
+                # Senza rollback, se l'errore ha lasciato la transazione in
+                # stato "aborted" anche questa scrittura fallisce e il log
+                # resta "running" per ore (import del 2026-11-03).
+                env.cr.rollback()
                 log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': fields.Datetime.now()})
                 params.set_param('ke_amazon_sync.import_state', 'idle')
                 env.cr.commit()
