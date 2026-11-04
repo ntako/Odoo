@@ -97,3 +97,47 @@ class TestCatalogLanguage(TransactionCase):
         self.assertIn('Descripción española', tmpl.with_context(lang='es_ES').description_sale)
         self.assertEqual(tmpl.with_context(lang='it_IT').description_sale, 'Descrizione italiana',
                          'la descrizione italiana non si tocca')
+
+    def _es_family_client(self, mapping, marketplace_id, descriptions):
+        class Client(FakeSpApiClient):
+            def get_catalog_items_batch(self, asins):
+                out = super().get_catalog_items_batch(asins)
+                for a in asins:
+                    if descriptions:
+                        out[a]['attributes'] = {'product_description': _localized(descriptions)}
+                return out
+        return Client(mapping, marketplace_id=marketplace_id)
+
+    def _run_rows(self, client, rows):
+        eng = self.se.SyncEngine(self.env, client)
+        log = self.env['ke.amazon.sync.log'].create({'name': 'ZZT lingua famiglia', 'sync_type': 'full_import'})
+        with no_commit(self.env):
+            eng.full_import_report_rows(log, rows, 0, len(rows), True)
+        return log
+
+    def test_family_template_gets_text_in_secondary_language(self):
+        it_lang = self.env['res.lang'].with_context(active_test=False).search([('code', '=', 'it_IT')])
+        it_lang.write({'active': True})
+        self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT Italia lingua', 'code': 'ZZLI', 'marketplace_id': 'ZZ_LANG_IT',
+            'lang_id': it_lang.id, 'active': True,
+        })
+        mapping = {'B0ZZLFAM1': 'B0ZZLFAMPAR', 'B0ZZLFAM2': 'B0ZZLFAMPAR', 'B0ZZLFAM3': 'B0ZZLFAMPAR'}
+        self._run_rows(self._es_family_client(mapping, 'ZZ_LANG_IT', [('it_IT', 'Descrizione famiglia')]), [
+            make_report_row('ZZT-LFAM-1', asin='B0ZZLFAM1', name='Mulinello Test (Misura 1000)'),
+            make_report_row('ZZT-LFAM-2', asin='B0ZZLFAM2', name='Mulinello Test (Misura 2000)'),
+        ])
+        tmpl = self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZLFAMPAR')])
+        self.assertEqual(len(tmpl), 1)
+        self.assertEqual(len(tmpl.product_variant_ids), 2)
+
+        # ES: una variante già esistente e una nuova nella stessa famiglia.
+        self._run_rows(self._es_family_client(mapping, 'ZZ_LANG_ES', [('es_ES', 'Descripción familia')]), [
+            make_report_row('ZZT-LFAM-1', asin='B0ZZLFAM1', name='Carrete Test (Tamaño 1000)'),
+            make_report_row('ZZT-LFAM-3', asin='B0ZZLFAM3', name='Carrete Test (Tamaño 3000)'),
+        ])
+        tmpl.invalidate_recordset()
+        self.assertEqual(tmpl.with_context(lang='es_ES').name, 'Carrete Test')
+        self.assertIn('Descripción familia', tmpl.with_context(lang='es_ES').description_sale)
+        self.assertEqual(tmpl.with_context(lang='it_IT').name, 'Mulinello Test', "l'italiano non si tocca")
+        self.assertIn('Descrizione famiglia', tmpl.with_context(lang='it_IT').description_sale)

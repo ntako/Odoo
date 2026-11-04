@@ -924,6 +924,7 @@ class SyncEngine:
         if not variant:
             return None
         self._upsert_listing(variant, product)
+        self._write_family_text(variant.product_tmpl_id, product)
         return variant
 
     def _attached_listing_msg(self, product, variant, reason):
@@ -1919,6 +1920,7 @@ class SyncEngine:
         grezza invece non applica nessun fallback: una chiave assente resta
         assente.
         """
+        template.flush_recordset([field])
         self.env.cr.execute(
             f'SELECT ({field}->>%s) FROM product_template WHERE id = %s',
             (lang, template.id),
@@ -1946,6 +1948,25 @@ class SyncEngine:
             vals['description_sale'] = description_sale
         if vals:
             template.with_context(**ctx).write(vals)
+
+    def _write_family_text(self, template, product):
+        """
+        Nome/descrizione della FAMIGLIA nella lingua del marketplace corrente,
+        dalla riga di una sua variante (nome senza il suffisso di variante,
+        come in _create_configurable_template). Prima solo i prodotti
+        semplici ricevevano il testo tradotto (_update_product): le righe
+        ES/FR/UK delle varianti di famiglie già create da IT lasciavano il
+        template solo in italiano — trovato il 2026-11-04 durante l'import
+        da capo (10 famiglie su 885 con testo ES, a ES già avviato). Stesse
+        regole di _write_localized_text: solo slot vuoto, nessun effetto
+        senza lingua del marketplace.
+        """
+        name = product.get('name') or ''
+        self._write_localized_text(
+            template,
+            name=_strip_variant_suffix(name) or name or None,
+            description_sale=self._format_description(product) or None,
+        )
 
     def _create_product(self, data, product_type_odoo):
         categ = _get_or_create_category(self.env, data.get('category', ''))
@@ -2452,6 +2473,7 @@ class SyncEngine:
                 if not existing_variant.image_variant_1920:
                     self._remember_image_url(existing_variant, product.get('image_url'))
                 self._remember_gallery(existing_variant, product)
+                self._write_family_text(tmpl, product)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
                 # L'FNSKU della LISTING di questo marketplace va invalidato
@@ -2788,6 +2810,7 @@ class SyncEngine:
         # Trovato dal vivo il 2026-10-27, segnalato dall'utente.
         self._remember_image_url(variant, product.get('image_url'))
         self._remember_gallery(variant, product)
+        self._write_family_text(tmpl, product)
         return variant
 
     @staticmethod
