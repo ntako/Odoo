@@ -85,19 +85,20 @@ class TestChainedFnskuLog(TransactionCase):
         self.assertEqual(self.parent.state, 'done')
         self.assertEqual(self.params.get_param('ke_amazon_sync.import_state'), 'idle')
 
-    def test_image_download_starts_after_fnsku_not_in_parallel(self):
-        # Il Full Import non scarica più le immagini: partono a fine catena,
-        # dopo l'Import FNSKU (due thread sugli stessi prodotti = deadlock).
+    def test_image_download_not_started_by_the_chain(self):
+        # Le immagini le avvia l'utente ("Scarica immagini mancanti"), non la
+        # catena del Full Import — deciso il 2026-11-04.
         started = []
         with patch.object(type(self.SyncLog), '_start_image_download',
                           lambda self, name: started.append(name) or None):
             child = self._finish_full_import()
-            self.assertFalse(started, 'non durante l\'Import FNSKU')
             with no_commit(self.env):
                 self.SyncLog._finish_fnsku_import(child)
-        self.assertEqual(started, ['Download immagini (dopo import completo)'])
+        self.assertFalse(started)
+        self.assertEqual(self.parent.state, 'done')
+        self.assertIn('Scarica immagini mancanti', self.parent.log_lines)
 
-    def test_image_download_starts_when_fnsku_is_not_chained(self):
+    def test_image_download_not_started_when_fnsku_is_not_chained(self):
         other = self.SyncLog.create({
             'name': 'ZZT altro import FNSKU', 'sync_type': 'import_fnsku', 'state': 'running',
         })
@@ -107,4 +108,4 @@ class TestChainedFnskuLog(TransactionCase):
         with patch.object(type(self.SyncLog), '_start_image_download',
                           lambda self, name: started.append(name) or None):
             self._finish_full_import()
-        self.assertEqual(len(started), 1)
+        self.assertFalse(started)
