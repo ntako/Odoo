@@ -755,6 +755,14 @@ class AmazonSyncLog(models.Model):
                 except Exception as exc:
                     _log.warning('Ricalcolo nomi famiglie fallito (non bloccante): %s', exc)
 
+                try:
+                    with env.cr.savepoint():
+                        n_brands = SyncEngine(env, None).assign_brands_from_amazon()
+                    SyncLog._append_log_line(log_rec, f'Marche di catalogo assegnate/aggiornate: {n_brands} prodotti.')
+                    env.cr.commit()
+                except Exception as exc:
+                    _log.warning('Assegnazione marche fallita (non bloccante): %s', exc)
+
                 SyncLog._finish_full_import(log_rec)
             except Exception as exc:
                 _log.error('Thread full_import fallito: %s', exc, exc_info=True)

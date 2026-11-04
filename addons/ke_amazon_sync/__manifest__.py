@@ -47,6 +47,7 @@
         'wizard/amazon_inbound_box_scan_wizard_views.xml',
         'views/amazon_inbound_plan_views.xml',
         'views/menu.xml',
+        'views/product_brand_views.xml',
     ],
     'assets': {
         'web.assets_backend': [

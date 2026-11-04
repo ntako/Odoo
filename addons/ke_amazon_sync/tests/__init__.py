@@ -22,3 +22,4 @@ from . import test_full_import_robustness
 from . import test_catalog_language
 from . import test_gallery_images
 from . import test_family_names
+from . import test_brands

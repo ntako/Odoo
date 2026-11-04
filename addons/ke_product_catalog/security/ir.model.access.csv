@@ -1,3 +1,9 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_ke_product_media_user,ke.product.media utente,model_ke_product_media,base.group_user,1,0,0,0
 access_ke_product_media_manager,ke.product.media gestione,model_ke_product_media,product.group_product_manager,1,1,1,1
+access_ke_product_brand_user,ke.product.brand utente,model_ke_product_brand,base.group_user,1,0,0,0
+access_ke_product_brand_manager,ke.product.brand gestione,model_ke_product_brand,product.group_product_manager,1,1,1,1
+access_ke_product_brand_alias_user,ke.product.brand.alias utente,model_ke_product_brand_alias,base.group_user,1,0,0,0
+access_ke_product_brand_alias_manager,ke.product.brand.alias gestione,model_ke_product_brand_alias,product.group_product_manager,1,1,1,1
+access_ke_product_brand_merge,ke.product.brand.merge,model_ke_product_brand_merge,product.group_product_manager,1,1,1,1
+access_ke_product_brand_alias_import,ke.product.brand.alias.import,model_ke_product_brand_alias_import,product.group_product_manager,1,1,1,1

@@ -24,6 +24,9 @@ class AmazonListing(models.Model):
 
     sku = fields.Char('SKU', index=True)
     asin = fields.Char('ASIN', index=True)
+    brand = fields.Char(
+        'Marca su Amazon', help='Marca del prodotto su QUESTO marketplace, com\'è nel catalogo Amazon.',
+    )
     item_name = fields.Char(
         'Titolo Amazon', help="Titolo dell'annuncio su questo marketplace, nella sua lingua "
                              "(dal report listing del Full Import). Usato per il nome delle "

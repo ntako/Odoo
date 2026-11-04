@@ -6,6 +6,7 @@ class ProductTemplate(models.Model):
 
     # Tutte le immagini del prodotto, comprese quelle delle singole varianti.
     ke_media_ids = fields.One2many('ke.product.media', 'product_tmpl_id', string='Galleria immagini')
+    ke_brand_id = fields.Many2one('ke.product.brand', string='Marca', index=True, ondelete='set null')
 
 
 class ProductProduct(models.Model):

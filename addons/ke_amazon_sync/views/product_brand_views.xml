@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_ke_product_brand_form_amazon" model="ir.ui.view">
+        <field name="name">ke.product.brand.form.amazon</field>
+        <field name="model">ke.product.brand</field>
+        <field name="inherit_id" ref="ke_product_catalog.view_ke_product_brand_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='to_review']" position="after">
+                <field name="amazon_name" placeholder="Valore esatto per Amazon"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_ke_product_brand_list_amazon" model="ir.ui.view">
+        <field name="name">ke.product.brand.list.amazon</field>
+        <field name="model">ke.product.brand</field>
+        <field name="inherit_id" ref="ke_product_catalog.view_ke_product_brand_list"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='name']" position="after">
+                <field name="amazon_name" optional="show"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

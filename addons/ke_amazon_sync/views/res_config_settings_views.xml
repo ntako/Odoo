@@ -50,6 +50,13 @@
                                     class="btn btn-secondary"
                                     confirm="Avvio il download delle immagini mancanti in background. Continuare?"/>
                         </setting>
+                        <setting string="Marche"
+                                 help="Assegna la marca di catalogo a tutti i prodotti dalla marca Amazon (nomi alternativi compresi). Gira anche da solo a fine Full Import. Non cambia le marche già confermate. Nessuna chiamata Amazon.">
+                            <button name="action_assign_brands"
+                                    string="Assegna marche da Amazon"
+                                    type="object"
+                                    class="btn btn-secondary"/>
+                        </setting>
                         <setting string="Nomi famiglie"
                                  help="Nome di ogni famiglia in ogni lingua dei marketplace attivi: la parte comune ai titoli Amazon delle sue varianti. Gira anche da solo a fine Full Import. Non tocca i nomi scelti a mano. Nessuna chiamata Amazon.">
                             <button name="action_recompute_family_names"

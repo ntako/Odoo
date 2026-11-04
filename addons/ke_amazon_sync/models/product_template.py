@@ -576,9 +576,13 @@ class ProductTemplate(models.Model):
             requirements = 'LISTING_OFFER_ONLY'
         else:
             # --- Scenario B: nessun ASIN → listing completo ---
-            if not self.x_amazon_brand:
+            # Marca da inviare: quella che Amazon ha per il prodotto, altrimenti
+            # il "Nome su Amazon" della marca di catalogo (ke_product_catalog).
+            amazon_brand = self.x_amazon_brand or self.ke_brand_id.amazon_name or ''
+            if not amazon_brand:
                 raise UserError(
-                    'Inserisci il Brand Amazon (campo "Brand Amazon") prima di pubblicare un nuovo listing.'
+                    'Inserisci il Brand Amazon (campo "Brand Amazon"), o il "Nome su Amazon" della marca, '
+                    'prima di pubblicare un nuovo listing.'
                 )
             qty = int(self.with_context(warehouse=False).qty_available)
             base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url', '')
@@ -586,7 +590,7 @@ class ProductTemplate(models.Model):
 
             attributes = {
                 'item_name': [{'value': self.name, 'language_tag': client.locale, 'marketplace_id': marketplace_id}],
-                'brand': [{'value': self.x_amazon_brand, 'marketplace_id': marketplace_id}],
+                'brand': [{'value': amazon_brand, 'marketplace_id': marketplace_id}],
                 'condition_type': [{'value': condition, 'marketplace_id': marketplace_id}],
                 'list_price': [{'value': price, 'currency': 'EUR', 'marketplace_id': marketplace_id}],
                 'fulfillment_availability': [{

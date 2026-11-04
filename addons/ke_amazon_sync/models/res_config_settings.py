@@ -283,6 +283,20 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_seed_fbm_stock', log_rec.id)
         return self._open_log_action()
 
+    def action_assign_brands(self):
+        """Marca di catalogo dalla marca Amazon per tutti i prodotti (SyncEngine.assign_brands_from_amazon)."""
+        from ..services.sync_engine import SyncEngine
+        updated = SyncEngine(self.env, None).assign_brands_from_amazon()
+        to_review = self.env['ke.product.brand'].search_count([('to_review', '=', True)])
+        return {
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'title': 'Marche', 'type': 'success', 'sticky': False,
+                'message': f'Prodotti aggiornati: {updated}. Marche da verificare: {to_review} '
+                           f'(Magazzino → Configurazione → Marche).',
+            },
+        }
+
     def action_recompute_family_names(self):
         """
         Ricalcola il nome delle famiglie in ogni lingua dei marketplace attivi

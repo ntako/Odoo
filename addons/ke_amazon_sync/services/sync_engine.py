@@ -936,6 +936,8 @@ class SyncEngine:
             'browse_node_id': data.get('browse_node_id', ''),
             'parent_asin': data.get('parent_asin') or False,
         }
+        if data.get('brand'):
+            vals['brand'] = data['brand']
         # Titolo: solo se presente (le righe senza titolo non cancellano quello noto).
         if data.get('name'):
             vals['item_name'] = data['name']
@@ -949,6 +951,24 @@ class SyncEngine:
         else:
             vals.update({'product_id': variant.id, 'marketplace_id': marketplace.id})
             Listing.create(vals)
+        self._assign_brand(variant.product_tmpl_id, data.get('brand'))
+
+    def _assign_brand(self, template, amazon_brand):
+        """
+        Marca di catalogo (ke_product_catalog) dalla marca Amazon: riconosciuta
+        per nome o nome alternativo (confronto normalizzato), creata "Da
+        verificare" se sconosciuta, nessuna se il nome "non è una marca". Non
+        cambia una marca già confermata sul prodotto (scelta a mano o
+        verificata); sostituisce solo una marca vuota o ancora "Da verificare".
+        """
+        if not amazon_brand or not template:
+            return
+        current = template.ke_brand_id
+        if current and not current.to_review:
+            return
+        brand = self.env['ke.product.brand'].sudo().find_or_create(amazon_brand)
+        if brand != current:
+            template.ke_brand_id = brand
 
     def _attach_listing_to_existing_variant(self, product, maps):
         """
@@ -2135,6 +2155,27 @@ class SyncEngine:
             if t.startswith(cur) or cur == (_strip_variant_suffix(title) or '').strip().casefold():
                 return True
         return False
+
+    def assign_brands_from_amazon(self):
+        """
+        Marca di catalogo per tutti i prodotti dalla loro marca Amazon
+        (x_amazon_brand), stesse regole di _assign_brand; poi elimina le marche
+        "Da verificare" rimaste senza prodotti e propone il "Nome su Amazon"
+        delle marche che non l'hanno. A fine Full Import e dal pulsante in
+        Impostazioni (es. dopo aver importato le corrispondenze). Nessuna
+        chiamata Amazon. Ritorna il numero di prodotti aggiornati.
+        """
+        Tmpl = self.env['product.template'].with_context(active_test=False)
+        Brand = self.env['ke.product.brand'].sudo().with_context(active_test=False)
+        updated = 0
+        for tmpl in Tmpl.search([('x_amazon_brand', '!=', False)]):
+            before = tmpl.ke_brand_id
+            self._assign_brand(tmpl, tmpl.x_amazon_brand)
+            if tmpl.ke_brand_id != before:
+                updated += 1
+        Brand.search([('to_review', '=', True)]).filtered(lambda b: not b.product_count).unlink()
+        Brand.search([('amazon_name', '=', False)])._propose_amazon_name()
+        return updated
 
     def recompute_family_names(self, templates=None):
         """
