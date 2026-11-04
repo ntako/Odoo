@@ -14,6 +14,12 @@ class ProductProduct(models.Model):
         'Amazon SKU (variante)', index=True, copy=False,
         help='SKU Amazon per questa specifica variante.',
     )
+    x_amazon_image_url = fields.Char(
+        'URL immagine Amazon', copy=False, readonly=True,
+        help="Immagine principale (MAIN) dal catalogo Amazon, salvata dal Full Import "
+             "senza scaricarla: la scarica poi 'Scarica immagini mancanti', che parte da "
+             "solo a fine Full Import, senza dover richiamare il Catalog API.",
+    )
     x_amazon_sku_previous = fields.Char(
         'SKU Amazon precedente (variante)', copy=False, readonly=True,
         help='Ultimo SKU sostituito dalla riconciliazione quando Amazon riassegna lo '

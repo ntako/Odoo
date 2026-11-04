@@ -502,15 +502,10 @@ class ProductTemplate(models.Model):
         if not self.x_amazon_asin:
             raise UserError('Questo prodotto non ha un Amazon ASIN.')
 
-        from odoo.addons.ke_amazon_sync.services.sync_engine import _fetch_image_b64
+        from odoo.addons.ke_amazon_sync.services.sync_engine import _best_image_url, _fetch_image_b64
         client = self._get_sp_client()
         catalog = client.get_catalog_item(self.x_amazon_asin)
-        images_data = catalog.get('images', [{}])
-        images_block = images_data[0] if images_data else {}
-        all_images = images_block.get('images', [])
-        main_images = [i.get('link', '') for i in all_images
-                       if i.get('variant') == 'MAIN' and i.get('link')]
-        url = main_images[0] if main_images else ''
+        url = _best_image_url(catalog)
         img = _fetch_image_b64(url) if url else None
         if not img:
             raise UserError('Nessuna immagine disponibile su Amazon per questo prodotto.')

@@ -46,6 +46,34 @@ def _http_session():
     return session
 
 
+# Ruoli delle immagini del Catalog API in ordine di preferenza per
+# l'immagine principale del prodotto: MAIN (principale), poi la prima della
+# galleria (PT01), poi il campione colore (SWCH) — per i prodotti che su
+# Amazon non hanno una MAIN (verificato il 2026-11-04: esistono, es.
+# B0CQ3ZZ3S5 ha solo PT01…PT06).
+_IMAGE_ROLE_PREFERENCE = ('MAIN', 'PT01', 'SWCH')
+
+
+def _best_image_url(catalog):
+    """
+    Indirizzo dell'immagine principale da usare per un articolo del Catalog
+    API: il ruolo preferito disponibile (_IMAGE_ROLE_PREFERENCE) e, di quel
+    ruolo, la versione PIÙ GRANDE. Amazon restituisce ogni immagine in più
+    dimensioni (es. 75x75, 500x500, 1000x1000) in un ordine non fisso —
+    verificato il 2026-11-04: per lo stesso ASIN la prima MAIN era una volta la
+    1000x1000, un'ora dopo la 500x500. Prima si prendeva la prima trovata,
+    quindi a caso una delle tre, miniatura 75x75 compresa.
+    """
+    images = [i for block in (catalog or {}).get('images') or [] for i in block.get('images') or []
+              if i.get('link')]
+    for role in _IMAGE_ROLE_PREFERENCE:
+        candidates = [i for i in images if i.get('variant') == role]
+        if candidates:
+            best = max(candidates, key=lambda i: (i.get('width') or 0) * (i.get('height') or 0))
+            return best['link']
+    return ''
+
+
 def _fetch_image_b64(url):
     """Downloads an image URL and returns base64-encoded bytes, or None on failure."""
     if not url:
@@ -286,12 +314,8 @@ def _merge_catalog(product, catalog):
     product['width_cm'] = _convert_length(item_d.get('width', {}))
     product['height_cm'] = _convert_length(item_d.get('height', {}))
 
-    # Immagini (prima URL disponibile)
-    images_data = catalog.get('images', [{}])
-    images_block = images_data[0] if images_data else {}
-    all_images = images_block.get('images', [])
-    main_images = [i.get('link', '') for i in all_images if i.get('variant') == 'MAIN' and i.get('link')]
-    product['image_url'] = main_images[0] if main_images else ''
+    # Immagine principale: ruolo e dimensione migliori (vedi _best_image_url)
+    product['image_url'] = _best_image_url(catalog)
 
     # Categoria
     summaries_block = catalog.get('summaries', [{}])
@@ -1874,9 +1898,9 @@ class SyncEngine:
             if data.get('brand'):
                 vals['x_amazon_brand'] = data['brand']
                 vals['x_amazon_found_by_manufacturer'] = False
-        img = _fetch_image_b64(data.get('image_url'))
-        if img:
-            vals['image_1920'] = img
+        # Immagine: solo l'indirizzo, scaricata dopo da download_missing_images
+        # (vedi x_amazon_image_url) — scaricarla qui era circa metà del lavoro
+        # di creazione di un prodotto (misurato il 2026-11-03).
         # Crea direttamente nello slot di traduzione del marketplace
         # corrente (vedi _marketplace_lang_context) così name/description_
         # sale nascono già nella lingua giusta, non solo in quella di
@@ -1891,7 +1915,14 @@ class SyncEngine:
             template.product_variant_id, data['fulfillment'], data.get('qty_available') or 0,
         )
         self._upsert_listing(template.product_variant_id, data)
+        self._remember_image_url(template.product_variant_id, data.get('image_url'))
         return template
+
+    @staticmethod
+    def _remember_image_url(variant, url):
+        """Salva l'indirizzo dell'immagine principale da scaricare dopo (vedi x_amazon_image_url)."""
+        if url and variant.x_amazon_image_url != url:
+            variant.x_amazon_image_url = url
 
     def _set_product_attributes(self, template, spec_attrs):
         """Creates product.attribute.line entries as specifications (no variant generation)."""
@@ -2267,10 +2298,8 @@ class SyncEngine:
                 # Backfill per varianti create prima del fix (2026-10-27) che
                 # ha introdotto image_variant_1920 in _add_variant_to_template
                 # — solo se manca ancora, non riscarica a ogni giro.
-                if not existing_variant.image_variant_1920 and product.get('image_url'):
-                    img = _fetch_image_b64(product['image_url'])
-                    if img:
-                        existing_variant.write({'image_variant_1920': img})
+                if not existing_variant.image_variant_1920:
+                    self._remember_image_url(existing_variant, product.get('image_url'))
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
                 # L'FNSKU della LISTING di questo marketplace va invalidato
@@ -2513,9 +2542,8 @@ class SyncEngine:
             vals['x_amazon_browse_node_id'] = first_child['browse_node_id']
         if first_child.get('brand'):
             vals['x_amazon_brand'] = first_child['brand']
-        img = _fetch_image_b64(first_child.get('image_url'))
-        if img:
-            vals['image_1920'] = img
+        # Immagine del template: la imposta download_missing_images da quella
+        # della prima variante (x_amazon_image_url), non scaricata qui.
         template = self.env['product.template'].with_context(
             **self._marketplace_lang_context()
         ).create(vals)
@@ -2597,10 +2625,7 @@ class SyncEngine:
         # restava senza foto propria, mostrando sempre e solo la foto del
         # primo figlio anche per colori/taglie visibilmente diversi.
         # Trovato dal vivo il 2026-10-27, segnalato dall'utente.
-        if product.get('image_url'):
-            img = _fetch_image_b64(product['image_url'])
-            if img:
-                variant.write({'image_variant_1920': img})
+        self._remember_image_url(variant, product.get('image_url'))
         return variant
 
     @staticmethod
@@ -2618,25 +2643,42 @@ class SyncEngine:
     # Funzione: Download immagini mancanti
     # -----------------------------------------------------------------------
 
+    # Immagini scaricate in parallelo (solo HTTP: la scrittura su Odoo resta
+    # in questo thread, un cursore non si condivide): il collo di bottiglia è
+    # l'attesa della rete, non Odoo.
+    _IMAGE_DOWNLOAD_WORKERS = 6
+    _IMAGE_BATCH = 30
+
+    def _catalog_main_image_url(self, asin):
+        """Indirizzo dell'immagine MAIN dal Catalog API — solo ripiego, se il Full Import non l'ha salvato."""
+        catalog = self.client.get_catalog_item(asin) if (self.client and asin) else {}
+        return _best_image_url(catalog)
+
     def download_missing_images(self, log_rec):
         """
-        Scarica dal Catalog API l'immagine mancante per: prodotti semplici
-        (product.template, image_1920) e varianti di famiglia (product.product,
-        image_variant_1920 — la foto PROPRIA della variante, diversa da quella
-        condivisa del template). Prima copriva solo i semplici: una famiglia
-        non ha mai x_amazon_asin sul template (solo x_amazon_parent_asin, vedi
-        _create_configurable_template), quindi i suoi figli restavano fuori
-        da questo strumento anche come backfill manuale — trovato dal vivo il
-        2026-10-27, segnalato dall'utente (varianti senza immagine dopo
-        l'import, la causa in _add_variant_to_template è stata corretta a
-        parte, ma non recupera le varianti già create prima del fix).
+        Scarica l'immagine mancante per: prodotti semplici (product.template,
+        image_1920), varianti di famiglia (product.product, image_variant_1920
+        — la foto PROPRIA della variante) e template di famiglia senza
+        immagine (image_1920, da quella della sua prima variante). Prima
+        copriva solo i semplici: trovato dal vivo il 2026-10-27, varianti
+        senza immagine dopo l'import.
+
+        Dal 2026-11-03 il Full Import non scarica più le immagini: salva solo
+        l'indirizzo (product.product.x_amazon_image_url) e a fine catena
+        (dopo l'Import FNSKU) fa partire questo. Qui si usa quell'indirizzo
+        senza chiamare Amazon; il Catalog API resta solo un ripiego per i
+        prodotti che non l'hanno (creati prima di questa modifica). I download
+        girano in parallelo a lotti, le scritture in sequenza.
         """
-        simple_products = self.env['product.template'].search([
+        from concurrent.futures import ThreadPoolExecutor
+
+        Template = self.env['product.template']
+        simple_products = Template.search([
             ('x_amazon_asin', '!=', False),
             ('image_1920', '=', False),
         ])
         family_variants = self.env['product.product'].search([
-            ('x_amazon_asin', '!=', False),
+            '|', ('x_amazon_asin', '!=', False), ('x_amazon_image_url', '!=', False),
             ('image_variant_1920', '=', False),
             # product_variant_count non è stored (niente domain diretto) —
             # x_amazon_parent_asin sul template sì, ed è vero per ogni
@@ -2644,49 +2686,68 @@ class SyncEngine:
             # prodotto semplice: stesso filtro, campo diverso.
             ('product_tmpl_id.x_amazon_parent_asin', '!=', False),
         ])
-        # (record, campo immagine da scrivere) — stesso ciclo per entrambi,
-        # solo il campo di destinazione cambia a seconda del tipo di record.
-        targets = [(p, 'image_1920') for p in simple_products] \
-            + [(v, 'image_variant_1920') for v in family_variants]
+        family_templates = Template.search([
+            ('x_amazon_parent_asin', '!=', False),
+            ('image_1920', '=', False),
+        ])
+
+        def simple_url(tmpl):
+            return tmpl.product_variant_id.x_amazon_image_url, tmpl.x_amazon_asin
+
+        def variant_url(variant):
+            return variant.x_amazon_image_url, variant.x_amazon_asin
+
+        def family_url(tmpl):
+            with_url = tmpl.product_variant_ids.filtered('x_amazon_image_url')[:1]
+            return with_url.x_amazon_image_url, ''
+
+        # (record, campo immagine, funzione che dà (url salvato, asin di ripiego))
+        targets = [(p, 'image_1920', simple_url) for p in simple_products] \
+            + [(v, 'image_variant_1920', variant_url) for v in family_variants] \
+            + [(t, 'image_1920', family_url) for t in family_templates]
         total = len(targets)
-        ok = errors = skipped = 0
+        ok = errors = skipped = catalog_calls = 0
         lines = []
-        # Progresso scritto su log_rec periodicamente (non solo a fine ciclo):
-        # con centinaia/migliaia di prodotti senza immagine, l'utente vedrebbe
-        # altrimenti tutti i contatori a zero per lungo tempo, senza modo di
-        # distinguere "sta lavorando" da "è bloccato".
-        _PROGRESS_EVERY = 20
 
         log_rec.write({'products_total': total})
         self.env.cr.commit()
 
-        for idx, (product, image_field) in enumerate(targets, start=1):
-            asin = product.x_amazon_asin
-            try:
-                catalog = self.client.get_catalog_item(asin)
-                images_data = catalog.get('images', [{}])
-                images_block = images_data[0] if images_data else {}
-                all_images = images_block.get('images', [])
-                main_images = [i.get('link', '') for i in all_images
-                               if i.get('variant') == 'MAIN' and i.get('link')]
-                url = main_images[0] if main_images else ''
-                img = _fetch_image_b64(url) if url else None
-                if img:
-                    product.write({image_field: img})
-                    ok += 1
-                    msg = f'OK {product.default_code or asin}: immagine scaricata'
-                else:
-                    skipped += 1
-                    msg = f'SKIP {product.default_code or asin}: nessuna immagine disponibile'
-            except Exception as exc:
-                errors += 1
-                msg = f'ERRORE {product.default_code or asin}: {exc}'
-                _log.error(msg, exc_info=True)
-
-            lines.append(msg)
-            _log.info(msg)
-
-            if idx % _PROGRESS_EVERY == 0:
+        with ThreadPoolExecutor(max_workers=self._IMAGE_DOWNLOAD_WORKERS) as pool:
+            for start in range(0, total, self._IMAGE_BATCH):
+                batch = targets[start:start + self._IMAGE_BATCH]
+                urls = []
+                for record, _field, url_of in batch:
+                    url, asin = url_of(record)
+                    if not url and asin:
+                        try:
+                            url = self._catalog_main_image_url(asin)
+                            catalog_calls += 1
+                            if url and record._name == 'product.product':
+                                record.x_amazon_image_url = url
+                            elif url:
+                                record.product_variant_id.x_amazon_image_url = url
+                        except Exception as exc:
+                            _log.warning('Catalog API per immagine di %s fallito: %s', asin, exc)
+                            url = ''
+                    urls.append(url)
+                images = list(pool.map(lambda u: _fetch_image_b64(u) if u else None, urls))
+                for (record, image_field, _url_of), url, img in zip(batch, urls, images):
+                    code = record.default_code or record.x_amazon_asin or record.id
+                    try:
+                        if img:
+                            record.write({image_field: img})
+                            ok += 1
+                            msg = f'OK {code}: immagine scaricata'
+                        else:
+                            skipped += 1
+                            msg = f'SKIP {code}: nessuna immagine disponibile'
+                    except Exception as exc:
+                        errors += 1
+                        msg = f'ERRORE {code}: {exc}'
+                        _log.error(msg, exc_info=True)
+                    lines.append(msg)
+                # Progresso a ogni lotto: con migliaia di immagini, senza
+                # l'utente vedrebbe i contatori a zero per molto tempo.
                 log_rec.write({
                     'products_updated': ok,
                     'products_skipped': skipped,
@@ -2695,6 +2756,7 @@ class SyncEngine:
                 })
                 self.env.cr.commit()
 
+        lines.append(f'Chiamate al Catalog API per indirizzi mancanti: {catalog_calls}.')
         log_rec.write({
             'state': 'error' if errors and not ok else 'done',
             'products_total': total,

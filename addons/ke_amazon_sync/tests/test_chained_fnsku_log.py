@@ -33,6 +33,12 @@ class TestChainedFnskuLog(TransactionCase):
         self.parent = self.SyncLog.create({
             'name': 'ZZT import completo', 'sync_type': 'full_import', 'state': 'running',
         })
+        # Dal 2026-11-03 la chiusura del Full Import avvia anche il download
+        # immagini (res.config.settings._start_thread): mai un thread vero
+        # dai test, con il database di test e le sue credenziali.
+        thread_patcher = patch.object(type(self.env['res.config.settings']), '_start_thread', lambda *a: None)
+        thread_patcher.start()
+        self.addCleanup(thread_patcher.stop)
 
     def _finish_full_import(self):
         with no_commit(self.env), patch.object(type(self.SyncLog), '_start_thread', lambda *a: None):
@@ -78,3 +84,27 @@ class TestChainedFnskuLog(TransactionCase):
         self.assertFalse(child, 'nessun nuovo Import FNSKU con un altro già in corso')
         self.assertEqual(self.parent.state, 'done')
         self.assertEqual(self.params.get_param('ke_amazon_sync.import_state'), 'idle')
+
+    def test_image_download_starts_after_fnsku_not_in_parallel(self):
+        # Il Full Import non scarica più le immagini: partono a fine catena,
+        # dopo l'Import FNSKU (due thread sugli stessi prodotti = deadlock).
+        started = []
+        with patch.object(type(self.SyncLog), '_start_image_download',
+                          lambda self, name: started.append(name) or None):
+            child = self._finish_full_import()
+            self.assertFalse(started, 'non durante l\'Import FNSKU')
+            with no_commit(self.env):
+                self.SyncLog._finish_fnsku_import(child)
+        self.assertEqual(started, ['Download immagini (dopo import completo)'])
+
+    def test_image_download_starts_when_fnsku_is_not_chained(self):
+        other = self.SyncLog.create({
+            'name': 'ZZT altro import FNSKU', 'sync_type': 'import_fnsku', 'state': 'running',
+        })
+        self.params.set_param('ke_amazon_sync.fnsku_import_state', 'running')
+        self.params.set_param('ke_amazon_sync.fnsku_import_log_id', str(other.id))
+        started = []
+        with patch.object(type(self.SyncLog), '_start_image_download',
+                          lambda self, name: started.append(name) or None):
+            self._finish_full_import()
+        self.assertEqual(len(started), 1)

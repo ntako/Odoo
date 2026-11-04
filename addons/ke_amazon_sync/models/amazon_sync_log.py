@@ -812,6 +812,12 @@ class AmazonSyncLog(models.Model):
         log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
         self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.import_state', 'idle')
         self.env.cr.commit()
+        # Senza Import FNSKU incatenato le immagini partono subito (vedi
+        # _close_parent_log per il caso normale).
+        img_log = SyncLog._start_image_download('Download immagini (dopo import completo)')
+        if img_log:
+            SyncLog._append_log_line(log_rec, f'Download immagini avviato (log #{img_log.id}).')
+            self.env.cr.commit()
 
     def _close_parent_log(self, child_log, error=None, note=None):
         """
@@ -840,6 +846,15 @@ class AmazonSyncLog(models.Model):
         if parent.sync_type == 'full_import':
             self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.import_state', 'idle')
         self.env.cr.commit()
+        # Il Full Import non scarica più le immagini (salva solo l'indirizzo,
+        # vedi x_amazon_image_url): partono qui, DOPO l'Import FNSKU e non in
+        # parallelo — due thread che scrivono sugli stessi prodotti sono la
+        # situazione che ha causato il deadlock del 2026-11-03.
+        if parent.sync_type == 'full_import':
+            img_log = self._start_image_download('Download immagini (dopo import completo)')
+            if img_log:
+                self._append_log_line(parent, f'Download immagini avviato (log #{img_log.id}).')
+                self.env.cr.commit()
 
     def _cron_check_new_products(self):
         client = SpApiClient(self.env)
@@ -1585,6 +1600,32 @@ class AmazonSyncLog(models.Model):
     # Download immagini mancanti
     # ------------------------------------------------------------------
 
+    def _start_image_download(self, name_prefix):
+        """
+        Avvia "Scarica immagini mancanti" in background, se non ce n'è già uno
+        in corso e le credenziali ci sono. Ritorna il log creato, o None.
+        Usato dal cron e dalla catena del Full Import (_close_parent_log).
+        """
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.download_images_state') == 'running':
+            _log.info('Download immagini già in corso, salto avvio automatico.')
+            return None
+        try:
+            SpApiClient(self.env).validate_credentials()
+        except ValueError:
+            _log.warning('Download immagini non avviato: credenziali SP-API non configurate.')
+            return None
+        log_rec = self.create({
+            'name': f'{name_prefix} — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'download_images',
+            'state': 'running',
+            'start_date': fields.Datetime.now(),
+        })
+        params.set_param('ke_amazon_sync.download_images_state', 'running')
+        self.env.cr.commit()
+        self.env['res.config.settings']._start_thread('_thread_download_images', log_rec.id)
+        return log_rec
+
     def _cron_download_images_store(self):
         """
         Avvia automaticamente il download delle immagini mancanti, se non ce
@@ -1595,27 +1636,7 @@ class AmazonSyncLog(models.Model):
         Scarica solo per i prodotti che ancora non hanno un'immagine — non
         ricontrolla quelle già scaricate (vedi download_missing_images).
         """
-        params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.download_images_state') == 'running':
-            _log.info('Download immagini già in corso, salto avvio automatico.')
-            return
-        client = SpApiClient(self.env)
-        try:
-            client.validate_credentials()
-        except ValueError:
-            _log.warning('Cron download_images_store saltato: credenziali SP-API non configurate.')
-            return
-
-        log_rec = self.create({
-            'name': f'Download immagini mancanti (automatico) — '
-                    f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'download_images',
-            'state': 'running',
-            'start_date': fields.Datetime.now(),
-        })
-        params.set_param('ke_amazon_sync.download_images_state', 'running')
-        self.env.cr.commit()
-        self.env['res.config.settings']._start_thread('_thread_download_images', log_rec.id)
+        self._start_image_download('Download immagini mancanti (automatico)')
 
     # ------------------------------------------------------------------
     # Import Resi Amazon
