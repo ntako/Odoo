@@ -1,8 +1,12 @@
 """
 Galleria immagini (ke_product_catalog, 2026-11-04): il Full Import salva gli
 indirizzi di tutte le immagini Amazon della variante (una per ruolo, la più
-grande), per la pubblicazione su PrestaShop — senza scaricarle.
+grande), per la pubblicazione su PrestaShop — senza scaricarle. Durante
+l'import le immagini vengono solo annotate sulla variante; la galleria la
+scrive save_pending_galleries, all'inizio di "Scarica immagini mancanti".
 """
+from unittest.mock import patch
+
 from odoo.tests.common import TransactionCase, tagged
 
 from .common import FakeSpApiClient, make_report_row, no_commit
@@ -46,6 +50,9 @@ class TestGalleryImages(TransactionCase):
         with no_commit(self.env):
             eng.full_import_report_rows(log, rows, 0, len(rows), True)
 
+    def _save(self):
+        return self.se.SyncEngine(self.env, FakeSpApiClient()).save_pending_galleries(commit=False)
+
     def _gallery(self, sku):
         tmpl = self.env['product.template'].search([('default_code', '=', sku)])
         return tmpl.ke_media_ids.filtered(lambda m: m.source == 'amazon').sorted('sequence')
@@ -71,16 +78,27 @@ class TestGalleryImages(TransactionCase):
         asin, sku = 'B0ZZGAL001', 'ZZT-GAL-1'
         it_images = [_img('MAIN', 'https://it/main.jpg', 1000), _img('PT01', 'https://it/pt01.jpg', 1000)]
         self._run(_GalleryClient({asin: it_images}, marketplace_id='ZZ_GAL_IT'), [make_report_row(sku, asin=asin)])
+        self.assertFalse(self._gallery(sku), "durante l'import la galleria non si scrive")
+        variant = self.env['product.template'].search([('default_code', '=', sku)]).product_variant_id
+        self.assertTrue(variant.x_amazon_gallery_pending)
+
+        # Su ES (prima del salvataggio) il prodotto non è "completo" per lo
+        # spagnolo: catalogo richiesto, con immagini diverse — resta quella IT.
+        es_images = [_img('MAIN', 'https://es/main.jpg', 1000)]
+        self._run(_GalleryClient({asin: es_images}, marketplace_id='ZZ_GAL_ES'), [make_report_row(sku, asin=asin)])
+
+        self.assertEqual(self._save(), 1)
+        self.assertFalse(variant.x_amazon_gallery_pending, 'annotazione svuotata dopo il salvataggio')
         gallery = self._gallery(sku)
         self.assertEqual(gallery.mapped('url'), ['https://it/main.jpg', 'https://it/pt01.jpg'])
         self.assertEqual(gallery.mapped('role'), ['MAIN', 'PT01'])
         self.assertEqual(set(gallery.mapped('source_ref')), {'Amazon ZZGI'})
         self.assertTrue(all(gallery.mapped('product_id')), 'immagini sulla variante')
 
-        # Su ES il prodotto non è "completo" per lo spagnolo: catalogo richiesto,
-        # con immagini diverse — la galleria IT resta.
-        es_images = [_img('MAIN', 'https://es/main.jpg', 1000)]
+        # Dopo il salvataggio, un altro giro ES non la cambia.
         self._run(_GalleryClient({asin: es_images}, marketplace_id='ZZ_GAL_ES'), [make_report_row(sku, asin=asin)])
+        self.assertFalse(variant.x_amazon_gallery_pending)
+        self.assertEqual(self._save(), 0)
         self.assertEqual(self._gallery(sku).mapped('url'), ['https://it/main.jpg', 'https://it/pt01.jpg'])
 
     def test_secondary_marketplace_fills_missing_gallery(self):
@@ -89,6 +107,7 @@ class TestGalleryImages(TransactionCase):
         self.assertFalse(self._gallery(sku))
         self._run(_GalleryClient({asin: [_img('MAIN', 'https://es/only.jpg', 800)]}, marketplace_id='ZZ_GAL_ES'),
                   [make_report_row(sku, asin=asin)])
+        self._save()
         self.assertEqual(self._gallery(sku).mapped('url'), ['https://es/only.jpg'])
 
     def test_family_variants_get_their_own_gallery(self):
@@ -98,9 +117,21 @@ class TestGalleryImages(TransactionCase):
             parent_asin_by_asin={'B0ZZGALV1': parent, 'B0ZZGALV2': parent}, marketplace_id='ZZ_GAL_IT',
         )
         self._run(client, [make_report_row('ZZT-GALV-1', asin='B0ZZGALV1'), make_report_row('ZZT-GALV-2', asin='B0ZZGALV2')])
+        self.assertEqual(self._save(), 2)
         v1 = self.env['product.product'].search([('x_amazon_asin', '=', 'B0ZZGALV1')])
         v2 = self.env['product.product'].search([('x_amazon_asin', '=', 'B0ZZGALV2')])
         self.assertEqual(v1.product_tmpl_id, v2.product_tmpl_id)
         self.assertEqual(v1.ke_media_ids.mapped('url'), ['https://v/1.jpg'])
         self.assertEqual(v2.ke_media_ids.mapped('url'), ['https://v/2.jpg'])
         self.assertEqual(len(v1.product_tmpl_id.ke_media_ids), 2)
+
+    def test_download_missing_images_saves_gallery_first(self):
+        asin, sku = 'B0ZZGAL003', 'ZZT-GAL-3'
+        self._run(_GalleryClient({asin: [_img('MAIN', 'https://it/3.jpg', 1000)]}, marketplace_id='ZZ_GAL_IT'),
+                  [make_report_row(sku, asin=asin)])
+        log = self.env['ke.amazon.sync.log'].create({'name': 'ZZT immagini', 'sync_type': 'download_images'})
+        eng = self.se.SyncEngine(self.env, FakeSpApiClient())
+        with no_commit(self.env), patch.object(self.se, '_fetch_image_b64', return_value=None):
+            eng.download_missing_images(log)
+        self.assertEqual(self._gallery(sku).mapped('url'), ['https://it/3.jpg'])
+        self.assertIn('Galleria immagini salvata per 1 varianti', log.log_lines)

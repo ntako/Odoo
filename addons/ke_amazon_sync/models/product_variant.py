@@ -20,6 +20,12 @@ class ProductProduct(models.Model):
              "senza scaricarla: la scarica poi 'Scarica immagini mancanti', che parte da "
              "solo a fine Full Import, senza dover richiamare il Catalog API.",
     )
+    x_amazon_gallery_pending = fields.Json(
+        'Galleria Amazon da salvare (interno)', copy=False, readonly=True,
+        help="Immagini Amazon raccolte dal Full Import (indirizzi, ruoli, dimensioni), "
+             "trasferite nella galleria (ke.product.media) da 'Scarica immagini mancanti' "
+             "a fine catena e poi svuotate: durante l'import basta una scrittura per riga.",
+    )
     x_amazon_sku_previous = fields.Char(
         'SKU Amazon precedente (variante)', copy=False, readonly=True,
         help='Ultimo SKU sostituito dalla riconciliazione quando Amazon riassegna lo '

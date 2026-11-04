@@ -2017,26 +2017,61 @@ class SyncEngine:
 
     def _remember_gallery(self, variant, data):
         """
-        Salva gli indirizzi di tutte le immagini Amazon della variante nella
-        galleria (ke.product.media, fonte Amazon) — per la pubblicazione su
-        PrestaShop, senza scaricarle. Il marketplace principale aggiorna
-        sempre; i secondari scrivono solo se la variante non ha ancora
-        immagini Amazon, così la galleria non cambia a ogni marketplace
-        importato (stessa regola dei campi Amazon "legacy").
+        Annota sulla variante le immagini Amazon (x_amazon_gallery_pending)
+        da salvare nella galleria (ke.product.media) — il salvataggio vero lo
+        fa save_pending_galleries, all'inizio di "Scarica immagini mancanti"
+        a fine catena: chiesto dall'utente il 2026-11-04 per alleggerire il
+        Full Import (misurato: ~9 ms per variante con 6 immagini contro
+        ~0,5 ms per questa sola scrittura). Nessuna chiamata Amazon in più:
+        le immagini arrivano già con il Catalog API dell'import. Il
+        marketplace principale aggiorna sempre; i secondari solo se la
+        variante non ha ancora immagini Amazon, così la galleria non cambia
+        a ogni marketplace importato (stessa regola dei campi "legacy").
         """
         images = data.get('images')
         if not images or not variant:
             return
-        Media = self.env['ke.product.media'].sudo()
-        if not self._is_primary_marketplace() and Media.search_count([
-            ('product_id', '=', variant.id), ('source', '=', 'amazon'),
-        ], limit=1):
+        if not self._is_primary_marketplace() and (
+            variant.x_amazon_gallery_pending
+            or self.env['ke.product.media'].sudo().search_count([
+                ('product_id', '=', variant.id), ('source', '=', 'amazon'),
+            ], limit=1)
+        ):
             return
         marketplace = self._current_marketplace()
-        Media._set_source_images(
-            variant.product_tmpl_id, variant, 'amazon', images,
-            source_ref=f'Amazon {marketplace.code}' if marketplace else 'Amazon',
+        pending = {'ref': f'Amazon {marketplace.code}' if marketplace else 'Amazon', 'images': images}
+        if variant.x_amazon_gallery_pending != pending:
+            variant.x_amazon_gallery_pending = pending
+
+    _GALLERY_SAVE_BATCH = 500
+
+    def save_pending_galleries(self, commit=True):
+        """
+        Trasferisce nella galleria (ke.product.media, fonte Amazon) le
+        immagini annotate dal Full Import (x_amazon_gallery_pending) e svuota
+        l'annotazione. A blocchi, con salvataggio dopo ogni blocco. Ritorna
+        il numero di varianti trattate.
+        """
+        self.env.flush_all()
+        self.env.cr.execute(
+            'SELECT id FROM product_product WHERE x_amazon_gallery_pending IS NOT NULL ORDER BY id'
         )
+        ids = [row[0] for row in self.env.cr.fetchall()]
+        Media = self.env['ke.product.media'].sudo()
+        for start in range(0, len(ids), self._GALLERY_SAVE_BATCH):
+            variants = self.env['product.product'].with_context(active_test=False).browse(
+                ids[start:start + self._GALLERY_SAVE_BATCH])
+            for variant in variants:
+                pending = variant.x_amazon_gallery_pending or {}
+                Media._set_source_images(
+                    variant.product_tmpl_id, variant, 'amazon', pending.get('images'),
+                    source_ref=pending.get('ref') or 'Amazon',
+                )
+            variants.write({'x_amazon_gallery_pending': False})
+            if commit:
+                self.env.cr.commit()
+                self.env.invalidate_all()
+        return len(ids)
 
     def _set_product_attributes(self, template, spec_attrs):
         """Creates product.attribute.line entries as specifications (no variant generation)."""
@@ -2799,6 +2834,10 @@ class SyncEngine:
         """
         from concurrent.futures import ThreadPoolExecutor
 
+        # Prima la galleria (solo indirizzi, nessun download): le immagini
+        # raccolte dal Full Import (vedi _remember_gallery).
+        gallery_count = self.save_pending_galleries()
+
         Template = self.env['product.template']
         simple_products = Template.search([
             ('x_amazon_asin', '!=', False),
@@ -2834,7 +2873,7 @@ class SyncEngine:
             + [(t, 'image_1920', family_url) for t in family_templates]
         total = len(targets)
         ok = errors = skipped = catalog_calls = 0
-        lines = []
+        lines = [f'Galleria immagini salvata per {gallery_count} varianti.'] if gallery_count else []
 
         log_rec.write({'products_total': total})
         self.env.cr.commit()
