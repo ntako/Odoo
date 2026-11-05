@@ -54,12 +54,22 @@ class ResConfigSettings(models.TransientModel):
         help='Magazzino Odoo da cui leggere le quantità da inviare a PS e '
              'assegnato agli ordini importati da PrestaShop.',
     )
-    ps_filter_by_warehouse = fields.Boolean(
-        string='Sincronizza solo i prodotti con giacenza nel magazzino',
-        config_parameter='ke_prestashop_sync.filter_by_warehouse',
-        help='Se attivo, le sincronizzazioni Odoo → PrestaShop (stock, prezzi, '
-             'immagini, export) considerano solo i prodotti con quantità '
-             'disponibile maggiore di zero nel magazzino selezionato.',
+    # Deciso con l'utente il 2026-11-05: di default si esportano solo i
+    # prodotti con quantità > 0 nel magazzino selezionato. Sostituisce il
+    # vecchio "filter_by_warehouse", che limitava anche la sync giacenze (un
+    # prodotto andato a zero non veniva mai azzerato su PS).
+    ps_export_all = fields.Boolean(
+        string='Esporta anche i prodotti senza giacenza',
+        config_parameter='ke_prestashop_sync.export_all',
+        help='Spento (default): l\'export crea su PS solo i prodotti con disponibilità > 0 '
+             'nel magazzino selezionato. Acceso: tutti i prodotti con "Sync PS attiva". '
+             'Le sync di giacenze e prezzi riguardano sempre tutti i prodotti già su PS.',
+    )
+    ps_pricelist_id = fields.Many2one(
+        'product.pricelist', string='Listino PrestaShop',
+        config_parameter='ke_prestashop_sync.pricelist_id',
+        help='Prezzo per il sito (IVA esclusa). Vuoto: prezzo di vendita Odoo, con il prezzo '
+             'della variante dove c\'è.',
     )
 
     # --- Cron: sync stock ---

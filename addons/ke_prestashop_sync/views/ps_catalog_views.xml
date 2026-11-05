@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Categorie PrestaShop lette in Odoo (sola lettura) -->
+    <record id="view_ke_prestashop_category_list" model="ir.ui.view">
+        <field name="name">ke.prestashop.category.list</field>
+        <field name="model">ke.prestashop.category</field>
+        <field name="arch" type="xml">
+            <list string="Categorie PrestaShop" create="0" delete="0">
+                <field name="complete_name"/>
+                <field name="ps_id"/>
+                <field name="level" optional="hide"/>
+                <field name="odoo_category_ids" widget="many2many_tags" string="Categorie Odoo mappate"/>
+                <field name="active" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_prestashop_category_search" model="ir.ui.view">
+        <field name="name">ke.prestashop.category.search</field>
+        <field name="model">ke.prestashop.category</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="complete_name"/>
+                <filter name="not_mapped" string="Senza categorie Odoo" domain="[('odoo_category_ids', '=', False)]"/>
+                <filter name="inactive" string="Non più su PrestaShop" domain="[('active', '=', False)]"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_ke_prestashop_category" model="ir.actions.act_window">
+        <field name="name">Categorie PrestaShop</field>
+        <field name="res_model">ke.prestashop.category</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p>Nessuna categoria: Impostazioni → PrestaShop → "Aggiorna categorie da PrestaShop".</p>
+        </field>
+    </record>
+
+    <!-- Mappatura: su ogni categoria Odoo la categoria PrestaShop -->
+    <record id="view_product_category_ps_mapping_list" model="ir.ui.view">
+        <field name="name">product.category.ps.mapping.list</field>
+        <field name="model">product.category</field>
+        <field name="priority">99</field>
+        <field name="arch" type="xml">
+            <list string="Mappatura categorie PrestaShop" editable="bottom" create="0" delete="0">
+                <field name="display_name" string="Categoria Odoo" readonly="1"/>
+                <field name="product_count" string="Prodotti" readonly="1"/>
+                <field name="ps_category_id" options="{'no_create': True}"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_product_category_ps_mapping_search" model="ir.ui.view">
+        <field name="name">product.category.ps.mapping.search</field>
+        <field name="model">product.category</field>
+        <field name="priority">99</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="ps_category_id"/>
+                <filter name="not_mapped" string="Da mappare" domain="[('ps_category_id', '=', False)]"/>
+                <filter name="mapped" string="Mappate" domain="[('ps_category_id', '!=', False)]"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_product_category_ps_mapping" model="ir.actions.act_window">
+        <field name="name">Mappatura categorie PrestaShop</field>
+        <field name="res_model">product.category</field>
+        <field name="view_mode">list</field>
+        <field name="view_id" ref="view_product_category_ps_mapping_list"/>
+        <field name="search_view_id" ref="view_product_category_ps_mapping_search"/>
+        <field name="context">{'search_default_not_mapped': 1}</field>
+    </record>
+
+    <record id="product_category_form_view_ps" model="ir.ui.view">
+        <field name="name">product.category.form.ps</field>
+        <field name="model">product.category</field>
+        <field name="inherit_id" ref="product.product_category_form_view"/>
+        <field name="arch" type="xml">
+            <field name="parent_id" position="after">
+                <field name="ps_category_id" options="{'no_create': True}"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Marca: marca PrestaShop associata -->
+    <record id="view_ke_product_brand_form_ps" model="ir.ui.view">
+        <field name="name">ke.product.brand.form.ps</field>
+        <field name="model">ke.product.brand</field>
+        <field name="inherit_id" ref="ke_product_catalog.view_ke_product_brand_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='to_review']" position="after">
+                <field name="ps_manufacturer_id"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

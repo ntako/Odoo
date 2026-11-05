@@ -28,6 +28,11 @@ class FakePsClient:
         self.combo_price_updates = []
         self.stock_updates = []
         self.deactivated = []
+        self.product_updates = []
+        self.created_manufacturers = []
+        self.created_combinations = []
+        self.combination_updates = []
+        self.stock_by_product = {}
         self.missing_ids = set()
         self._next_id = 500
 
@@ -70,6 +75,42 @@ class FakePsClient:
         self._guard(ps_id)
         self.price_updates.append((ps_id, price))
 
+    def update_product(self, ps_id, **kwargs):
+        self._guard(ps_id)
+        self.product_updates.append((ps_id, kwargs))
+
+    # --- categorie / marche ---
+    def get_categories(self):
+        return [
+            {'id': 1, 'parent': 0, 'name': 'Root', 'level': 0, 'active': True},
+            {'id': 2, 'parent': 1, 'name': 'Home', 'level': 1, 'active': True},
+            {'id': 30, 'parent': 2, 'name': 'Mulinelli', 'level': 2, 'active': True},
+            {'id': 31, 'parent': 30, 'name': 'Spinning', 'level': 3, 'active': True},
+        ]
+
+    def get_manufacturers(self):
+        return [{'id': 5, 'name': 'Bad Bass Tech'}]
+
+    def create_manufacturer(self, name):
+        self._next_id += 1
+        self.created_manufacturers.append(name)
+        return self._next_id
+
+    # --- combinazioni ---
+    def get_or_create_product_option(self, name):
+        return 900
+
+    def get_or_create_option_value(self, option_id, value):
+        return 901
+
+    def create_combination(self, **kwargs):
+        self._next_id += 1
+        self.created_combinations.append(kwargs)
+        return self._next_id
+
+    def update_combination(self, combo_id, **kwargs):
+        self.combination_updates.append((combo_id, kwargs))
+
     def update_product_active(self, ps_id, active):
         self.deactivated.append((ps_id, active))
 
@@ -81,7 +122,7 @@ class FakePsClient:
 
     # --- stock ---
     def get_stock_availables(self, ps_product_id):
-        return [{'id': 7, 'id_product_attribute': '0', 'quantity': '0'}]
+        return self.stock_by_product.get(ps_product_id, [{'id': 7, 'id_product_attribute': '0', 'quantity': '0'}])
 
     def update_stock_available(self, **kwargs):
         self.stock_updates.append(kwargs)
@@ -131,6 +172,11 @@ class TestSyncEngine(TransactionCase):
 
     def setUp(self):
         super().setUp()
+        # Il motore fa commit a ogni passo (sopravvive a un riavvio): nei test
+        # Odoo 19 lo vieta, qui diventa un no-op (come no_commit di ke_amazon_sync).
+        patcher = patch.object(self.env.cr, 'commit', lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client = FakePsClient()
         self.engine = SyncEngine(self.env, self.client)
 
@@ -235,6 +281,7 @@ class TestSyncEngine(TransactionCase):
                 'name': f'Lotto {n}', 'default_code': f'L{n}',
                 'list_price': 1.0, 'type': 'consu',
             })
+        self.env['ir.config_parameter'].sudo().set_param('ke_prestashop_sync.export_all', 'True')
         with patch.object(SyncEngine, '_EXPORT_BATCH', 2):
             self.engine.export_products_to_ps(self._log('export_products'))
         self.assertEqual(len(self.client.created_products), 2)
@@ -272,7 +319,9 @@ class TestSyncEngine(TransactionCase):
         self.assertEqual(
             self.env['sale.order'].search_count([('ps_order_id', '=', 1)]), 1)
 
-    def test_warehouse_filter_limits_price_sync(self):
+    def test_price_sync_covers_linked_products_without_stock(self):
+        # 2026-11-05: le sync di prezzi e giacenze riguardano tutti i prodotti
+        # già su PS (prima il filtro magazzino li limitava ai soli con giacenza).
         wh = self.env['stock.warehouse'].search([], limit=1)
         p_in = self.env['product.template'].create({
             'name': 'In magazzino', 'ps_product_id': 201, 'list_price': 5.0,
@@ -286,13 +335,12 @@ class TestSyncEngine(TransactionCase):
             p_in.product_variant_id, wh.lot_stock_id, 10)
         params = self.env['ir.config_parameter'].sudo()
         params.set_param('ke_prestashop_sync.warehouse_id', str(wh.id))
-        params.set_param('ke_prestashop_sync.filter_by_warehouse', 'True')
 
         self.engine.sync_prices_to_prestashop(self._log('sync_prices'))
 
         updated_ids = [ps_id for ps_id, _ in self.client.price_updates]
         self.assertIn(201, updated_ids)
-        self.assertNotIn(202, updated_ids)
+        self.assertIn(202, updated_ids)
 
     def test_sync_prices_updates_when_different(self):
         self.env['product.template'].create({
@@ -322,8 +370,111 @@ class TestSyncEngine(TransactionCase):
             'name': 'vecchio', 'sync_type': 'sync_stock', 'state': 'running',
         })
         self.env.cr.execute(
-            "UPDATE ke_prestashop_sync_sync_log SET write_date = NOW() - INTERVAL '3 hours' WHERE id = %s",
+            "UPDATE ke_prestashop_sync_log SET write_date = NOW() - INTERVAL '3 hours' WHERE id = %s",
             (stale.id,))
         stale.invalidate_recordset(['write_date'])
         Log._cron_run_queue()
         self.assertEqual(stale.state, 'error')
+
+
+@tagged('post_install', '-at_install')
+class TestPsCatalogExport(TransactionCase):
+    """Export con categorie mappate, marche, prezzi variante, giacenze dal magazzino (2026-11-05)."""
+
+    def setUp(self):
+        super().setUp()
+        # Il motore fa commit a ogni passo (sopravvive a un riavvio): nei test
+        # Odoo 19 lo vieta, qui diventa un no-op (come no_commit di ke_amazon_sync).
+        patcher = patch.object(self.env.cr, 'commit', lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = FakePsClient()
+        self.engine = SyncEngine(self.env, self.client)
+        self.wh = self.env['stock.warehouse'].search([], limit=1)
+        self.params = self.env['ir.config_parameter'].sudo()
+        self.params.set_param('ke_prestashop_sync.warehouse_id', str(self.wh.id))
+        self.params.set_param('ke_prestashop_sync.export_all', False)
+        self.env['ke.prestashop.category']._sync_from_prestashop(self.client)
+        self.ps_spinning = self.env['ke.prestashop.category'].search([('ps_id', '=', 31)])
+
+    def _log(self):
+        return self.env['ke.prestashop.sync.log'].create({
+            'name': 'test', 'sync_type': 'export_products', 'state': 'running'})
+
+    def _stock(self, product, qty, warehouse=None):
+        self.env['stock.quant']._update_available_quantity(product, (warehouse or self.wh).lot_stock_id, qty)
+
+    def test_category_tree_paths(self):
+        self.assertEqual(self.ps_spinning.complete_name, 'Mulinelli / Spinning')
+
+    def test_export_uses_mapped_category_and_brand(self):
+        parent = self.env['product.category'].create({'name': 'ZZT Mulinelli', 'ps_category_id': self.ps_spinning.id})
+        child = self.env['product.category'].create({'name': 'ZZT Spinning', 'parent_id': parent.id})
+        brand = self.env['ke.product.brand'].create({
+            'name': 'ZZT Bad Bass', 'alias_ids': [(0, 0, {'name': 'Bad Bass Tech'})]})
+        new_brand = self.env['ke.product.brand'].create({'name': 'ZZT Marca Nuova'})
+        t1 = self.env['product.template'].create({
+            'name': 'ZZT PS 1', 'default_code': 'ZZT-PS-1', 'list_price': 10.0, 'type': 'consu',
+            'categ_id': child.id, 'ke_brand_id': brand.id})
+        t2 = self.env['product.template'].create({
+            'name': 'ZZT PS 2', 'default_code': 'ZZT-PS-2', 'list_price': 10.0, 'type': 'consu',
+            'ke_brand_id': new_brand.id})
+        self.engine.export_products_to_ps(self._log(), product_ids=(t1 + t2).ids)
+        by_name = {kw['name']: kw for kw in self.client.created_products}
+        self.assertEqual(by_name['ZZT PS 1']['category_id'], 31, 'categoria del padre mappato')
+        self.assertEqual(by_name['ZZT PS 1']['manufacturer_id'], 5, 'marca PS trovata dal nome alternativo')
+        self.assertEqual(by_name['ZZT PS 2']['category_id'], 0, 'non mappata: categoria predefinita')
+        self.assertEqual(self.client.created_manufacturers, ['ZZT Marca Nuova'])
+        self.assertEqual(new_brand.ps_manufacturer_id, by_name['ZZT PS 2']['manufacturer_id'])
+
+    def test_default_exports_only_products_in_stock(self):
+        self.env['product.template'].search([]).write({'ps_sync_enabled': False})
+        here = self.env['product.template'].create({'name': 'ZZT qui', 'type': 'consu', 'is_storable': True})
+        other_wh = self.env['stock.warehouse'].create({'name': 'ZZT altro', 'code': 'ZZT9'})
+        there = self.env['product.template'].create({'name': 'ZZT altrove', 'type': 'consu', 'is_storable': True})
+        none = self.env['product.template'].create({'name': 'ZZT niente', 'type': 'consu', 'is_storable': True})
+        self._stock(here.product_variant_id, 3)
+        self._stock(there.product_variant_id, 3, other_wh)
+        self.engine.export_products_to_ps(self._log())
+        names = {kw['name'] for kw in self.client.created_products}
+        self.assertEqual(names, {'ZZT qui'})
+        self.params.set_param('ke_prestashop_sync.export_all', 'True')
+        self.engine.export_products_to_ps(self._log())
+        names = {kw['name'] for kw in self.client.created_products}
+        self.assertTrue({'ZZT altrove', 'ZZT niente'} <= names)
+
+    def test_configurable_variant_price_and_stock(self):
+        attr = self.env['product.attribute'].create({
+            'name': 'ZZT Misura PS', 'value_ids': [(0, 0, {'name': '1000'}), (0, 0, {'name': '2000'})]})
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT famiglia PS', 'list_price': 20.0, 'type': 'consu', 'is_storable': True,
+            'attribute_line_ids': [(0, 0, {'attribute_id': attr.id, 'value_ids': [(6, 0, attr.value_ids.ids)]})],
+        })
+        small, big = tmpl.product_variant_ids.sorted(lambda v: v.product_template_attribute_value_ids.name)
+        big.ke_list_price = 26.0
+        self._stock(big, 4)
+        self.engine.export_products_to_ps(self._log(), product_ids=tmpl.ids)
+        impacts = sorted(c['price_impact'] for c in self.client.created_combinations)
+        self.assertEqual(impacts, [0.0, 6.0])
+        self.assertEqual(self.client.created_products[0]['price'], 20.0)
+        # Listino PrestaShop +10%: padre 22, impatto 6,60.
+        pricelist = self.env['product.pricelist'].create({
+            'name': 'ZZT sito', 'currency_id': self.env.company.currency_id.id,
+            'item_ids': [(0, 0, {'applied_on': '3_global', 'compute_price': 'formula',
+                                 'base': 'list_price', 'price_discount': -10.0})]})
+        self.params.set_param('ke_prestashop_sync.pricelist_id', str(pricelist.id))
+        self.engine.export_products_to_ps(self._log(), product_ids=tmpl.ids, full_resync=True)
+        self.assertAlmostEqual(self.client.product_updates[-1][1]['price'], 22.0, places=4)
+        impacts = sorted(kw['price_impact'] for _id, kw in self.client.combination_updates)
+        self.assertAlmostEqual(impacts[-1], 6.6, places=4)
+
+    def test_stock_sync_pushes_warehouse_qty_and_zero(self):
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT stock PS', 'type': 'consu', 'is_storable': True, 'ps_product_id': 321})
+        other_wh = self.env['stock.warehouse'].create({'name': 'ZZT altro 2', 'code': 'ZZT8'})
+        self._stock(tmpl.product_variant_id, 5, other_wh)
+        self.client.stock_by_product[321] = [{'id': 70, 'id_product_attribute': '0', 'quantity': '9'}]
+        log = self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'sync_stock', 'state': 'running'})
+        self.engine.sync_stock_to_prestashop(log)
+        pushed = [u for u in self.client.stock_updates if u['ps_product_id'] == 321]
+        self.assertEqual(pushed[-1]['quantity'], 0, 'giacenza solo in un altro magazzino: su PS va a zero')

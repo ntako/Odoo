@@ -58,25 +58,147 @@ class SyncEngine:
                 return wh
         return self.env['stock.warehouse'].search([], limit=1)
 
-    def _wh_filter_active(self):
-        """True se va sincronizzato solo l'assortimento del magazzino."""
-        return self._flag('filter_by_warehouse') and bool(self._warehouse())
+    def _export_only_in_stock(self):
+        """Default (2026-11-05): l'export crea solo i prodotti con giacenza > 0."""
+        return not self._flag('export_all')
 
-    def _wh_qty_context(self):
-        """Context per calcolare qty_available nello scope del magazzino."""
-        wh = self._warehouse()
-        return {'warehouse': wh.id} if wh else {}
+    def _product_templates(self, domain):
+        """Prodotti già su PS per le sync di giacenze/prezzi/immagini: tutti,
+        anche a giacenza zero (va azzerata anche su PS)."""
+        return self.env['product.template'].search(domain)
 
-    def _product_templates(self, domain, apply_qty_filter=True):
-        """search su product.template applicando (se attivo) il filtro
-        'giacenza > 0 nel magazzino configurato' e il relativo context.
+    # ------------------------------------------------------------------
+    # Giacenza, prezzo, categoria, marca
+    # ------------------------------------------------------------------
+
+    def _free_qty_by_variant(self, variants, warehouse=None):
         """
-        model = self.env['product.template']
-        if self._wh_filter_active():
-            model = model.with_context(**self._wh_qty_context())
-            if apply_qty_filter:
-                domain = list(domain) + [('qty_available', '>', 0.0)]
-        return model.search(domain)
+        Disponibilità libera (quantità − riservato) per variante nel magazzino,
+        dalle ubicazioni interne sotto la sua ubicazione vista — regola di
+        CLAUDE.md: mai qty_available con context 'warehouse' sul template,
+        che su questo Odoo ignora il magazzino.
+        """
+        warehouse = warehouse or self._warehouse()
+        result = dict.fromkeys(variants.ids, 0)
+        if not warehouse or not variants:
+            return result
+        groups = self.env['stock.quant']._read_group(
+            [('product_id', 'in', variants.ids),
+             ('location_id', 'child_of', warehouse.view_location_id.id),
+             ('location_id.usage', '=', 'internal')],
+            ['product_id'], ['quantity:sum', 'reserved_quantity:sum'],
+        )
+        for product, qty, reserved in groups:
+            result[product.id] = max(int((qty or 0) - (reserved or 0)), 0)
+        return result
+
+    def _pricelist(self):
+        pl_id = int(self._param('pricelist_id') or 0)
+        return self.env['product.pricelist'].browse(pl_id).exists() if pl_id else self.env['product.pricelist']
+
+    def _ps_price(self, product):
+        """
+        Prezzo per PrestaShop, IVA esclusa (l'IVA la aggiunge PS dal gruppo
+        regole): dal "Listino PrestaShop" se impostato, altrimenti il prezzo
+        di vendita (per una variante lst_price, che comprende il prezzo
+        della variante di ke_product_catalog).
+        """
+        pricelist = self._pricelist()
+        if pricelist:
+            price = pricelist._get_product_price(product, 1.0, currency=self.env.company.currency_id)
+        else:
+            price = product.lst_price if product._name == 'product.product' else product.list_price
+        tax = product.taxes_id.filtered(lambda t: t.type_tax_use == 'sale' and t.amount_type == 'percent')[:1]
+        if tax and tax.price_include:
+            price = price / (1 + tax.amount / 100.0)
+        return round(price, 6)
+
+    def _ps_category_id(self, tmpl):
+        """Categoria PS mappata sulla categoria Odoo (o sulla prima categoria padre mappata); 0 = predefinita."""
+        categ = tmpl.categ_id
+        while categ:
+            if categ.ps_category_id:
+                return categ.ps_category_id.ps_id
+            categ = categ.parent_id
+        return 0
+
+    def _ps_manufacturer_id(self, brand, lines):
+        """
+        Marca PS della marca di catalogo: quella salvata sulla marca, poi per
+        nome normalizzato (anche nomi alternativi) tra le marche PS, se manca
+        la crea (deciso con l'utente il 2026-11-05). 0 se il prodotto non ha marca.
+        """
+        if not brand:
+            return 0
+        if brand.ps_manufacturer_id:
+            return brand.ps_manufacturer_id
+        from odoo.addons.ke_product_catalog.models.product_brand import brand_key
+        if not hasattr(self, '_ps_manufacturers'):
+            self._ps_manufacturers = {brand_key(m['name']): m['id'] for m in self.client.get_manufacturers()}
+        ps_id = next((self._ps_manufacturers[k] for k in
+                      [brand_key(brand.name)] + [brand_key(a.name) for a in brand.alias_ids]
+                      if k in self._ps_manufacturers), 0)
+        if not ps_id:
+            ps_id = self.client.create_manufacturer(brand.name)
+            if ps_id:
+                self._ps_manufacturers[brand_key(brand.name)] = ps_id
+                lines.append(f'[MARCA→PS] {brand.name} creata su PS (id={ps_id})')
+        if ps_id:
+            brand.sudo().ps_manufacturer_id = ps_id
+        return ps_id
+
+    def _ps_lang(self):
+        """Lingua Odoo dei testi per PS (il negozio è in italiano)."""
+        return self._param('odoo_lang') or 'it_IT'
+
+    def _ps_product_vals(self, tmpl, lines, reference='', ean13=''):
+        """Dati del prodotto (padre) da creare o aggiornare su PS."""
+        tmpl = tmpl.with_context(lang=self._ps_lang())
+        category_id = self._ps_category_id(tmpl)
+        if not category_id and tmpl.categ_id:
+            lines.append(f'[CATEGORIA] {tmpl.name}: categoria Odoo "{tmpl.categ_id.display_name}" '
+                         f'non mappata, usata la categoria PS predefinita')
+        return {
+            'name': tmpl.name,
+            'reference': reference,
+            'ean13': ean13,
+            'price': self._ps_price(tmpl),
+            'description_short': tmpl.description_sale or '',
+            'category_id': category_id,
+            'manufacturer_id': self._ps_manufacturer_id(tmpl.ke_brand_id, lines),
+        }
+
+    def _push_stock(self, tmpl, lines, qty_by_variant=None):
+        """Allinea su PS la giacenza del prodotto (o di ogni combinazione). Ritorna (ok, skip)."""
+        variants = tmpl.product_variant_ids
+        qty_by_variant = qty_by_variant or self._free_qty_by_variant(variants)
+        stock_recs = self.client.get_stock_availables(tmpl.ps_product_id)
+        ok = skip = 0
+        if self._is_configurable(tmpl):
+            by_combo = {int(s['id_product_attribute']): s for s in stock_recs
+                        if int(s.get('id_product_attribute', 0)) != 0}
+            targets = [(by_combo.get(v.ps_combination_id), v.ps_combination_id, qty_by_variant.get(v.id, 0), v.display_name)
+                       for v in variants if v.ps_combination_id]
+        else:
+            main = next((s for s in stock_recs if int(s.get('id_product_attribute', 0)) == 0),
+                        stock_recs[0] if stock_recs else None)
+            targets = [(main, 0, sum(qty_by_variant.get(v.id, 0) for v in variants), tmpl.name)]
+        for stock_rec, combo_id, qty, label in targets:
+            if not stock_rec:
+                lines.append(f'[SKIP] {label}: nessuna giacenza PS per la combinazione {combo_id}')
+                skip += 1
+                continue
+            ps_qty = int(stock_rec.get('quantity', 0) or 0)
+            if ps_qty == int(qty):
+                skip += 1
+                continue
+            self.client.update_stock_available(
+                stock_id=int(stock_rec['id']), ps_product_id=tmpl.ps_product_id,
+                ps_attribute_id=int(stock_rec.get('id_product_attribute', 0) or 0), quantity=qty,
+            )
+            lines.append(f'[STOCK] {label}: {ps_qty} → {int(qty)}')
+            ok += 1
+        return ok, skip
 
     def _tick(self, log_rec, done, total, lines, counters):
         """Aggiorna il log con l'avanzamento (ogni _PROGRESS_EVERY elementi),
@@ -112,17 +234,16 @@ class SyncEngine:
 
     def sync_stock_to_prestashop(self, log_rec):
         """
-        Per ogni prodotto Odoo con ps_product_id > 0 e ps_sync_enabled=True,
-        legge la quantità disponibile e aggiorna lo stock su PS.
-        Gestisce sia prodotti semplici che configurabili (combinazioni).
+        Per ogni prodotto Odoo già su PS (ps_product_id > 0, Sync PS attiva)
+        allinea la giacenza su PS alla disponibilità libera nel magazzino
+        PrestaShop, anche quando è zero. Prodotti semplici e combinazioni.
         """
-        qty_ctx = self._wh_qty_context()
-
         products = self._product_templates([
             ('ps_product_id', '>', 0),
             ('ps_sync_enabled', '=', True),
             ('type', '=', 'consu'),
         ])
+        qty_by_variant = self._free_qty_by_variant(products.product_variant_ids)
 
         total = len(products)
         ok = skip = err = 0
@@ -130,72 +251,12 @@ class SyncEngine:
 
         for i, tmpl in enumerate(products, 1):
             ps_id = tmpl.ps_product_id
-            variants = tmpl.product_variant_ids
             try:
-                if len(variants) > 1:
-                    # --- Prodotto configurabile: sync per combinazione ---
-                    stock_recs = self.client.get_stock_availables(ps_id)
-                    stock_by_combo = {
-                        int(s['id_product_attribute']): s
-                        for s in stock_recs
-                        if int(s.get('id_product_attribute', 0)) != 0
-                    }
-                    for variant in variants:
-                        combo_id = variant.ps_combination_id
-                        if not combo_id:
-                            skip += 1
-                            continue
-                        qty = variant.with_context(**qty_ctx).qty_available
-                        stock_rec = stock_by_combo.get(combo_id)
-                        if not stock_rec:
-                            lines.append(
-                                f'[SKIP] {variant.display_name}: combo {combo_id} non in PS')
-                            skip += 1
-                            continue
-                        ps_qty = int(stock_rec.get('quantity', 0))
-                        if ps_qty == int(qty):
-                            skip += 1
-                            continue
-                        self.client.update_stock_available(
-                            stock_id=int(stock_rec['id']),
-                            ps_product_id=ps_id,
-                            ps_attribute_id=combo_id,
-                            quantity=qty,
-                        )
-                        lines.append(
-                            f'[OK] {variant.display_name}: {ps_qty} → {int(qty)}')
-                        ok += 1
-                else:
-                    # --- Prodotto semplice ---
-                    qty = sum(
-                        variants.mapped(
-                            lambda v: v.with_context(**qty_ctx).qty_available
-                        )
-                    )
-                    stock_recs = self.client.get_stock_availables(ps_id)
-                    if not stock_recs:
-                        lines.append(
-                            f'[SKIP] {tmpl.name}: nessun stock_available su PS (id={ps_id})')
-                        skip += 1
-                        continue
-                    main_stock = next(
-                        (s for s in stock_recs if int(s.get('id_product_attribute', 0)) == 0),
-                        stock_recs[0],
-                    )
-                    ps_qty = int(main_stock.get('quantity', 0))
-                    if ps_qty == int(qty):
-                        skip += 1
-                        continue
-                    self.client.update_stock_available(
-                        stock_id=int(main_stock['id']),
-                        ps_product_id=ps_id,
-                        ps_attribute_id=int(main_stock.get('id_product_attribute', 0)),
-                        quantity=qty,
-                    )
+                done, skipped = self._push_stock(tmpl, lines, qty_by_variant)
+                ok += done
+                skip += skipped
+                if done:
                     tmpl.write({'ps_last_sync_date': fields.Datetime.now()})
-                    lines.append(f'[OK] {tmpl.name}: {ps_qty} → {int(qty)}')
-                    ok += 1
-
             except Exception as exc:
                 _log.warning('sync_stock: errore %s (ps_id=%s): %s', tmpl.name, ps_id, exc)
                 lines.append(f'[ERR] {tmpl.name} (ps_id={ps_id}): {exc}')
@@ -244,7 +305,7 @@ class SyncEngine:
             try:
                 ps_product = self.client.get_product(ps_id)
                 ps_price = float(ps_product.get('price', 0) or 0)
-                odoo_price = tmpl.list_price
+                odoo_price = self._ps_price(tmpl)
 
                 if abs(ps_price - odoo_price) < 0.001:
                     skip += 1
@@ -260,7 +321,7 @@ class SyncEngine:
                         if not variant.ps_combination_id:
                             continue
                         try:
-                            impact = variant.price_extra
+                            impact = round(self._ps_price(variant) - odoo_price, 6)
                             combo = self.client.get_combination(variant.ps_combination_id)
                             cur = float(combo.get('price', 0) or 0)
                             if abs(cur - impact) < 0.001:
@@ -331,8 +392,6 @@ class SyncEngine:
         Matching: ps_product_id > reference (default_code) > ean13.
         """
         product_type = self._param('odoo_product_type', 'consu')
-        wh_filter = self._wh_filter_active()
-        qty_ctx = self._wh_qty_context()
 
         ps_ids = self.client.get_product_ids()
         if limit:
@@ -361,9 +420,6 @@ class SyncEngine:
                     tmpl = ProductTmpl.search([('barcode', '=', ean13)], limit=1)
 
                 if tmpl and not update_existing:
-                    skipped += 1
-                elif tmpl and wh_filter and tmpl.with_context(**qty_ctx).qty_available <= 0:
-                    lines.append(f'[SKIP wh] {name} (ps_id={ps_id}): nessuna giacenza nel magazzino')
                     skipped += 1
                 elif tmpl:
                     vals = {
@@ -447,7 +503,8 @@ class SyncEngine:
         warehouse_id (default: il Magazzino PrestaShop configurato). È forzato
         anche quando è attivo il filtro-per-magazzino nelle impostazioni.
         """
-        want_stock = only_in_stock or self._wh_filter_active()
+        # Prodotti scelti a mano: vale solo la spunta del wizard, non il default.
+        want_stock = only_in_stock or (not product_ids and self._export_only_in_stock())
         if warehouse_id:
             wh = self.env['stock.warehouse'].browse(warehouse_id).exists()
         else:
@@ -467,15 +524,17 @@ class SyncEngine:
 
     def _in_stock_template_ids(self, warehouse):
         """ID dei product.template con almeno una variante a disponibilità
-        libera > 0. `product.template` non espone free_qty: si passa da
-        product.product, con il context del magazzino.
-        """
-        ctx = {'warehouse': warehouse.id} if warehouse else {}
-        variants = self.env['product.product'].with_context(**ctx).search([
-            ('type', '!=', 'service'),
-            ('free_qty', '>', 0.0),
+        libera > 0 nel magazzino (da stock.quant, vedi _free_qty_by_variant)."""
+        if not warehouse:
+            return []
+        quants = self.env['stock.quant'].search([
+            ('location_id', 'child_of', warehouse.view_location_id.id),
+            ('location_id.usage', '=', 'internal'),
+            ('quantity', '>', 0),
         ])
-        return variants.product_tmpl_id.ids
+        variants = quants.product_id
+        qty = self._free_qty_by_variant(variants, warehouse)
+        return variants.filtered(lambda v: qty.get(v.id, 0) > 0).product_tmpl_id.ids
 
     def export_products_to_ps(self, log_rec, product_ids=None, full_resync=False,
                               only_in_stock=False, warehouse_id=None):
@@ -517,48 +576,13 @@ class SyncEngine:
                     else:
                         err += 1
                 else:
-                    ps_id = tmpl.ps_product_id
-                    if ps_id:
-                        try:
-                            # Già collegato: aggiorna prezzo
-                            self.client.update_product_price(ps_id, tmpl.list_price)
-                            tmpl.write({'ps_sync_enabled': True,
-                                        'ps_last_sync_date': fields.Datetime.now()})
-                            lines.append(f'[UPD] {tmpl.name} → ps_id={ps_id}')
-                            updated += 1
-                        except PsResourceNotFound:
-                            # Link orfano: il prodotto non esiste più su PS → ricrea
-                            lines.append(
-                                f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
-                            tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
-                            ps_id = 0
-
-                    if not ps_id:
-                        # Cerca per reference per evitare duplicati
-                        found_id = None
-                        if tmpl.default_code:
-                            found_id = self.client.find_product_by_reference(tmpl.default_code)
-                        if found_id:
-                            tmpl.write({'ps_product_id': found_id, 'ps_sync_enabled': True,
-                                        'ps_last_sync_date': fields.Datetime.now()})
-                            lines.append(f'[LINK] {tmpl.name} → ps_id={found_id}')
-                            updated += 1
-                        else:
-                            new_ps_id = self.client.create_product(
-                                name=tmpl.name,
-                                reference=tmpl.default_code or '',
-                                ean13=tmpl.barcode or '',
-                                price=tmpl.list_price,
-                                description_short=tmpl.description_sale or '',
-                            )
-                            if new_ps_id:
-                                tmpl.write({'ps_product_id': new_ps_id, 'ps_sync_enabled': True,
-                                            'ps_last_sync_date': fields.Datetime.now()})
-                                lines.append(f'[NEW→PS] {tmpl.name} → ps_id={new_ps_id}')
-                                created += 1
-                            else:
-                                lines.append(f'[ERR] {tmpl.name}: nessun ID restituito da PS')
-                                err += 1
+                    res = self._export_simple(tmpl, lines)
+                    if res == 'created':
+                        created += 1
+                    elif res == 'updated':
+                        updated += 1
+                    else:
+                        err += 1
 
             except Exception as exc:
                 _log.warning('export_products: errore %s: %s', tmpl.name, exc, exc_info=True)
@@ -614,66 +638,103 @@ class SyncEngine:
         self.env.cr.commit()
         return created, updated, err
 
+    def _export_simple(self, tmpl, lines):
+        """
+        Prodotto semplice: crea su PS o, se già collegato (o trovato per
+        riferimento), aggiorna nome, prezzo, categoria, marca, codici e
+        descrizione breve; poi allinea la giacenza.
+        Restituisce: 'created' | 'updated' | 'err'
+        """
+        variant = tmpl.product_variant_id
+        vals = self._ps_product_vals(tmpl, lines, reference=tmpl.default_code or variant.default_code or '',
+                                     ean13=tmpl.barcode or variant.barcode or '')
+        ps_id = tmpl.ps_product_id
+        result = 'updated'
+        if ps_id:
+            try:
+                self.client.update_product(ps_id, **vals)
+            except PsResourceNotFound:
+                lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
+                tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
+                ps_id = 0
+        if not ps_id and vals['reference']:
+            ps_id = self.client.find_product_by_reference(vals['reference']) or 0
+            if ps_id:
+                tmpl.write({'ps_product_id': ps_id})
+                self.client.update_product(ps_id, **vals)
+                lines.append(f'[LINK] {tmpl.name} → ps_id={ps_id}')
+        if not ps_id:
+            ps_id = self.client.create_product(**vals)
+            if not ps_id:
+                lines.append(f'[ERR] {tmpl.name}: nessun ID restituito da PS')
+                return 'err'
+            tmpl.write({'ps_product_id': ps_id})
+            lines.append(f'[NEW→PS] {tmpl.name} → ps_id={ps_id}')
+            result = 'created'
+        elif result == 'updated':
+            lines.append(f'[UPD] {tmpl.name} → ps_id={ps_id}')
+        tmpl.write({'ps_sync_enabled': True, 'ps_last_sync_date': fields.Datetime.now()})
+        self._push_stock(tmpl, lines)
+        return result
+
     def _export_configurable(self, tmpl, lines):
         """
-        Esporta un prodotto configurabile su PS.
-        Crea il prodotto padre se mancante, poi crea le combinazioni per ogni
-        variante Odoo che non ha ancora ps_combination_id.
-        Restituisce: 'created' | 'updated' | 'skipped' | 'err'
+        Prodotto con varianti: prodotto padre su PS (creato o aggiornato come
+        un semplice, senza codici: stanno sulle combinazioni), una
+        combinazione per variante — create quelle nuove, aggiornati impatto
+        prezzo, riferimento ed EAN di quelle esistenti — poi la giacenza.
+        Impatto prezzo = prezzo PS della variante − prezzo PS del padre
+        (comprende il prezzo variante di ke_product_catalog e il listino PS).
+        Restituisce: 'created' | 'updated' | 'err'
         """
+        vals = self._ps_product_vals(tmpl, lines)
         ps_id = tmpl.ps_product_id
         created_parent = False
 
         if ps_id:
-            # Verifica che il prodotto padre esista ancora su PS
             try:
-                self.client.get_product(ps_id)
+                self.client.update_product(ps_id, **vals)
             except PsResourceNotFound:
-                lines.append(
-                    f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
+                lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
                 tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
                 tmpl.product_variant_ids.write({'ps_combination_id': 0})
                 ps_id = 0
 
         if not ps_id:
-            new_ps_id = self.client.create_product(
-                name=tmpl.name,
-                reference='',
-                ean13='',
-                price=tmpl.list_price,
-                description_short=tmpl.description_sale or '',
-            )
-            if not new_ps_id:
+            ps_id = self.client.create_product(**vals)
+            if not ps_id:
                 lines.append(f'[ERR] {tmpl.name}: creazione prodotto padre PS fallita')
                 return 'err'
-            ps_id = new_ps_id
-            tmpl.write({'ps_product_id': ps_id, 'ps_sync_enabled': True,
-                        'ps_last_sync_date': fields.Datetime.now()})
+            tmpl.write({'ps_product_id': ps_id})
             created_parent = True
+        tmpl.write({'ps_sync_enabled': True, 'ps_last_sync_date': fields.Datetime.now()})
 
-        # Varianti senza combinazione PS
-        pending = tmpl.product_variant_ids.filtered(lambda v: not v.ps_combination_id)
-        if not pending:
-            # Tutte le varianti già sincronizzate
-            return 'skipped'
-
+        parent_price = vals['price']
         ok_combos = err_combos = 0
-        for variant in pending:
+        for variant in tmpl.product_variant_ids:
+            impact = round(self._ps_price(variant) - parent_price, 6)
             try:
+                if variant.ps_combination_id:
+                    try:
+                        self.client.update_combination(
+                            variant.ps_combination_id, price_impact=impact,
+                            reference=variant.default_code or '', ean13=variant.barcode or '')
+                        ok_combos += 1
+                        continue
+                    except PsResourceNotFound:
+                        variant.write({'ps_combination_id': 0})
                 option_value_ids = []
                 for ptav in variant.product_template_attribute_value_ids:
-                    opt_id = self.client.get_or_create_product_option(
-                        ptav.attribute_id.name)
+                    opt_id = self.client.get_or_create_product_option(ptav.attribute_id.name)
                     ov_id = self.client.get_or_create_option_value(
                         opt_id, ptav.product_attribute_value_id.name)
                     option_value_ids.append(ov_id)
-
                 combo_id = self.client.create_combination(
                     ps_product_id=ps_id,
                     option_value_ids=option_value_ids,
                     reference=variant.default_code or '',
                     ean13=variant.barcode or '',
-                    price_impact=variant.price_extra,
+                    price_impact=impact,
                 )
                 if combo_id:
                     variant.write({'ps_combination_id': combo_id})
@@ -689,8 +750,8 @@ class SyncEngine:
 
         n_tot = len(tmpl.product_variant_ids)
         tag = '[NEW-CONFIG]' if created_parent else '[UPD-CONFIG]'
-        lines.append(f'{tag} {tmpl.name} → ps_id={ps_id} | '
-                     f'combinazioni: {ok_combos}/{n_tot}')
+        lines.append(f'{tag} {tmpl.name} → ps_id={ps_id} | combinazioni: {ok_combos}/{n_tot}')
+        self._push_stock(tmpl, lines)
         if err_combos and not ok_combos:
             return 'err'
         return 'created' if created_parent else 'updated'

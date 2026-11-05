@@ -274,13 +274,29 @@ class PsApiClient:
             return None
         return int(products[0]['id']) if products else None
 
-    def create_product(self, name, reference='', ean13='', price=0.0,
-                       description_short='', active=1):
-        """Crea un prodotto su PS e restituisce il nuovo ID."""
-        # PS accetta solo EAN-13 (13 cifre esatte); UPC a 12 cifre o codici non numerici → stringa vuota
-        ean13 = ean13 if (ean13 and len(str(ean13)) == 13 and str(ean13).isdigit()) else ''
+    @staticmethod
+    def _split_barcode(code):
+        """(ean13, upc): PS accetta EAN-13 (13 cifre) e UPC (12 cifre) in campi distinti."""
+        code = str(code or '').strip()
+        if not code.isdigit():
+            return '', ''
+        if len(code) == 13:
+            return code, ''
+        if len(code) == 12:
+            return '', code
+        return '', ''
+
+    @staticmethod
+    def _clean_name(name):
         # PS isCatalogName vieta ; < > = { } e in questa installazione anche #
-        name = re.sub(r'[<>={}#]', '', (name or '')).replace(';', ',').strip()[:128]
+        return re.sub(r'[<>={}#]', '', (name or '')).replace(';', ',').strip()[:128]
+
+    def create_product(self, name, reference='', ean13='', price=0.0,
+                       description_short='', active=1, category_id=0, manufacturer_id=0):
+        """Crea un prodotto su PS e restituisce il nuovo ID."""
+        ean13, upc = self._split_barcode(ean13)
+        name = self._clean_name(name)
+        category_id = int(category_id or self._category_id)
 
         # description_short: tronca a 450 char (limite PS osservato: min ~596, con margine)
         description_short = (description_short or '')[:450]
@@ -303,8 +319,10 @@ class PsApiClient:
     <show_price>1</show_price>
     <price>{float(price):.6f}</price>
     <id_tax_rules_group>{self._tax_rules_group_id}</id_tax_rules_group>
+    <id_manufacturer>{int(manufacturer_id or 0)}</id_manufacturer>
     <reference><![CDATA[{ref_cdata}]]></reference>
     <ean13>{ean13}</ean13>
+    <upc>{upc}</upc>
     <name>
       <language id="{self._lang_id}">{name_xml}</language>
     </name>
@@ -314,15 +332,102 @@ class PsApiClient:
     <description_short>
       <language id="{self._lang_id}"><![CDATA[{desc_cdata}]]></language>
     </description_short>
-    <id_category_default>{self._category_id}</id_category_default>
+    <id_category_default>{category_id}</id_category_default>
     <associations>
       <categories>
-        <category><id>{self._category_id}</id></category>
+        <category><id>{category_id}</id></category>
       </categories>
     </associations>
   </product>
 </prestashop>""".encode('utf-8')
         return self._post_xml('products', xml)
+
+    # Campi che il GET restituisce ma che PS rifiuta in scrittura.
+    _PRODUCT_READONLY = ('manufacturer_name', 'quantity', 'position_in_category')
+
+    def update_product(self, ps_id, name, reference='', ean13='', price=0.0,
+                       description_short='', active=1, category_id=0, manufacturer_id=0):
+        """
+        Aggiorna un prodotto PS esistente (GET → modifica → PUT): nome e
+        descrizione breve nella lingua configurata, prezzo, codici, marca,
+        categoria predefinita e associazione alle categorie (sostituita: Odoo
+        è la fonte). L'indirizzo (link_rewrite) non viene cambiato.
+        """
+        ean13, upc = self._split_barcode(ean13)
+        category_id = int(category_id or self._category_id)
+        root = ET.fromstring(self._get_xml_str('products', ps_id))
+        prod = root.find('product')
+
+        def set_text(tag, value):
+            el = prod.find(tag)
+            if el is not None:
+                el.text = value
+
+        set_text('price', f'{float(price):.6f}')
+        set_text('reference', self._clean_reference(reference))
+        set_text('ean13', ean13)
+        set_text('upc', upc)
+        set_text('id_manufacturer', str(int(manufacturer_id or 0)))
+        set_text('id_category_default', str(category_id))
+        set_text('active', str(int(bool(active))))
+        for tag, value in (('name', self._clean_name(name)),
+                           ('description_short', (description_short or '')[:450])):
+            el = prod.find(tag)
+            for lang in (el.findall('language') if el is not None else []):
+                if int(lang.get('id', 0)) == self._lang_id:
+                    lang.text = value
+        cats = prod.find('associations/categories')
+        if cats is not None:
+            for child in list(cats):
+                cats.remove(child)
+            cat = ET.SubElement(cats, 'category')
+            ET.SubElement(cat, 'id').text = str(category_id)
+        for tag in self._PRODUCT_READONLY:
+            el = prod.find(tag)
+            if el is not None:
+                prod.remove(el)
+        self._put_xml('products', ps_id, ET.tostring(root, encoding='utf-8', xml_declaration=True))
+
+    # ------------------------------------------------------------------
+    # Categorie e marche
+    # ------------------------------------------------------------------
+
+    def _lang_value(self, value):
+        if isinstance(value, list):
+            for entry in value:
+                if int(entry.get('id', 0)) == self._lang_id:
+                    return entry.get('value', '')
+            return value[0].get('value', '') if value else ''
+        return value or ''
+
+    def get_categories(self):
+        """Tutte le categorie PS: [{'id', 'parent', 'name', 'level', 'active'}]."""
+        data = self._get_json('categories', {'display': '[id,id_parent,name,level_depth,active]'})
+        rows = (data.get('categories') or []) if isinstance(data, dict) else []
+        return [{
+            'id': int(c['id']), 'parent': int(c.get('id_parent') or 0),
+            'name': self._lang_value(c.get('name')), 'level': int(c.get('level_depth') or 0),
+            'active': str(c.get('active')) == '1',
+        } for c in (rows if isinstance(rows, list) else []) if isinstance(c, dict)]
+
+    def get_manufacturers(self):
+        """Tutte le marche PS: [{'id', 'name'}]."""
+        data = self._get_json('manufacturers', {'display': '[id,name]'})
+        rows = (data.get('manufacturers') or []) if isinstance(data, dict) else []
+        return [{'id': int(m['id']), 'name': m.get('name') or ''}
+                for m in (rows if isinstance(rows, list) else []) if isinstance(m, dict)]
+
+    def create_manufacturer(self, name):
+        """Crea una marca PS e restituisce il suo ID."""
+        name_xml = self._clean_name(name).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <manufacturer>
+    <active>1</active>
+    <name>{name_xml}</name>
+  </manufacturer>
+</prestashop>""".encode('utf-8')
+        return self._post_xml('manufacturers', xml)
 
     # ------------------------------------------------------------------
     # Opzioni / Combinazioni (prodotti configurabili)
@@ -400,10 +505,23 @@ class PsApiClient:
             './/combination/price': f'{float(price_impact):.6f}',
         })
 
+    def update_combination(self, combo_id, price_impact=0.0, reference='', ean13=''):
+        """Aggiorna impatto prezzo, riferimento ed EAN/UPC di una combinazione (GET → PUT)."""
+        ean, upc = self._split_barcode(ean13)
+        root = ET.fromstring(self._get_xml_str('combinations', combo_id))
+        combo = root.find('combination')
+        for tag, value in (('price', f'{float(price_impact):.6f}'),
+                           ('reference', self._clean_reference(reference)),
+                           ('ean13', ean), ('upc', upc)):
+            el = combo.find(tag)
+            if el is not None:
+                el.text = value
+        self._put_xml('combinations', combo_id, ET.tostring(root, encoding='utf-8', xml_declaration=True))
+
     def create_combination(self, ps_product_id, option_value_ids,
                            reference='', ean13='', price_impact=0.0):
         """Crea una combinazione PS e restituisce il suo ID."""
-        ean13 = ean13 if (ean13 and len(str(ean13)) == 13 and str(ean13).isdigit()) else ''
+        ean13, upc = self._split_barcode(ean13)
         ref_cdata = self._clean_reference(reference).replace(']]>', ']]&gt;')
         ov_xml = ''.join(
             f'<product_option_value><id>{ov}</id></product_option_value>'
@@ -415,7 +533,9 @@ class PsApiClient:
     <id_product>{ps_product_id}</id_product>
     <reference><![CDATA[{ref_cdata}]]></reference>
     <ean13>{ean13}</ean13>
+    <upc>{upc}</upc>
     <price>{float(price_impact):.6f}</price>
+    <minimal_quantity>1</minimal_quantity>
     <associations>
       <product_option_values>{ov_xml}</product_option_values>
     </associations>

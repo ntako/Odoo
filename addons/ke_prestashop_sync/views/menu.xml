@@ -26,6 +26,18 @@
               action="action_ps_product_export"
               sequence="30"/>
 
+    <menuitem id="menu_ps_category_mapping"
+              name="Mappatura categorie"
+              parent="menu_prestashop_root"
+              action="action_product_category_ps_mapping"
+              sequence="40"/>
+
+    <menuitem id="menu_ps_categories"
+              name="Categorie PrestaShop"
+              parent="menu_prestashop_root"
+              action="action_ke_prestashop_category"
+              sequence="45"/>
+
     <menuitem id="menu_ps_settings"
               name="Impostazioni"
               parent="menu_prestashop_root"

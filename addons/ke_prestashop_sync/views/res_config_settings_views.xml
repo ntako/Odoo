@@ -27,17 +27,25 @@
                                  help="Sorgente delle quantità e magazzino degli ordini importati">
                             <field name="ps_warehouse_id"/>
                         </setting>
-                        <setting string="Filtra i prodotti per magazzino"
-                                 help="Sincronizza verso PS solo i prodotti con giacenza > 0 nel magazzino selezionato">
-                            <field name="ps_filter_by_warehouse"/>
+                        <setting string="Esporta anche i prodotti senza giacenza"
+                                 help="Spento: l'export crea su PS solo i prodotti con disponibilità maggiore di zero nel magazzino selezionato">
+                            <field name="ps_export_all"/>
+                        </setting>
+                        <setting string="Listino PrestaShop"
+                                 help="Prezzo per il sito, IVA esclusa. Vuoto: prezzo di vendita Odoo (e della variante)">
+                            <field name="ps_pricelist_id" options="{'no_create': True}"/>
                         </setting>
                         <setting string="ID Shop PrestaShop"
                                  help="Multistore: ID dello shop usato per lo stock (1 di default)">
                             <field name="ps_shop_id"/>
                         </setting>
                         <setting string="Categoria PS di default"
-                                 help="ID categoria assegnata ai prodotti creati dall'export">
+                                 help="ID della categoria PS per i prodotti la cui categoria Odoo non è mappata (Inventario → PrestaShop → Mappatura categorie)">
                             <field name="ps_category_id"/>
+                            <div class="mt8">
+                                <button name="action_refresh_ps_categories" type="object"
+                                        string="Aggiorna categorie da PrestaShop" class="btn btn-sm btn-secondary"/>
+                            </div>
                         </setting>
                         <setting string="Gruppo regole IVA PS"
                                  help="ID id_tax_rules_group assegnato ai prodotti creati dall'export">
