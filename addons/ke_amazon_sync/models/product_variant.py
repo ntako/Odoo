@@ -67,6 +67,18 @@ class ProductProduct(models.Model):
         'ke.amazon.resell.offer', 'product_id', string='Offerte usato Amazon',
     )
 
+    def _amazon_main_sku(self):
+        """
+        SKU principale della variante: quello che il prodotto porta in Odoo
+        (spedizioni, etichette, abbinamenti). Gli altri SKU Amazon dello
+        stesso prodotto sono solo annunci in più (ke.amazon.listing).
+        """
+        self.ensure_one()
+        tmpl = self.product_tmpl_id
+        single = len(tmpl.product_variant_ids) <= 1
+        return (self.x_amazon_sku or (single and tmpl.x_amazon_sku)
+                or self.default_code or '')
+
     def _get_amazon_fnsku(self):
         """
         FNSKU da stampare in etichetta per questa variante: il suo, se ce l'ha

@@ -23,3 +23,4 @@ from . import test_catalog_language
 from . import test_gallery_images
 from . import test_family_names
 from . import test_brands
+from . import test_listing_new_wizard

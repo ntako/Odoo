@@ -61,7 +61,10 @@ class TestFnskuInvalidation(TransactionCase):
         listing.invalidate_recordset()
         self.assertEqual(listing.fnsku, 'X00ALREADYSET', 'un dato assente non deve azzerare un FNSKU già confermato')
 
-    def test_upsert_listing_invalidate_fnsku_true_clears_it(self):
+    def test_upsert_listing_new_sku_is_a_new_listing(self):
+        # Dal 2026-11-05 un annuncio è marketplace + SKU: uno SKU nuovo sulla
+        # stessa variante è un annuncio nuovo, senza FNSKU; quello vecchio
+        # tiene il suo (prima l'annuncio cambiava SKU e l'FNSKU si azzerava).
         marketplace = self.env['ke.amazon.marketplace'].create({
             'name': 'ZZT MKT FNSKU2', 'code': 'ZZTF2', 'marketplace_id': 'ZZT_FNSKU_MKT2', 'active': True,
         })
@@ -76,9 +79,11 @@ class TestFnskuInvalidation(TransactionCase):
         eng = self.SyncEngine(self.env, FakeSpApiClient(marketplace_id='ZZT_FNSKU_MKT2'))
         data = {'sku': 'ZZT-FNSKU-INV+', 'asin': 'B0ZZFNSKUINV', 'status': 'BUYABLE',
                 'fulfillment': 'fba', 'price': 9.99, 'qty_available': 3}
-        eng._upsert_listing(product, data, invalidate_fnsku=True)
-        listing.invalidate_recordset()
-        self.assertFalse(listing.fnsku, "invalidate_fnsku=True deve azzerare l'FNSKU")
+        eng._upsert_listing(product, data)
+        listings = self.env['ke.amazon.listing'].search([('product_id', '=', product.id)])
+        self.assertEqual(sorted(listings.mapped('sku')), ['ZZT-FNSKU-INV', 'ZZT-FNSKU-INV+'])
+        self.assertEqual(listing.fnsku, 'X00OLDCODE')
+        self.assertFalse((listings - listing).fnsku)
 
     # ------------------------------------------------------------------
     # 2a. Full Import reale (prodotto semplice): stesso SKU → FNSKU
@@ -220,7 +225,8 @@ class TestFnskuInvalidationSecondaryMarketplace(TransactionCase):
 
     def test_secondary_marketplace_real_sku_change_invalidates_fnsku_despite_matching_primary_sku(self):
         """Il nuovo SKU coincide per caso con quello legacy (primario) — ma
-        per QUESTA listing è comunque un cambio reale: l'FNSKU va invalidato."""
+        per QUESTO marketplace è uno SKU diverso: dal 2026-11-05 è un
+        annuncio nuovo, senza FNSKU, e quello vecchio tiene il suo."""
         tmpl = self.env['product.template'].create({
             'name': 'ZZT prodotto multi-mkt 2', 'type': 'consu', 'is_storable': True,
             'default_code': 'PRIMARY-SKU', 'x_amazon_sku': 'PRIMARY-SKU', 'x_amazon_asin': 'B0ZZMULTIMKT2',
@@ -233,12 +239,13 @@ class TestFnskuInvalidationSecondaryMarketplace(TransactionCase):
         # coincide col primario solo per coincidenza testuale.
         self._run_secondary([make_report_row('PRIMARY-SKU', asin='B0ZZMULTIMKT2', price='12.00')])
 
-        listing = self.env['ke.amazon.listing'].search([
+        listings = self.env['ke.amazon.listing'].search([
             ('product_id', '=', tmpl.product_variant_id.id), ('marketplace_id', '=', self.secondary.id),
         ])
-        self.assertFalse(listing.fnsku,
-                          "confrontare con lo SKU primario (che per coincidenza combaciava) "
-                          "conservava un FNSKU ormai sbagliato sul marketplace secondario")
+        new_listing = listings.filtered(lambda l: l.sku == 'PRIMARY-SKU')
+        old_listing = listings.filtered(lambda l: l.sku == 'SECONDARY-OLD-SKU-2')
+        self.assertFalse(new_listing.fnsku, "l'FNSKU di un altro SKU non passa all'annuncio nuovo")
+        self.assertEqual(old_listing.fnsku, 'X00SECONDARYSTALE')
 
 
 @tagged('post_install', '-at_install', 'ke_amazon_sync_matching')

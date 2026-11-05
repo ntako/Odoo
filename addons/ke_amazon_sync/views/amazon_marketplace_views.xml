@@ -56,6 +56,8 @@
                 <field name="brand" optional="hide"/>
                 <field name="item_name" optional="hide"/>
                 <field name="parent_asin" optional="hide"/>
+                <field name="open_date" optional="show"/>
+                <field name="manual_product" optional="hide"/>
                 <field name="fulfillment"/>
                 <field name="status" widget="badge"
                        decoration-success="status == 'active'"
@@ -83,6 +85,8 @@
                 <filter string="Inattivi" name="filter_inactive" domain="[('status', '=', 'inactive')]"/>
                 <filter string="In errore" name="filter_error" domain="[('status', '=', 'error')]"/>
                 <separator/>
+                <filter string="Abbinati a mano" name="filter_manual" domain="[('manual_product', '=', True)]"/>
+                <separator/>
                 <filter string="FBA" name="filter_fba" domain="[('fulfillment', '=', 'fba')]"/>
                 <filter string="FBM" name="filter_fbm" domain="[('fulfillment', '=', 'fbm')]"/>
                 <separator/>
@@ -106,11 +110,13 @@
                     <group>
                         <group string="Identificatori">
                             <field name="product_id"/>
+                            <field name="manual_product"/>
                             <field name="marketplace_id"/>
                             <field name="sku"/>
                             <field name="asin"/>
                             <field name="fnsku"/>
                             <field name="product_type"/>
+                            <field name="open_date"/>
                         </group>
                         <group string="Stato">
                             <field name="status"/>

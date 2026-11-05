@@ -17,6 +17,12 @@
                                 type="object"
                                 class="btn btn-primary me-2"
                                 confirm="Pubblica o aggiorna questo prodotto su Amazon. Continuare?"/>
+                        <button name="%(action_amazon_listing_new_wizard)d"
+                                string="Nuova inserzione"
+                                type="action"
+                                class="btn btn-secondary me-2"
+                                invisible="product_variant_count != 1"
+                                help="Offerta su un ASIN esistente, su un marketplace e con uno SKU a scelta (per le famiglie: dalla scheda della variante)."/>
                         <button name="action_amazon_get_asin"
                                 string="Verifica ASIN"
                                 type="object"
@@ -177,12 +183,15 @@
                  tra tutte le varianti, vedi product_template.py). -->
             <xpath expr="//group[@name='codes']" position="after">
                 <separator string="Inserzioni Amazon per marketplace"/>
+                <button name="%(action_amazon_listing_new_wizard)d" string="Nuova inserzione"
+                        type="action" class="btn btn-secondary mb-2"/>
                 <field name="x_amazon_listing_ids" nolabel="1">
                     <list editable="bottom" create="0" delete="0">
                         <field name="marketplace_id" readonly="1"/>
                         <field name="sku" readonly="1"/>
                         <field name="asin" readonly="1"/>
                         <field name="fnsku" readonly="1"/>
+                        <field name="open_date" readonly="1" optional="show"/>
                         <field name="status" readonly="1" widget="badge"
                                decoration-success="status == 'active'"
                                decoration-danger="status == 'error'"

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_listing_new_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.listing.new.wizard.form</field>
+        <field name="model">ke.amazon.listing.new.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Nuova inserzione Amazon">
+                <p class="text-muted">
+                    Offerta su un prodotto già presente nel catalogo Amazon (ASIN esistente). Prima
+                    "Verifica con Amazon": Amazon controlla i dati senza creare nulla. "Pubblica" si
+                    attiva solo dopo una verifica senza errori. Attenzione: la pubblicazione è reale.
+                </p>
+                <group>
+                    <group>
+                        <field name="product_id" options="{'no_create': True}"/>
+                        <field name="marketplace_id" options="{'no_create': True}"/>
+                        <field name="sku"/>
+                        <field name="asin"/>
+                    </group>
+                    <group>
+                        <field name="fulfillment"/>
+                        <field name="condition"/>
+                        <field name="currency_id" invisible="1"/>
+                        <field name="price" widget="monetary" options="{'currency_field': 'currency_id'}"/>
+                        <field name="quantity" invisible="fulfillment != 'fbm'"/>
+                        <field name="sync_price"/>
+                        <field name="sync_qty" invisible="fulfillment != 'fbm'"/>
+                    </group>
+                </group>
+                <separator string="Annunci già presenti per questa variante" invisible="not existing_listing_ids"/>
+                <field name="existing_listing_ids" invisible="not existing_listing_ids" readonly="1">
+                    <list>
+                        <field name="marketplace_id"/>
+                        <field name="sku"/>
+                        <field name="asin"/>
+                        <field name="fulfillment"/>
+                        <field name="status"/>
+                        <field name="price"/>
+                    </list>
+                </field>
+                <field name="check_ok" invisible="1"/>
+                <div class="alert alert-success" role="status" invisible="not result or not check_ok">
+                    <field name="result" nolabel="1"/>
+                </div>
+                <div class="alert alert-danger" role="alert" invisible="not result or check_ok">
+                    <field name="result" nolabel="1"/>
+                </div>
+                <footer>
+                    <button name="action_check" type="object" string="Verifica con Amazon" class="btn-primary"/>
+                    <button name="action_publish" type="object" string="Pubblica" class="btn-primary"
+                            invisible="not check_ok"
+                            confirm="L'offerta viene pubblicata davvero su Amazon. Continuare?"/>
+                    <button special="cancel" string="Chiudi"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_listing_new_wizard" model="ir.actions.act_window">
+        <field name="name">Nuova inserzione Amazon</field>
+        <field name="res_model">ke.amazon.listing.new.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

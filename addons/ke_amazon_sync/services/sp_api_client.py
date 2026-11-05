@@ -759,6 +759,49 @@ class SpApiClient:
         )
         return response.payload
 
+    @_with_retry(DELAY_LISTINGS_S, retry_max=3, backoff_s=8)
+    def get_listing_asin(self, sku):
+        """
+        ASIN dell'annuncio con questo SKU su questo marketplace (getListingsItem,
+        dati 'summaries'), o None se l'annuncio non esiste o Amazon non lo
+        indica. Usato dal Full Import per le righe del report senza ASIN il
+        cui SKU Odoo non conosce (report FR: ASIN vuoto in metà delle righe).
+        getListingsItem: 5 richieste/s, burst 10. Ritentativi brevi: chiamato
+        dentro il thread del Full Import, riga per riga.
+        """
+        from sp_api.api import ListingsItems
+        from sp_api.base.exceptions import SellingApiNotFoundException
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
+        try:
+            resp = api.get_listings_item(
+                self.seller_id, sku, marketplaceIds=[self.marketplace_id], includedData=['summaries'],
+            )
+        except SellingApiNotFoundException:
+            return None
+        for summary in (resp.payload or {}).get('summaries') or []:
+            if summary.get('asin'):
+                return summary['asin']
+        return None
+
+    @_with_retry(DELAY_LISTINGS_S, retry_max=2, backoff_s=3)
+    def listing_exists(self, sku):
+        """
+        True se lo SKU ha già un annuncio su questo marketplace. Serve prima
+        di un PUT (che sostituirebbe l'annuncio esistente). Il 404 si
+        intercetta qui dentro, così il decoratore non lo ritenta; ritentativi
+        brevi perché chiamato da una finestra di dialogo.
+        """
+        from sp_api.api import ListingsItems
+        from sp_api.base.exceptions import SellingApiNotFoundException
+        api = ListingsItems(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
+        try:
+            api.get_listings_item(
+                self.seller_id, sku, marketplaceIds=[self.marketplace_id], includedData=['summaries'],
+            )
+        except SellingApiNotFoundException:
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # PATCH prezzo
     # ------------------------------------------------------------------
@@ -845,11 +888,15 @@ class SpApiClient:
     # ------------------------------------------------------------------
 
     @_with_retry(DELAY_LISTINGS_S)
-    def put_listing(self, sku, product_type, attributes, requirements='LISTING_OFFER_ONLY'):
+    def put_listing(self, sku, product_type, attributes, requirements='LISTING_OFFER_ONLY',
+                    validation_only=False):
         """
         Crea o sostituisce un listing su Amazon via PUT.
         requirements='LISTING_OFFER_ONLY': offerta su ASIN esistente (Scenario A).
         requirements='LISTING': listing completo, può creare nuovo ASIN (Scenario B).
+        validation_only=True: mode=VALIDATION_PREVIEW, Amazon controlla la
+        richiesta e restituisce gli errori senza creare né modificare nulla.
+        Messaggi degli errori in italiano (issueLocale it_IT).
         Ritorna il payload della risposta {'status', 'issues', 'submissionId'}.
         """
         from sp_api.api import ListingsItems
@@ -859,11 +906,10 @@ class SpApiClient:
             'requirements': requirements,
             'attributes': attributes,
         }
-        resp = api.put_listings_item(
-            self.seller_id, sku,
-            marketplaceIds=[self.marketplace_id],
-            body=body,
-        )
+        kwargs = {'marketplaceIds': [self.marketplace_id], 'issueLocale': 'it_IT', 'body': body}
+        if validation_only:
+            kwargs['mode'] = 'VALIDATION_PREVIEW'
+        resp = api.put_listings_item(self.seller_id, sku, **kwargs)
         return resp.payload
 
     # ------------------------------------------------------------------

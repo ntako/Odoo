@@ -52,7 +52,7 @@ class FakeSpApiClient:
     marketplace_id = None
 
     def __init__(self, parent_asin_by_asin=None, ean_by_asin=None, marketplace_id=None,
-                 image_url_by_asin=None, inventory_items=None):
+                 image_url_by_asin=None, inventory_items=None, asin_by_sku=None):
         # {asin_figlio: parent_asin} — un ASIN non presente qui risulta
         # "nessuna relazione di variante" (prodotto standalone agli occhi
         # del Catalog API), stesso comportamento di un ASIN reale senza
@@ -72,6 +72,8 @@ class FakeSpApiClient:
         # sync_fba_quantities_page, che non ha bisogno di collaudare la
         # paginazione reale qui.
         self._inventory_items = inventory_items or []
+        # {sku: asin} — risposta di get_listing_asin (righe del report senza ASIN).
+        self._asin_by_sku = asin_by_sku or {}
         # Override di istanza del default di classe (None): serve ai test
         # che hanno bisogno di un _current_marketplace() reale (es. un
         # marketplace "dedicato", non pooled) — passare qui lo stesso valore
@@ -104,6 +106,12 @@ class FakeSpApiClient:
                     {'variant': 'MAIN', 'link': image_url},
                 ]}]
         return out
+
+    def get_listing_asin(self, sku):
+        """Come SpApiClient.get_listing_asin: ASIN da {sku: asin} passato al
+        costruttore (asin_by_sku), None se assente."""
+        self.asin_requests = getattr(self, 'asin_requests', []) + [sku]
+        return (getattr(self, '_asin_by_sku', None) or {}).get(sku)
 
     def get_catalog_item(self, asin):
         """Versione singola di get_catalog_items_batch — usata da
@@ -139,7 +147,7 @@ def make_dedicated_marketplace(env, name='ZZT Dedicato', code='ZZTD',
 
 
 def make_report_row(sku, asin='', name='Test prodotto', price='9.99', qty='3',
-                     fulfillment='DEFAULT', status='Active'):
+                     fulfillment='DEFAULT', status='Active', open_date=''):
     """
     Costruisce una riga del report listing (formato TSV Amazon) con le
     chiavi esatte attese da `SyncEngine._parse_listing_report`.
@@ -154,4 +162,5 @@ def make_report_row(sku, asin='', name='Test prodotto', price='9.99', qty='3',
         'product-id-type': '',
         'product-id': '',
         'status': status,
+        'open-date': open_date,
     }

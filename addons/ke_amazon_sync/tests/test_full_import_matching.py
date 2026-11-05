@@ -233,12 +233,17 @@ class TestFullImportMatching(TransactionCase):
         eng = self.SyncEngine(self.env, client)
         log = self._make_log('test guardia plus')
 
+        # Dal 2026-11-05 decide la data di apertura, non il "+": nel report
+        # reale la versione "+" è la più recente.
         self._run(eng, log, [make_report_row(sku_plus, asin=asin)])
-        self._run(eng, log, [make_report_row(sku_noplus, asin=asin)])
+        self._run(eng, log, [
+            make_report_row(sku_plus, asin=asin, open_date='05/08/2026 10:00:00 MEST'),
+            make_report_row(sku_noplus, asin=asin, open_date='01/03/2026 10:00:00 MET'),
+        ])
 
         variant = self.env['product.product'].search([('x_amazon_asin', '=', asin)])
         self.assertEqual(len(variant), 1)
-        self.assertEqual(variant.x_amazon_sku, sku_plus, 'lo SKU con + non deve essere sovrascritto da uno senza +')
+        self.assertEqual(variant.x_amazon_sku, sku_plus, 'lo SKU più recente resta il principale')
 
     def test_non_plus_variant_sku_upgraded_to_plus(self):
         """Direzione opposta del test sopra: '+' deve poter sempre sostituire il non-+."""
@@ -553,15 +558,20 @@ class TestFullImportMatching(TransactionCase):
             'default_code': sku, 'x_amazon_sku': sku, 'x_amazon_asin': asin,
         })
 
-    def test_old_sku_without_asin_skipped_when_plus_in_odoo(self):
+    def test_old_sku_without_asin_matched_by_asin_from_amazon(self):
+        # Dal 2026-11-05 niente regola sul nome: l'ASIN del vecchio SKU si
+        # chiede ad Amazon e la riga diventa un annuncio del prodotto vero.
         real = self._make_simple('ZZT-GHOST1+', 'B0ZZGHOST1')
-        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        # Report di un marketplace secondario (come FR): non decide lo SKU.
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', 'ZZ_GHOST_PRIMARY')
+        eng = self.SyncEngine(self.env, FakeSpApiClient(asin_by_sku={'ZZT-GHOST1': 'B0ZZGHOST1'},
+                                                        marketplace_id='ZZ_GHOST_SECONDARY'))
         log = self._make_log('test fantasma senza asin')
         self._run(eng, log, [make_report_row('ZZT-GHOST1', asin='')])
 
         self.assertFalse(self.env['product.template'].search([('default_code', '=', 'ZZT-GHOST1')]),
                          'il vecchio SKU senza + non deve creare un prodotto nuovo')
-        self.assertIn('sostituito da ZZT-GHOST1+ già in Odoo', log.log_lines)
+        self.assertIn('ASIN chiesto ad Amazon per 1 SKU', log.log_lines)
         self.assertEqual(real.x_amazon_sku, 'ZZT-GHOST1+')
 
     def test_old_sku_with_asin_does_not_rename_plus_product(self):
@@ -569,7 +579,9 @@ class TestFullImportMatching(TransactionCase):
         quel marketplace): il match per ASIN non deve riportare il prodotto
         vero da 'X+' a 'X'."""
         real = self._make_simple('ZZT-GHOST2+', 'B0ZZGHOST2')
-        eng = self.SyncEngine(self.env, FakeSpApiClient())
+        # Marketplace secondario (il principale è un altro): non decide lo SKU.
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', 'ZZ_GHOST_PRIMARY')
+        eng = self.SyncEngine(self.env, FakeSpApiClient(marketplace_id='ZZ_GHOST_SECONDARY'))
         log = self._make_log('test fantasma con asin')
         self._run(eng, log, [make_report_row('ZZT-GHOST2', asin='B0ZZGHOST2')])
 

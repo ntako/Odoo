@@ -3,11 +3,11 @@ Test dell'abbinamento SKU → prodotto nell'Import FNSKU
 (process_fnsku_report_rows, _find_fnsku_variant).
 
 Il report FBA può contenere sia la riga storica ('PFS-1234') sia quella
-nuova dopo un rifornimento ('PFS-1234+'). Prima il fallback con/senza '+'
-mandava entrambe sullo stesso prodotto e vinceva l'ultima elaborata, a
-seconda dell'ordine del report. Ora il fallback si applica solo se univoco
-e se lo SKU alternativo non ha una propria riga nel report; uno SKU
-presente su più prodotti viene saltato invece di sceglierne uno.
+nuova dopo un rifornimento ('PFS-1234+'). Dal 2026-11-05 non c'è più il
+ripiego "SKU con/senza +": ogni SKU ha il suo annuncio dopo il Full Import
+e l'abbinamento parte da lì (_find_report_sku_variant); uno SKU che Odoo
+non conosce resta "non trovato" (scelta prudente: l'FNSKU finisce
+sull'etichetta). Uno SKU presente su più prodotti viene saltato.
 
 SyncEngine(env, None): nessun marketplace corrente, ramo "pooled".
 """
@@ -36,17 +36,17 @@ class TestFnskuPlusFallback(TransactionCase):
         with no_commit(self.env):
             return self.engine.process_fnsku_report_rows(self.log, rows)
 
-    def test_unique_fallback_still_matches(self):
-        """Solo la riga nuova nel report, prodotto non ancora riconciliato:
-        il fallback '+' univoco continua ad abbinare (convenzione esistente)."""
+    def test_alternative_sku_is_not_matched_by_name(self):
+        """Solo la riga "+" nel report, prodotto con lo SKU senza "+": niente
+        ripiego sul nome, lo SKU risulta non trovato."""
         tmpl = self._simple('ZZT-PLUS-1')
         result = self._process([{'sku': 'ZZT-PLUS-1+', 'fnsku': 'X00NEW1'}])
-        self.assertEqual(result, (1, 0, 0))
-        self.assertEqual(tmpl.x_amazon_fnsku, 'X00NEW1')
+        self.assertEqual(result, (0, 1, 0))
+        self.assertFalse(tmpl.x_amazon_fnsku)
 
     def test_historical_and_new_rows_product_on_new_sku(self):
-        """Prodotto già sullo SKU nuovo: vince la riga esatta, qualunque sia
-        l'ordine del report; la riga storica viene saltata."""
+        """Prodotto già sullo SKU nuovo: la riga esatta abbina, qualunque sia
+        l'ordine del report; la riga storica non trova nulla."""
         tmpl = self._simple('ZZT-PLUS-2+')
         for rows in (
             [{'sku': 'ZZT-PLUS-2+', 'fnsku': 'X00NEW2'}, {'sku': 'ZZT-PLUS-2', 'fnsku': 'X00OLD2'}],
@@ -55,7 +55,7 @@ class TestFnskuPlusFallback(TransactionCase):
             tmpl.x_amazon_fnsku = False
             self.assertEqual(self._process(rows), (1, 1, 0))
             self.assertEqual(tmpl.x_amazon_fnsku, 'X00NEW2')
-        self.assertIn('SALTATO ZZT-PLUS-2 ', self.log.log_lines)
+        self.assertIn('SKU NON TROVATO (o ambiguo su più varianti): ZZT-PLUS-2 ', self.log.log_lines)
 
     def test_historical_and_new_rows_product_on_old_sku(self):
         """Prodotto ancora sullo SKU storico: riceve l'FNSKU coerente con il
@@ -67,17 +67,6 @@ class TestFnskuPlusFallback(TransactionCase):
         ])
         self.assertEqual(result, (1, 1, 0))
         self.assertEqual(tmpl.x_amazon_fnsku, 'X00OLD3')
-
-    def test_ambiguous_fallback_is_skipped(self):
-        """Fallback '+' che porta a due prodotti: nessuno dei due riceve
-        l'FNSKU."""
-        tmpl_a = self._simple('ZZT-PLUS-4+', name='ZZT A')
-        tmpl_b = self._simple('ZZT-PLUS-4+', name='ZZT B')
-        result = self._process([{'sku': 'ZZT-PLUS-4', 'fnsku': 'X00AMB4'}])
-        self.assertEqual(result, (0, 1, 0))
-        self.assertFalse(tmpl_a.x_amazon_fnsku)
-        self.assertFalse(tmpl_b.x_amazon_fnsku)
-        self.assertIn('SALTATO ZZT-PLUS-4 (abbinamento ambiguo', self.log.log_lines)
 
     def test_ambiguous_exact_sku_is_skipped(self):
         """Stesso SKU esatto su due prodotti: prima limit=1 ne sceglieva uno

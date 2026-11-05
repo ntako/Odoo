@@ -663,6 +663,25 @@ def _grade_and_resell_log_line(skus, prefix='', tracked=False):
             f'non come prodotti: {shown}{more}')
 
 
+def _parse_open_date(value):
+    """
+    open-date del report annunci ("08/10/2026 15:56:15 MEST", in altri
+    marketplace "2026-10-08 15:56:15 PDT"): data e ora così come sono, fuso
+    orario ignorato (serve solo a confrontare gli SKU dello stesso report).
+    None se vuota o non leggibile.
+    """
+    parts = (value or '').split()
+    if not parts:
+        return None
+    for text, fmt in ((' '.join(parts[:2]), '%d/%m/%Y %H:%M:%S'), (' '.join(parts[:2]), '%Y-%m-%d %H:%M:%S'),
+                      (parts[0], '%d/%m/%Y'), (parts[0], '%Y-%m-%d')):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 class _MatchMaps:
     """
     Raggruppa tutte le mappe di matching SKU/ASIN/EAN usate da full_import/
@@ -715,6 +734,16 @@ class _MatchMaps:
             v.x_amazon_sku: v.product_tmpl_id for v in
             env['product.product'].search([('x_amazon_sku', '!=', False)])
         }
+        # Anche il codice interno delle varianti di famiglia: Amazon può
+        # avere due SKU sullo stesso ASIN ("TUB-20104" e "TUB-20104-in
+        # comune", "SAV-64565" e "SAV-64565."), x_amazon_sku tiene l'ultimo
+        # letto, default_code resta il primo. Senza questo la riga FR senza
+        # ASIN con l'altro SKU non trovava la famiglia e creava un prodotto
+        # doppio (25 casi nell'import di arundo_prod del 2026-11-04).
+        for v in env['product.product'].search([
+            ('default_code', '!=', False), ('product_tmpl_id.x_amazon_parent_asin', '!=', False),
+        ]):
+            self.variant_tmpl_by_sku.setdefault(v.default_code, v.product_tmpl_id)
 
     def add_listing_fallback(self, listings):
         """
@@ -738,6 +767,12 @@ class _MatchMaps:
                 self.by_sku[listing.sku] = tmpl
             if listing.asin and listing.asin not in self.by_asin:
                 self.by_asin[listing.asin] = tmpl
+            # L'ASIN è dell'annuncio (dal 2026-11-05): una variante di
+            # famiglia con annunci su più ASIN (stesso prodotto fisico) si
+            # ritrova da ognuno. Solo famiglie: per un prodotto semplice
+            # variant_by_asin lo farebbe trattare come variante.
+            if listing.asin and listing.asin not in self.variant_by_asin and tmpl.x_amazon_parent_asin:
+                self.variant_by_asin[listing.asin] = listing.product_id
 
     def find_simple(self, sku, asin, ean):
         """
@@ -805,24 +840,12 @@ class _MatchMaps:
             return variant.product_tmpl_id
         return None
 
-    def find_superseding(self, sku):
-        """
-        Prodotto (semplice o famiglia) che ha già in Odoo la versione '+' di
-        questo SKU, o None. Il report di un marketplace secondario può
-        contenere ancora il vecchio SKU senza '+', spesso senza ASIN: la
-        guardia "sostituito da X+" basata su best_sku_by_asin (stesso
-        report, stesso ASIN) non scatta, e la riga creava un prodotto nuovo
-        accanto a quello vero — 1.624 duplicati solo FR trovati il
-        2026-10-22, più quelli con ASIN in cui _update_product avrebbe
-        riportato il codice del prodotto vero da 'X+' a 'X'.
-        """
-        if not sku or sku.endswith('+'):
-            return None
-        plus = sku + '+'
-        return (
-            self.by_sku.get(plus)
-            or self.by_default_code.get(plus)
-            or self.variant_tmpl_by_sku.get(plus)
+    def knows_sku(self, sku):
+        """True se questo SKU porta già a un prodotto in Odoo (prodotto, variante,
+        codice interno o annuncio su un marketplace)."""
+        return bool(
+            self.by_sku.get(sku) or self.by_default_code.get(sku)
+            or self.variant_tmpl_by_sku.get(sku)
         )
 
     def forget(self, tmpl):
@@ -895,38 +918,31 @@ class SyncEngine:
         primary_id = self.env['ir.config_parameter'].sudo().get_param('ke_amazon_sync.marketplace_id')
         return not primary_id or self.client.marketplace_id == primary_id
 
-    def _upsert_listing(self, variant, data, invalidate_fnsku=False):
+    def _upsert_listing(self, variant, data):
         """
-        Crea o aggiorna la riga ke.amazon.listing per (variant, marketplace
-        corrente della sync) — una riga per VARIANTE, non per template (vedi
-        amazon_listing.py): ogni variante di una famiglia ha il proprio
-        SKU/ASIN/FNSKU/prezzo/quantità per marketplace. Non fa nulla se il
-        marketplace corrente non è censito in ke.amazon.marketplace (non
-        dovrebbe succedere durante un import in coda, ma non deve bloccare
-        l'import se capita).
+        Crea o aggiorna l'annuncio (ke.amazon.listing) del marketplace
+        corrente con lo SKU di 'data', sulla variante 'variant'. Un annuncio
+        è marketplace + SKU: una variante può averne più d'uno sullo stesso
+        marketplace (Amazon ammette più SKU sullo stesso ASIN), e il secondo
+        SKU non sostituisce più il primo. Se lo SKU era registrato su
+        un'altra variante, l'annuncio passa a quella abbinata ora. Un
+        annuncio senza SKU della variante (creato dalla sync giacenze FBA)
+        viene completato invece di crearne un altro. Non fa nulla se il
+        marketplace corrente non è censito in ke.amazon.marketplace.
 
-        'fnsku' NON viene mai scritto da 'data' qui: tutti i chiamanti
-        (Full Import via _parse_listing_report, riconciliazione via lo
-        stesso parser) passano dizionari che non contengono mai quella
-        chiave — scriverla comunque (come faceva questa funzione fino al
-        2026-10-27) significava azzerare a ogni singolo Full Import/
-        riconciliazione l'FNSKU già confermato da un Import FNSKU
-        precedente, anche senza alcun cambio di SKU. L'FNSKU reale è di
-        competenza esclusiva di process_fnsku_report_rows (scrive
-        listing.fnsku direttamente) — qui si invalida soltanto, e solo su
-        richiesta esplicita del chiamante che sa che lo SKU è appena
-        cambiato (invalidate_fnsku=True): l'FNSKU è legato alla coppia
-        (SKU, venditore), un nuovo SKU rende quello vecchio potenzialmente
-        sbagliato finché non arriva un nuovo Import FNSKU. Vedi TASK.md
-        "FNSKU" per il bug trovato in revisione.
+        'fnsku' non viene mai scritto da qui: è dell'annuncio (SKU +
+        venditore), lo scrive solo process_fnsku_report_rows. Prima del
+        2026-11-05 l'annuncio era unico per variante e cambiava SKU, e
+        l'FNSKU andava invalidato a ogni cambio: ora uno SKU nuovo è un
+        annuncio nuovo, quello vecchio tiene il suo FNSKU.
         """
         marketplace = self._current_marketplace()
         if not marketplace:
             return
         Listing = self.env['ke.amazon.listing'].sudo()
+        sku = data.get('sku') or False
         vals = {
-            'sku': data.get('sku'),
-            'asin': data.get('asin'),
+            'sku': sku,
             'product_type': data.get('product_type', ''),
             'status': 'active' if 'BUYABLE' in (data.get('status') or '') else 'inactive',
             'fulfillment': data.get('fulfillment'),
@@ -938,16 +954,32 @@ class SyncEngine:
         }
         if data.get('brand'):
             vals['brand'] = data['brand']
+        if data.get('open_date'):
+            vals['open_date'] = data['open_date']
+        # Una riga senza ASIN (report FR) non cancella quello già noto dell'annuncio.
+        if data.get('asin'):
+            vals['asin'] = data['asin']
         # Titolo: solo se presente (le righe senza titolo non cancellano quello noto).
         if data.get('name'):
             vals['item_name'] = data['name']
-        if invalidate_fnsku:
-            vals['fnsku'] = False
-        listing = Listing.search([
-            ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
-        ], limit=1)
+        listing = Listing.search([('marketplace_id', '=', marketplace.id), ('sku', '=', sku)], limit=1) if sku else Listing
+        if not listing:
+            listing = Listing.search([
+                ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id), ('sku', '=', False),
+            ], limit=1)
+        # Riga senza ASIN su un annuncio che non lo conosce ancora: quello
+        # dello stesso SKU su un altro marketplace (prima restava vuoto se il
+        # prodotto era trovato per SKU: 1.577 annunci FR al 2026-11-05).
+        if 'asin' not in vals and not listing.asin:
+            known = self._known_asin_for_sku(sku)
+            if known:
+                vals['asin'] = known
         if listing:
-            listing.write(vals)
+            # Annuncio abbinato a mano a un altro prodotto: resta lì (vedi
+            # ke.amazon.listing.manual_product), si aggiornano solo i dati.
+            if listing.product_id != variant and not listing.manual_product:
+                vals['product_id'] = variant.id
+            listing.with_context(ke_import_listing=True).write(vals)
         else:
             vals.update({'product_id': variant.id, 'marketplace_id': marketplace.id})
             Listing.create(vals)
@@ -991,12 +1023,38 @@ class SyncEngine:
             variant = (
                 Product.search([('x_amazon_sku', '=', sku)], limit=1)
                 or Product.search([('default_code', '=', sku)], limit=1)
+                or self.env['ke.amazon.listing'].sudo().search([('sku', '=', sku)], limit=1).product_id
             )
         if not variant:
             return None
+        if not product.get('asin'):
+            product['asin'] = self._known_asin_for_sku(sku)
         self._upsert_listing(variant, product)
+        self._maybe_switch_variant_sku(variant, product)
         self._write_family_text(variant.product_tmpl_id, product)
         return variant
+
+    def _maybe_switch_variant_sku(self, variant, data):
+        """
+        Righe collegate a una variante esistente (famiglia diversa, riga
+        senza ASIN): lo SKU principale della variante segue la stessa regola
+        dell'aggiornamento normale (_switch_main_sku), es. sul marketplace
+        principale arriva la versione "+" di una variante creata da UK con
+        il vecchio SKU. Solo varianti di famiglia (per i prodotti semplici lo
+        SKU è sul template e lo gestisce _update_product). L'FNSKU della
+        variante si azzera: era del vecchio SKU, l'Import FNSKU (incatenato
+        al Full Import) mette quello nuovo.
+        """
+        sku = data.get('sku')
+        current = variant.x_amazon_sku
+        if not sku or sku == current or not variant.product_tmpl_id.x_amazon_parent_asin:
+            return
+        if not self._switch_main_sku(current, sku, data.get('status')):
+            return
+        vals = {'x_amazon_sku': sku, 'x_amazon_fnsku': False}
+        if not variant.default_code or variant.default_code == current:
+            vals['default_code'] = sku
+        variant.write(vals)
 
     def _attach_listing_by_sku(self, product, family_tmpl):
         """
@@ -1021,50 +1079,25 @@ class SyncEngine:
         )
         if not variant:
             return None
-        product['asin'] = variant.x_amazon_asin or ''
+        if not product.get('asin'):
+            product['asin'] = self._known_asin_for_sku(sku)
         self._upsert_listing(variant, product)
+        self._maybe_switch_variant_sku(variant, product)
         return variant
 
-    def _register_listing_for_replaced(self, record, plus_sku, product):
+    def _known_asin_for_sku(self, sku):
         """
-        Riga con il vecchio SKU (senza '+') di un prodotto che in Odoo ha già
-        la versione '+': la variante tiene lo SKU '+' (nessun rimbalzo fra
-        le due forme), ma se su QUESTO marketplace la variante non ha ancora
-        un annuncio, lo registra con lo SKU di questo marketplace — su UK
-        (magazzino e FNSKU propri) il report del 2026-11-04 aveva ancora il
-        vecchio SKU per ~800 prodotti già passati al '+' su IT/ES, e
-        l'annuncio UK non veniva mai registrato. 'record' è la variante o il
-        template che porta lo SKU '+'. Ritorna True se ha registrato.
+        ASIN di una riga senza ASIN: quello dello stesso SKU su un altro
+        marketplace (lo stesso annuncio del venditore), altrimenti vuoto.
+        Fino al 2026-11-05 si copiava l'ASIN del prodotto: falso quando il
+        prodotto ha annunci su ASIN diversi (FR "DAIWA-22CFAILT2000" risultava
+        sull'ASIN della versione "+").
         """
-        marketplace = self._current_marketplace()
-        if not record or not marketplace:
-            return False
-        if record._name == 'product.template':
-            variants = record.product_variant_ids
-            variant = (
-                variants.filtered(lambda v: v.x_amazon_sku == plus_sku)[:1]
-                or variants.filtered(lambda v: v.default_code == plus_sku)[:1]
-                or (variants if len(variants) == 1 else variants.browse())
-            )
-        else:
-            variant = record
-        if not variant:
-            return False
-        Listing = self.env['ke.amazon.listing'].sudo()
-        existing = Listing.search([
-            ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
-        ], limit=1)
-        if existing and existing.sku != product.get('sku'):
-            return False
-        if not product.get('asin'):
-            product['asin'] = variant.x_amazon_asin or variant.product_tmpl_id.x_amazon_asin or ''
-        self._upsert_listing(variant, product)
-        return True
-
-    @staticmethod
-    def _replaced_listing_msg(sku, plus_sku):
-        return (f'COLLEGATO (SKU senza "+" su questo marketplace): {sku} → annuncio registrato '
-                f'sul prodotto {plus_sku}')
+        if not sku:
+            return ''
+        return self.env['ke.amazon.listing'].sudo().search([
+            ('sku', '=', sku), ('asin', '!=', False), ('asin', '!=', ''),
+        ], limit=1).asin or ''
 
     def _attached_listing_msg(self, product, variant, reason):
         marketplace = self._current_marketplace()
@@ -1224,6 +1257,36 @@ class SyncEngine:
         self.env.cr.commit()
         return created, updated, skipped, errors
 
+    def _fill_missing_asins(self, chunk, maps):
+        """
+        Righe del report senza ASIN il cui SKU Odoo non conosce (nessun
+        prodotto, codice interno, annuncio o versione '+'): chiede l'ASIN ad
+        Amazon per quello SKU (getListingsItem) e lo scrive nella riga, che
+        poi segue il percorso normale (Catalog API, abbinamento per ASIN).
+        Senza, la riga diventava un prodotto nuovo: 12 casi nell'import di
+        arundo_prod del 2026-11-05 (es. "PFS-73032}", "FRM-AMZ29PG-150.").
+        Uno SKU già noto non viene chiesto: si abbina già per SKU. Un errore
+        nella richiesta lascia la riga com'era. Ritorna (chiesti, trovati).
+        """
+        if not hasattr(self.client, 'get_listing_asin'):
+            return 0, 0
+        asked = found = 0
+        for row in chunk:
+            sku = (row.get('seller-sku') or '').strip()
+            if (not sku or (row.get('asin1') or '').strip() or _is_grade_and_resell_sku(sku)
+                    or maps.knows_sku(sku)):
+                continue
+            asked += 1
+            try:
+                asin = self.client.get_listing_asin(sku)
+            except Exception as exc:
+                _log.warning('ASIN per lo SKU %s non ottenuto da Amazon: %s', sku, exc)
+                continue
+            if asin:
+                row['asin1'] = asin
+                found += 1
+        return asked, found
+
     @staticmethod
     def _parse_listing_report(row):
         """Converte una riga TSV del report listing in un dict prodotto (senza catalog API)."""
@@ -1250,6 +1313,7 @@ class SyncEngine:
         status = 'BUYABLE' if raw_status == 'ACTIVE' else raw_status
         return {
             'sku': (row.get('seller-sku') or '').strip(),
+            'open_date': _parse_open_date(row.get('open-date')),
             'asin': (row.get('asin1') or '').strip(),
             'name': name_raw,
             'status': status,
@@ -1316,24 +1380,22 @@ class SyncEngine:
         # a prescindere da quale sia primario.
         maps.add_listing_fallback(self.env['ke.amazon.listing'].sudo().search([]))
 
-        # ASIN → SKU "buono" nel report: a parità di ASIN vince sempre la versione '+'
-        # (rifornimento), indipendentemente dal pattern esatto del vecchio SKU
-        # (typo, punto, ecc. — non ci si affida più al confronto testuale sku+'+').
-        best_sku_by_asin = {}
-        for r in rows:
-            r_sku = (r.get('seller-sku') or '').strip()
-            r_asin = (r.get('asin1') or '').strip()
-            # Uno SKU Grade & Resell letto per primo diventava lo SKU "buono"
-            # dell'ASIN (vince il primo, salvo un '+'): mai candidato.
-            if not r_sku or not r_asin or _is_grade_and_resell_sku(r_sku):
-                continue
-            current = best_sku_by_asin.get(r_asin)
-            if current is None or (r_sku.endswith('+') and not current.endswith('+')):
-                best_sku_by_asin[r_asin] = r_sku
+
+        # Stato e data di apertura di ogni SKU nel report di questo
+        # marketplace: servono a _switch_main_sku per scegliere lo SKU
+        # principale quando lo stesso prodotto ha più SKU.
+        self._report_info_by_sku = {
+            (r.get('seller-sku') or '').strip(): (
+                (r.get('status') or '').strip().upper() == 'ACTIVE',
+                _parse_open_date(r.get('open-date')),
+            )
+            for r in rows if (r.get('seller-sku') or '').strip()
+        }
 
         chunk = rows[row_offset:row_offset + chunk_size]
         if not chunk:
             return None
+        asin_asked, asin_found = self._fill_missing_asins(chunk, maps)
 
         # Arricchimento Catalog API a batch (10 ASIN/chiamata) PRIMA di creare
         # i prodotti — vedi docstring. Un fallimento di UNA chiamata batch non
@@ -1398,6 +1460,9 @@ class SyncEngine:
 
         created = updated = skipped = errors = 0
         lines = []
+        if asin_asked:
+            lines.append(f'ASIN chiesto ad Amazon per {asin_asked} SKU senza ASIN nel report e sconosciuti '
+                         f'in Odoo: trovato per {asin_found}.')
 
         grade_resell_skus = set()
         resell_marketplace = self._current_marketplace()
@@ -1443,36 +1508,13 @@ class SyncEngine:
                         lines.append(msg)
                         continue
 
-                    # --- Prodotto semplice (comportamento invariato) ---
-                    # SKU superato dalla versione '+' con lo stesso ASIN: marca inattivo e salta.
-                    best_sku = best_sku_by_asin.get(asin) if asin else None
-                    if best_sku and best_sku != sku and best_sku.endswith('+'):
-                        existing = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
-                        if existing:
-                            existing.write({'x_amazon_status': 'inactive', 'x_amazon_last_sync': datetime.now()})
-                        plus_tmpl = maps.by_sku.get(best_sku) or maps.by_default_code.get(best_sku)
-                        if self._register_listing_for_replaced(plus_tmpl, best_sku, product):
-                            updated += 1
-                            lines.append(self._replaced_listing_msg(sku, best_sku))
-                            continue
-                        skipped += 1
-                        lines.append(f'SALTATO (sostituito da {best_sku}): {sku}')
-                        continue
-
-                    # Stessa guardia, ma con la versione '+' già in Odoo invece
-                    # che nello stesso report (vedi _MatchMaps.find_superseding).
-                    superseding = maps.find_superseding(sku)
-                    if superseding and self._register_listing_for_replaced(superseding, sku + '+', product):
-                        updated += 1
-                        lines.append(self._replaced_listing_msg(sku, sku + '+'))
-                        continue
-                    if superseding:
-                        skipped += 1
-                        lines.append(
-                            f'SALTATO (sostituito da {sku}+ già in Odoo, id={superseding.id}): {sku}'
-                        )
-                        continue
-
+                    # --- Prodotto semplice ---
+                    # Più SKU sullo stesso ASIN (vecchio e "+", ".", ecc.): la
+                    # riga trova il prodotto per ASIN o SKU come le altre e
+                    # diventa un annuncio in più; quale SKU porta il prodotto
+                    # lo decide _switch_main_sku. Fino al 2026-11-05 la
+                    # versione senza "+" veniva saltata qui (best_sku_by_asin,
+                    # find_superseding).
                     # ASIN di una variante di famiglia già esistente, ma riga non
                     # riconosciuta come variante: saltare invece di creare un
                     # semplice duplicato (vedi _MatchMaps.find_family_by_variant_asin).
@@ -1745,6 +1787,41 @@ class SyncEngine:
         if exclude_product_ids:
             domain.append(('id', 'not in', list(exclude_product_ids)))
         return not self.env['product.product'].sudo().search(domain, limit=1)
+
+    def report_similar_skus_on_different_products(self, log_rec):
+        """
+        Elenca (non unisce) gli SKU quasi uguali — uguali a meno di "+", ".",
+        "-", "}" o "/" in fondo, es. "X" e "X+", "X+" e "X++" — finiti su
+        prodotti diversi perché Amazon li ha su ASIN diversi. Dal 2026-11-05
+        l'abbinamento segue solo l'ASIN (prima "X+" si univa a "X" per nome,
+        e sbagliava: SPRO-4621-104+ è sull'ASIN di SPRO-4621-105). Se sono
+        davvero lo stesso articolo: spostare a mano l'annuncio sul prodotto
+        giusto (resta "Abbinato a mano") o unire i prodotti. Ritorna il
+        numero di gruppi.
+        """
+        groups = {}
+        for listing in self.env['ke.amazon.listing'].sudo().search([('sku', '!=', False)]):
+            base = listing.sku.rstrip('+.-}/ ')
+            if base and not _is_grade_and_resell_sku(listing.sku):
+                groups.setdefault(base, []).append(listing)
+        lines = []
+        for base, listings in sorted(groups.items()):
+            products = {l.product_id for l in listings}
+            if len(products) < 2:
+                continue
+            parts = []
+            for product in sorted(products, key=lambda p: p.id):
+                mine = [l for l in listings if l.product_id == product]
+                skus = sorted({l.sku for l in mine})
+                asins = sorted({l.asin for l in mine if l.asin})
+                parts.append(f'id={product.id} {product.default_code or ""}: SKU {", ".join(skus)} '
+                             f'(ASIN {", ".join(asins) or "-"})')
+            lines.append(f'"{base}": ' + ' | '.join(parts))
+        if lines:
+            header = (f'=== SKU QUASI UGUALI SU PRODOTTI DIVERSI (ASIN diversi su Amazon): {len(lines)} — '
+                      f'verifica manuale, nessuna unione automatica ===')
+            log_rec.write({'log_lines': ((log_rec.log_lines or '') + '\n' + '\n'.join([header] + lines)).strip()})
+        return len(lines)
 
     def detect_duplicate_skus(self, log_rec):
         """
@@ -2396,6 +2473,54 @@ class SyncEngine:
                     'value_ids': [(4, attr_val.id)],
                 })
 
+    def _switch_main_sku(self, current, new, new_status):
+        """
+        True se lo SKU principale del prodotto (x_amazon_sku, default_code)
+        passa da 'current' a 'new'. Amazon può avere più SKU sullo stesso
+        prodotto: gli altri sono solo annunci in più (_upsert_listing). Lo
+        decide solo il marketplace principale (gli altri lo farebbero
+        rimbalzare a seconda dell'ordine dei marketplace), con il report di
+        quel marketplace:
+        - entrambi nel report: attivo batte inattivo; a parità di stato
+          vince l'annuncio aperto più di recente (open-date: nei report del
+          2026-11-05 la versione "+" è la più recente in 6.735 coppie su
+          6.743);
+        - lo SKU attuale non è nel report: decide la data salvata sui suoi
+          annunci (altri marketplace, import precedenti); senza data, lo SKU
+          nuovo vince solo se attivo (è quello in vendita sul marketplace
+          principale);
+        - entrambi nel report con date assenti o uguali → resta l'attuale.
+        Fino al 2026-11-05 decideva il "+" nel nome: con ASIN diversi
+        sbagliava (SPRO-4621-104/105, "+" sull'ASIN dell'altro).
+        Fuori dal Full Import a report (nessun report noto) cambia come
+        prima.
+        """
+        if not current or current == new:
+            return True
+        if not self._is_primary_marketplace():
+            return False
+        report = getattr(self, '_report_info_by_sku', None)
+        if report is None:
+            return True
+        new_active = 'BUYABLE' in (new_status or '')
+        new_info = report.get(new, (new_active, None))
+        current_info = report.get(current)
+        if current_info is None:
+            current_date = self._stored_open_date(current)
+            if current_date and new_info[1]:
+                return new_info[1] > current_date
+            return new_info[0]
+        if current_info[0] != new_info[0]:
+            return new_info[0]
+        if current_info[1] and new_info[1]:
+            return new_info[1] > current_info[1]
+        return False
+
+    def _stored_open_date(self, sku):
+        """Data di apertura più recente salvata sugli annunci con questo SKU (tutti i marketplace)."""
+        listings = self.env['ke.amazon.listing'].sudo().search([('sku', '=', sku), ('open_date', '!=', False)])
+        return max(listings.mapped('open_date'), default=None)
+
     def _update_product(self, product, data):
         new_sku = data['sku']
         # Confrontato con lo SKU legacy (primario): usato SOLO per
@@ -2425,7 +2550,11 @@ class SyncEngine:
         # Campi Amazon "legacy": solo se questa sync è sul marketplace primario
         # (fase 3, transizione — vedi _is_primary_marketplace). Il dato vero,
         # per QUALSIASI marketplace, va comunque su ke.amazon.listing sotto.
-        if self._is_primary_marketplace():
+        # Un secondo SKU sullo stesso ASIN (vedi _switch_main_sku) aggiorna
+        # solo il suo annuncio: i campi del prodotto restano quelli dello
+        # SKU principale.
+        if self._is_primary_marketplace() and self._switch_main_sku(
+                product.x_amazon_sku, new_sku, data.get('status')):
             vals.update({
                 'x_amazon_sku': new_sku,
                 'x_amazon_asin': data['asin'],
@@ -2492,18 +2621,7 @@ class SyncEngine:
                 except Exception as exc:
                     _log.warning('Impossibile assegnare barcode %s a %s: %s',
                                  data['ean'], data['sku'], exc)
-        # L'FNSKU della LISTING di questo marketplace va invalidato in base
-        # al suo proprio SKU precedente, non a quello legacy (sku_changed
-        # sopra, gated sul marketplace primario) — vedi commento su
-        # sku_changed. Nessuna listing ancora (prima volta per questa
-        # variante su questo marketplace): tratta come "cambiato", innocuo,
-        # non c'è nulla da invalidare davvero.
-        marketplace = self._current_marketplace()
-        existing_listing = self.env['ke.amazon.listing'].sudo().search([
-            ('product_id', '=', product.product_variant_id.id), ('marketplace_id', '=', marketplace.id),
-        ], limit=1) if marketplace else self.env['ke.amazon.listing']
-        listing_sku_changed = new_sku != (existing_listing.sku or '')
-        self._upsert_listing(product.product_variant_id, data, invalidate_fnsku=listing_sku_changed)
+        self._upsert_listing(product.product_variant_id, data)
 
     # -----------------------------------------------------------------------
     # Gestione prodotti con varianti (famiglia Amazon)
@@ -2666,24 +2784,12 @@ class SyncEngine:
         # Controlla se questa variante (child ASIN) esiste già
         existing_variant = maps.variant_by_asin.get(asin)
         if existing_variant:
-            if update_existing and not sku.endswith('+') and (existing_variant.x_amazon_sku or '').endswith('+'):
-                # Non sovrascrivere un SKU con '+' usando uno senza '+' —
-                # stessa guardia già presente nel ramo prodotto-semplice,
-                # mancava qui. Tra marketplace diversi lo stesso ASIN può
-                # comparire a volte con '+' a volte senza (propagazione non
-                # sincrona della riassegnazione FNSKU) — senza questa
-                # guardia lo SKU della variante "rimbalza" tra le due forme
-                # a seconda dell'ordine di elaborazione dei marketplace, e
-                # la forma non attualmente salvata diventa invisibile al
-                # matching per le righe successive (maps.variant_tmpl_by_sku)
-                # — causa diretta di duplicati, verificata dal vivo sul Full
-                # Import del 2026-10-13 (C4C-0BELTC4MANYGO+ → senza '+' da un
-                # marketplace, poi una riga successiva con '+' non trovava
-                # più nulla e duplicava).
-                if self._register_listing_for_replaced(existing_variant, existing_variant.x_amazon_sku, product):
-                    return 'updated', self._replaced_listing_msg(sku, existing_variant.x_amazon_sku)
-                msg = f'SALTATO (sostituito da {existing_variant.x_amazon_sku}): {sku}'
-                return 'skipped', msg
+            # Un altro SKU sulla stessa variante (es. il vecchio senza "+"):
+            # aggiornamento normale, l'annuncio si aggiunge e lo SKU della
+            # variante lo decide _switch_main_sku — solo il marketplace
+            # principale, quindi niente più "rimbalzo" fra le due forme a
+            # seconda dell'ordine dei marketplace (motivo della guardia "non
+            # sovrascrivere uno SKU con '+'" tolta il 2026-11-05).
             if update_existing:
                 # L'FNSKU è legato alla coppia (SKU, venditore): quando lo
                 # SKU della variante cambia, quello vecchio non è più
@@ -2697,11 +2803,15 @@ class SyncEngine:
                 # l'ha scritto, non necessariamente quello corrente: per
                 # l'FNSKU della LISTING di questo marketplace serve un
                 # confronto separato, vedi listing_sku_changed più sotto.
-                legacy_sku_changed = (existing_variant.x_amazon_sku or '') != sku
-                variant_vals = {'x_amazon_sku': sku, 'default_code': sku}
+                # Un secondo SKU sullo stesso ASIN resta solo un annuncio
+                # in più: la variante tiene il suo SKU (_switch_main_sku).
+                switch_sku = self._switch_main_sku(existing_variant.x_amazon_sku, sku, product.get('status'))
+                legacy_sku_changed = switch_sku and (existing_variant.x_amazon_sku or '') != sku
+                variant_vals = {'x_amazon_sku': sku, 'default_code': sku} if switch_sku else {}
                 if legacy_sku_changed:
                     variant_vals['x_amazon_fnsku'] = False
-                existing_variant.write(variant_vals)
+                if variant_vals:
+                    existing_variant.write(variant_vals)
                 if legacy_sku_changed and len(tmpl.product_variant_ids) <= 1:
                     # Famiglia con UNA sola variante: _get_amazon_fnsku()
                     # (product_variant.py) ricade sul campo del TEMPLATE
@@ -2754,15 +2864,7 @@ class SyncEngine:
                 self._write_family_text(tmpl, product)
                 tmpl.write({'x_amazon_last_sync': datetime.now()})
                 maps.register_variant(asin, sku, existing_variant, tmpl)
-                # L'FNSKU della LISTING di questo marketplace va invalidato
-                # in base al suo proprio SKU precedente, non a quello
-                # legacy (legacy_sku_changed sopra) — vedi commento lì.
-                marketplace = self._current_marketplace()
-                existing_listing = self.env['ke.amazon.listing'].sudo().search([
-                    ('product_id', '=', existing_variant.id), ('marketplace_id', '=', marketplace.id),
-                ], limit=1) if marketplace else self.env['ke.amazon.listing']
-                listing_sku_changed = sku != (existing_listing.sku or '')
-                self._upsert_listing(existing_variant, product, invalidate_fnsku=listing_sku_changed)
+                self._upsert_listing(existing_variant, product)
                 msg = f'AGGIORNATO variante: {sku} / {asin} → {tmpl.name[:40]}{merged_note}'
                 return 'updated', msg
             else:
@@ -2916,10 +3018,16 @@ class SyncEngine:
         (vedi _find_manual_by_ean): sposta la giacenza interna con lo stesso
         meccanismo di _set_product_stock (_update_available_quantity, nessun
         movimento — come la giacenza iniziale seedata alla creazione), passa
-        l'EAN alla variante, elimina i listing del manuale (altrimenti
-        add_listing_fallback continuerebbe a indicarlo come prodotto di
-        quello SKU) e lo archivia. In un savepoint: se qualcosa fallisce
-        non resta mai una giacenza spostata a metà. Ritorna i pezzi spostati.
+        l'EAN alla variante, sposta sulla variante gli annunci del manuale e
+        lo archivia. In un savepoint: se qualcosa fallisce non resta mai una
+        giacenza spostata a metà. Ritorna i pezzi spostati.
+
+        Annunci spostati, non eliminati (dal 2026-11-05): sono SKU Amazon
+        dello stesso prodotto fisico (es. "PFS-1366190" e "PFS-1366190.",
+        stesso EAN, due ASIN). Eliminandoli lo SKU del manuale non restava da
+        nessuna parte e la riga FR senza ASIN con quello SKU creava un
+        prodotto nuovo. Lo SKU del manuale resta riconoscibile anche nelle
+        mappe di questo import (variant_tmpl_by_sku).
         """
         Quant = self.env['stock.quant'].sudo()
         mv = manual.product_variant_id
@@ -2947,7 +3055,9 @@ class SyncEngine:
             cost_copied = bool(cost and not variant.standard_price)
             if cost_copied:
                 variant.write({'standard_price': cost})
-            self.env['ke.amazon.listing'].sudo().search([('product_id', '=', mv.id)]).unlink()
+            manual_listings = self.env['ke.amazon.listing'].sudo().search([('product_id', '=', mv.id)])
+            # Spostati dall'import: non diventano "Abbinato a mano".
+            manual_listings.with_context(ke_import_listing=True).write({'product_id': variant.id})
             moved = sum(qty for _loc, qty in to_move)
             manual.message_post(body=(
                 f'Archiviato dal Full Import Amazon: unito nella variante '
@@ -2965,6 +3075,9 @@ class SyncEngine:
         maps.forget(manual)
         if ean:
             maps.by_barcode.pop(_normalize_ean(ean), None)
+        if variant.product_tmpl_id.x_amazon_parent_asin:
+            for code in {manual.default_code, manual.x_amazon_sku, *manual_listings.mapped('sku')} - {False, ''}:
+                maps.variant_tmpl_by_sku.setdefault(code, variant.product_tmpl_id)
         return moved
 
     def _create_configurable_template(self, first_child, parent_asin, product_type_odoo):
@@ -4304,9 +4417,9 @@ class SyncEngine:
                 # refactor). Un'unica ricerca per entrambi i rami
                 # dedicato/pooled: prima il ramo pooled ne faceva una seconda
                 # identica solo per scrivere, qui serve anche in lettura.
-                listing = self.env['ke.amazon.listing'].sudo().search([
-                    ('product_id', '=', product_variant.id), ('marketplace_id', '=', marketplace.id),
-                ], limit=1) if marketplace else self.env['ke.amazon.listing']
+                # Con più SKU sullo stesso ASIN la giacenza (sommata per
+                # ASIN) va sull'annuncio principale (_main_for).
+                listing = self.env['ke.amazon.listing'].sudo()._main_for(product_variant, marketplace)
 
                 # La giacenza precedente per il confronto NON va letta da
                 # 'listing.qty'/'x_amazon_qty' (i campi di VISUALIZZAZIONE,
@@ -4710,6 +4823,14 @@ class SyncEngine:
         variant = Product.browse()
         if sku:
             variant = Product.search([('x_amazon_sku', '=', sku)], limit=1)
+        if not variant and sku:
+            # Annuncio con questo SKU (un secondo SKU dello stesso prodotto,
+            # es. il vecchio senza "+"): dal 2026-11-05 ognuno ha il suo.
+            marketplace = self._current_marketplace()
+            Listing = self.env['ke.amazon.listing'].sudo()
+            domain = [('sku', '=', sku)] + ([('marketplace_id', '=', marketplace.id)] if marketplace else [])
+            listing = Listing.search(domain, limit=1) or Listing.search([('sku', '=', sku)], limit=1)
+            variant = listing.product_id
         if not variant and asin:
             variant = Product.search([('x_amazon_asin', '=', asin)], limit=1)
         if not variant and sku:
@@ -4776,14 +4897,12 @@ class SyncEngine:
             if not condition:
                 self._conditions_unknown.add(raw)
                 continue
-            variant, _reason = self._find_fnsku_variant(sku, page_skus)
+            variant, _reason, listing = self._find_report_sku_variant(sku, page_skus)
             if not variant:
                 continue
             changed = False
             if marketplace:
-                listing = self.env['ke.amazon.listing'].sudo().search([
-                    ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
-                ], limit=1)
+                listing = listing or self.env['ke.amazon.listing'].sudo()._main_for(variant, marketplace)
                 if listing and listing.condition != condition:
                     listing.write({'condition': condition})
                     changed = True
@@ -4977,27 +5096,39 @@ class SyncEngine:
                 self._set_product_stock(quant.product_id, location, 0)
         return sum(totals.values()), unlinked
 
+    def _find_report_sku_variant(self, sku, report_skus):
+        """
+        Variante per uno SKU di un report FBA (Import FNSKU, condizione):
+        prima l'annuncio con quello SKU sul marketplace corrente (abbinamento
+        esatto fatto dal Full Import, copre anche i secondi SKU sullo stesso
+        ASIN), poi _find_fnsku_variant sui campi del prodotto. Ritorna
+        (variante, motivo, annuncio trovato per SKU o vuoto).
+        """
+        Listing = self.env['ke.amazon.listing'].sudo()
+        marketplace = self._current_marketplace()
+        listing = Listing.search([
+            ('marketplace_id', '=', marketplace.id), ('sku', '=', sku),
+        ], limit=1) if marketplace and sku else Listing
+        if listing and listing.product_id:
+            return listing.product_id, '', listing
+        variant, reason = self._find_fnsku_variant(sku, report_skus)
+        return variant, reason, Listing
+
     def _find_fnsku_variant(self, sku, report_skus):
         """
         Abbinamento SKU → variante dedicato all'Import FNSKU. Più severo di
         _find_amazon_product_variant: un FNSKU sbagliato finisce stampato
         sull'etichetta, quindi nel dubbio si salta invece di scegliere.
 
-        - Match esatto (SKU variante, poi SKU/default_code template) prima di
-          tutto; se lo stesso valore è su più record → ambiguo.
-        - Fallback SKU con/senza '+' solo se lo SKU alternativo NON ha una
-          propria riga nello stesso report: altrimenti la riga storica
-          ('PFS-1234') e quella nuova ('PFS-1234+') finirebbero sullo stesso
-          prodotto e vincerebbe l'ultima elaborata, a seconda dell'ordine
-          del report. La riga dello SKU alternativo resta l'unica fonte per
-          il prodotto che lo porta.
-        - Anche il fallback deve essere univoco.
+        - Match esatto (SKU variante, poi SKU/default_code template); se lo
+          stesso valore è su più record → ambiguo.
         - Template con più varianti → 'multi_variante' (come
           _find_amazon_product_variant: non si sceglie una variante a caso).
-          Lo SKU esiste in Odoo, quindi niente fallback '+': lo SKU
-          alternativo potrebbe essere un altro prodotto e riceverebbe
-          l'FNSKU di questo.
-        - Il fallback si applica solo se lo SKU esatto è del tutto assente.
+        - Nessun ripiego "SKU con/senza +" (tolto il 2026-11-05): ogni SKU
+          ha il suo annuncio dopo il Full Import e _find_report_sku_variant
+          lo trova da lì; uno SKU sconosciuto resta "non trovato", la scelta
+          prudente per un'etichetta. 'report_skus' non è più usato, resta
+          nella firma per i chiamanti.
 
         Ritorna (variante, motivo): motivo '' se trovato, altrimenti
         'non_trovato', 'multi_variante' o 'ambiguo'.
@@ -5021,21 +5152,7 @@ class SyncEngine:
                     return tmpls.product_variant_id, ''
             return Product.browse(), 'non_trovato'
 
-        variant, reason = _resolve(sku)
-        if reason != 'non_trovato':
-            # Trovato, ambiguo o presente ma non risolvibile: il fallback
-            # vale solo per uno SKU che in Odoo non c'è affatto.
-            return variant, reason
-
-        sku_alt = sku[:-1] if sku.endswith('+') else sku + '+'
-        if not sku_alt:
-            return Product.browse(), 'non_trovato'
-        variant, reason = _resolve(sku_alt)
-        if variant and sku_alt in report_skus:
-            # Il prodotto è già rivendicato dalla riga esatta dello SKU
-            # alternativo: questa riga non deve competere con quella.
-            return Product.browse(), 'ambiguo'
-        return variant, reason
+        return _resolve(sku)
 
     def _create_amazon_order_line(self, order, item):
         sku = item.get('SellerSKU', '')
@@ -5200,7 +5317,7 @@ class SyncEngine:
                 continue
 
             try:
-                variant, reason = self._find_fnsku_variant(sku, report_skus)
+                variant, reason, sku_listing = self._find_report_sku_variant(sku, report_skus)
                 if not variant:
                     not_found += 1
                     if reason == 'ambiguo':
@@ -5212,35 +5329,16 @@ class SyncEngine:
                         lines.append(f'{mp_tag}SKU NON TROVATO (o ambiguo su più varianti): {sku} — FNSKU: {fnsku}')
                     continue
 
+                # L'FNSKU è dell'annuncio (SKU): sempre sul suo annuncio. Il
+                # campo condiviso della variante/template (etichette,
+                # spedizioni) solo per lo SKU principale del prodotto — un
+                # secondo SKU sullo stesso ASIN ha un FNSKU suo che non deve
+                # sostituire quello stampato sulle unità.
+                listing = sku_listing or self.env['ke.amazon.listing'].sudo()._main_for(variant, marketplace)
+                is_main = not sku_listing or sku == variant._amazon_main_sku()
                 product = variant.product_tmpl_id
-                if len(product.product_variant_ids) > 1 and not dedicated:
-                    # Famiglia su marketplace POOLED: x_amazon_fnsku del
-                    # template è condiviso da tutte le varianti, si scrive
-                    # invece quello della variante (product.product.
-                    # x_amazon_fnsku) — l'FNSKU è lo stesso per tutto il pool,
-                    # niente a che fare con ke.amazon.listing qui.
-                    if variant.x_amazon_fnsku != fnsku:
-                        variant.write({'x_amazon_fnsku': fnsku})
-                        lines.append(f'{mp_tag}OK {sku} → {fnsku} (variante)')
-                    else:
-                        lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku} (variante)')
-                    matched += 1
-                    continue
 
-                # Prodotto semplice, o famiglia su marketplace DEDICATO
-                # (es. UK): ke.amazon.listing è scoped per VARIANTE — la
-                # lookup è sempre su variant.id, mai su product.id
-                # (template), altrimenti due sorelle della stessa famiglia
-                # condividerebbero la stessa riga/FNSKU (bug di clobbering,
-                # lo stesso motivo per cui prima questo caso veniva saltato
-                # del tutto per i marketplace dedicati).
-                listing = None
-                if marketplace:
-                    listing = self.env['ke.amazon.listing'].sudo().search([
-                        ('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id),
-                    ], limit=1)
-
-                if dedicated:
+                if dedicated or not is_main:
                     if not listing:
                         not_found += 1
                         lines.append(
@@ -5250,19 +5348,31 @@ class SyncEngine:
                         continue
                     if listing.fnsku != fnsku:
                         listing.write({'fnsku': fnsku})
-                        lines.append(f'{mp_tag}OK {sku} → {fnsku}')
+                        lines.append(f'{mp_tag}OK {sku} → {fnsku}' + ('' if is_main else ' (annuncio secondario)'))
                     else:
                         lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku}')
+                elif len(product.product_variant_ids) > 1:
+                    # Famiglia su marketplace POOLED: x_amazon_fnsku del
+                    # template è condiviso da tutte le varianti, si scrive
+                    # quello della variante — l'FNSKU è lo stesso per tutto
+                    # il pool.
+                    if variant.x_amazon_fnsku != fnsku:
+                        variant.write({'x_amazon_fnsku': fnsku})
+                        lines.append(f'{mp_tag}OK {sku} → {fnsku} (variante)')
+                    else:
+                        lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku} (variante)')
+                    if listing and listing.fnsku != fnsku:
+                        listing.write({'fnsku': fnsku})
                 else:
                     if product.x_amazon_fnsku != fnsku:
                         product.write({'x_amazon_fnsku': fnsku})
                         lines.append(f'{mp_tag}OK {sku} → {fnsku}')
                     else:
                         lines.append(f'{mp_tag}INVARIATO {sku}: {fnsku}')
-                    # Riga listing del marketplace corrente, se esiste già
-                    # (creata da full_import/reconcile): aggiornata per
-                    # visibilità, mai creata qui.
-                    if listing:
+                    # Annuncio del marketplace corrente, se esiste già
+                    # (creato da full_import/reconcile): aggiornato per
+                    # visibilità, mai creato qui.
+                    if listing and listing.fnsku != fnsku:
                         listing.write({'fnsku': fnsku})
                 matched += 1
             except Exception as exc:
@@ -5453,7 +5563,7 @@ class SyncEngine:
                     # lo leggeva (sempre assente) da 'data' — ora che non lo
                     # fa più, va invalidato esplicitamente per coerenza con
                     # x_amazon_fnsku sopra, vedi TASK.md "FNSKU".
-                    self._upsert_listing(product.product_variant_id, plus_data, invalidate_fnsku=True)
+                    self._upsert_listing(product.product_variant_id, plus_data)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -5491,7 +5601,7 @@ class SyncEngine:
                                 'x_amazon_fnsku': False,  # vedi commento sopra: nuovo SKU → nuovo FNSKU
                                 'x_amazon_sku_previous': sku,  # solo indicazione informativa
                             })
-                        self._upsert_listing(product.product_variant_id, amazon_data_by_asin, invalidate_fnsku=True)
+                        self._upsert_listing(product.product_variant_id, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1
@@ -5544,7 +5654,7 @@ class SyncEngine:
                         if len(tmpl.product_variant_ids) <= 1:
                             tmpl_vals['x_amazon_fnsku'] = False
                         tmpl.write(tmpl_vals)
-                    self._upsert_listing(variant, plus_data, invalidate_fnsku=True)
+                    self._upsert_listing(variant, plus_data)
                     odoo_skus_seen.add(plus_sku)
                     sku_updated += 1
                     matched += 1
@@ -5582,7 +5692,7 @@ class SyncEngine:
                             if len(tmpl.product_variant_ids) <= 1:
                                 tmpl_vals_asin['x_amazon_fnsku'] = False
                             tmpl.write(tmpl_vals_asin)
-                        self._upsert_listing(variant, amazon_data_by_asin, invalidate_fnsku=True)
+                        self._upsert_listing(variant, amazon_data_by_asin)
                         odoo_skus_seen.add(new_sku)
                         sku_updated += 1
                         matched += 1

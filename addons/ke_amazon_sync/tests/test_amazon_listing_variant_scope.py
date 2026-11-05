@@ -143,7 +143,9 @@ class TestAmazonListingVariantScope(TransactionCase):
         self.env['ke.amazon.listing'].create({
             'product_id': tmpl_b.product_variant_id.id,
             'marketplace_id': self.marketplace.id,
-            'sku': 'ZZT-LS-DUP',
+            # SKU dell'annuncio diverso (uno SKU è unico per marketplace dal
+            # 2026-11-05): il doppione è il codice interno dei due prodotti.
+            'sku': 'ZZT-LS-DUP-B',
         })
         self.env.flush_all()
 
@@ -159,7 +161,7 @@ class TestAmazonListingVariantScope(TransactionCase):
     # variante, non più per id template
     # ------------------------------------------------------------------
 
-    def test_merge_manual_unlinks_its_own_variant_listing(self):
+    def test_merge_manual_moves_its_listing_to_the_variant(self):
         eng = self.SyncEngine(self.env, FakeSpApiClient())
 
         manual = self.env['product.template'].create({
@@ -181,6 +183,8 @@ class TestAmazonListingVariantScope(TransactionCase):
         maps = _MatchMaps(self.env, {})
         eng._merge_manual_into_variant(maps, manual, target_variant, 'EAN')
 
-        self.assertFalse(manual_listing.exists(),
-                          'la riga listing del manuale deve sparire, non restare orfana')
+        self.assertEqual(manual_listing.product_id, target_variant,
+                         "l'annuncio del manuale passa alla variante (stesso prodotto fisico, altro SKU)")
+        self.assertFalse(manual_listing.manual_product,
+                         'spostato dall\'import, non "Abbinato a mano" (arundo_prod 2026-11-05: 45 annunci)')
         self.assertFalse(manual.active)

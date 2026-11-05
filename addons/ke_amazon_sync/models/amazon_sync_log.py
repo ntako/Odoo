@@ -741,6 +741,7 @@ class AmazonSyncLog(models.Model):
                     n_dup = dup_engine.detect_duplicate_skus(log_rec)
                     if n_dup:
                         _log.warning('Full import: %d SKU duplicati rilevati, vedi log sincronizzazione.', n_dup)
+                    dup_engine.report_similar_skus_on_different_products(log_rec)
                 except Exception as exc:
                     _log.warning('Rilevamento SKU duplicati fallito (non bloccante): %s', exc)
 

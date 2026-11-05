@@ -121,9 +121,160 @@ class TestFullImportRobustness(TransactionCase):
         self.assertEqual(log.products_skipped, 0)
         self.assertIn('COLLEGATO (riga senza ASIN nel report, per SKU)', log.log_lines)
 
+    def test_row_without_asin_fills_listing_asin_from_same_sku(self):
+        # arundo_prod 2026-11-05: 1.577 annunci FR senza ASIN su prodotti
+        # trovati per SKU, mentre lo stesso SKU su ES/UK aveva l'ASIN.
+        it_client = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [make_report_row('ZZT-ROBFA-1', asin='B0ZZROBFA1')])
+        product = self.env['ke.amazon.listing'].search([('sku', '=', 'ZZT-ROBFA-1')]).product_id
+        self.assertTrue(product)
+        self.env['ke.amazon.listing'].create({
+            'product_id': product.id, 'marketplace_id': self.es.id, 'sku': 'ZZT-ROBFA-1',
+        })
+        self._run(FakeSpApiClient(marketplace_id='ZZ_ROB_ES'), [make_report_row('ZZT-ROBFA-1', asin='')])
+        self.assertEqual(self._listing(product, self.es).asin, 'B0ZZROBFA1')
+
+    def test_row_without_asin_matches_variant_by_internal_code(self):
+        # arundo_prod 2026-11-04: due SKU sullo stesso ASIN ("TUB-20104" e
+        # "TUB-20104-in comune"), sulla variante resta l'ultimo; la riga FR
+        # senza ASIN con il primo SKU creava un prodotto doppio.
+        child, sibling = 'B0ZZROBDC1', 'B0ZZROBDC2'
+        it_client = FakeSpApiClient({child: 'B0ZZROBDCPA', sibling: 'B0ZZROBDCPA'}, marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [
+            make_report_row('ZZT-ROBDC-1', asin=child), make_report_row('ZZT-ROBDC-2', asin=sibling),
+        ])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', child)])
+        variant.x_amazon_sku = 'ZZT-ROBDC-1-in comune'
+        self.assertEqual(variant.default_code, 'ZZT-ROBDC-1')
+        templates_before = self.env['product.template'].search_count([])
+
+        es_client = FakeSpApiClient(marketplace_id='ZZ_ROB_ES')
+        log, _eng = self._run(es_client, [make_report_row('ZZT-ROBDC-1', asin='')])
+
+        self.assertEqual(self.env['product.template'].search_count([]), templates_before, 'nessun prodotto doppio')
+        self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBDC-1')
+        self.assertIn('COLLEGATO (riga senza ASIN nel report, per SKU)', log.log_lines)
+
+    def test_second_sku_on_same_asin_is_a_second_listing(self):
+        child, sibling = 'B0ZZROBAC1', 'B0ZZROBAC2'
+        it_client = FakeSpApiClient({child: 'B0ZZROBACPA', sibling: 'B0ZZROBACPA'}, marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [
+            make_report_row('ZZT-ROBAC-1', asin=child), make_report_row('ZZT-ROBAC-2', asin=sibling),
+        ])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', child)])
+        es_client = FakeSpApiClient({child: 'B0ZZROBACPA', sibling: 'B0ZZROBACPA'}, marketplace_id='ZZ_ROB_ES')
+        self._run(es_client, [
+            make_report_row('ZZT-ROBAC-1', asin=child),
+            make_report_row('ZZT-ROBAC-1-in comune', asin=child, status='Inactive'),
+        ])
+        # Due annunci sulla stessa variante; la variante tiene il suo SKU e
+        # l'annuncio principale è quello attivo.
+        listings = self._listing(variant, self.es)
+        self.assertEqual(
+            sorted(listings.mapped(lambda l: (l.sku, l.status))),
+            [('ZZT-ROBAC-1', 'active'), ('ZZT-ROBAC-1-in comune', 'inactive')],
+        )
+        self.assertEqual(variant.x_amazon_sku, 'ZZT-ROBAC-1')
+        self.assertEqual(self.env['ke.amazon.listing']._main_for(variant, self.es).sku, 'ZZT-ROBAC-1')
+
+    def test_plus_sku_on_primary_marketplace_fixes_variant_created_elsewhere(self):
+        # arundo_prod 2026-11-05: famiglia creata da UK con il vecchio SKU
+        # ("TUB-4011012"); su IT (principale) vende "TUB-4011012+" in una
+        # famiglia diversa → l'annuncio veniva collegato ma la variante
+        # restava con lo SKU vecchio.
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', 'ZZ_ROB_IT')
+        child, sibling = 'B0ZZROBUP1', 'B0ZZROBUP2'
+        es_client = FakeSpApiClient({child: 'B0ZZROBUPPA', sibling: 'B0ZZROBUPPA'}, marketplace_id='ZZ_ROB_ES')
+        self._run(es_client, [
+            make_report_row('ZZT-ROBUP-1', asin=child), make_report_row('ZZT-ROBUP-2', asin=sibling),
+        ])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', child)])
+        self.assertEqual(variant.x_amazon_sku, 'ZZT-ROBUP-1')
+
+        it_client = FakeSpApiClient({child: 'B0ZZROBUPPB'}, marketplace_id='ZZ_ROB_IT')
+        log, _eng = self._run(it_client, [make_report_row('ZZT-ROBUP-1+', asin=child)])
+        self.assertIn('COLLEGATO (famiglia diversa su ZZRI)', log.log_lines)
+        self.assertEqual((variant.x_amazon_sku, variant.default_code), ('ZZT-ROBUP-1+', 'ZZT-ROBUP-1+'))
+        self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBUP-1', "l'annuncio ES resta col suo SKU")
+
+        # Su un marketplace secondario lo SKU principale non cambia.
+        es2 = FakeSpApiClient({child: 'B0ZZROBUPPC'}, marketplace_id='ZZ_ROB_ES')
+        self._run(es2, [make_report_row('ZZT-ROBUP-1-ALT', asin=child)])
+        self.assertEqual(variant.x_amazon_sku, 'ZZT-ROBUP-1+')
+
+    def test_unknown_sku_without_asin_gets_asin_from_amazon(self):
+        # arundo_prod 2026-11-05: righe FR senza ASIN con SKU mai visti
+        # ("PFS-73032}") diventavano prodotti nuovi. Ora l'ASIN si chiede ad
+        # Amazon per quello SKU; gli SKU già noti non vengono chiesti.
+        child, sibling = 'B0ZZROBLA1', 'B0ZZROBLA2'
+        it_client = FakeSpApiClient({child: 'B0ZZROBLAPA', sibling: 'B0ZZROBLAPA'}, marketplace_id='ZZ_ROB_IT')
+        self._run(it_client, [
+            make_report_row('ZZT-ROBLA-1', asin=child), make_report_row('ZZT-ROBLA-2', asin=sibling),
+        ])
+        variant = self.env['product.product'].search([('x_amazon_asin', '=', child)])
+        templates_before = self.env['product.template'].search_count([])
+
+        es_client = FakeSpApiClient({child: 'B0ZZROBLAPA', sibling: 'B0ZZROBLAPA'}, marketplace_id='ZZ_ROB_ES',
+                                    asin_by_sku={'ZZT-ROBLA-1}': child})
+        log, _eng = self._run(es_client, [
+            make_report_row('ZZT-ROBLA-1}', asin=''),
+            make_report_row('ZZT-ROBLA-2', asin=''),
+        ])
+        self.assertEqual(es_client.asin_requests, ['ZZT-ROBLA-1}'], 'solo lo SKU sconosciuto viene chiesto')
+        self.assertEqual(self.env['product.template'].search_count([]), templates_before, 'nessun prodotto nuovo')
+        listings = self._listing(variant, self.es)
+        self.assertIn('ZZT-ROBLA-1}', listings.mapped('sku'))
+        self.assertEqual(listings.filtered(lambda l: l.sku == 'ZZT-ROBLA-1}').asin, child)
+        self.assertIn('ASIN chiesto ad Amazon per 1 SKU', log.log_lines)
+
+    def test_main_sku_chosen_by_status_then_open_date(self):
+        # Stesso ASIN, due SKU nello stesso report del marketplace principale.
+        it = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
+        self._run(it, [make_report_row('ZZT-ROBOD-A', asin='B0ZZROBOD1', open_date='01/03/2026 10:00:00 MET')])
+        tmpl = self.env['product.template'].search([('x_amazon_asin', '=', 'B0ZZROBOD1')])
+        self.assertEqual(tmpl.x_amazon_sku, 'ZZT-ROBOD-A')
+        # Entrambi attivi: vince quello aperto più di recente.
+        self._run(it, [
+            make_report_row('ZZT-ROBOD-A', asin='B0ZZROBOD1', open_date='01/03/2026 10:00:00 MET'),
+            make_report_row('ZZT-ROBOD-B', asin='B0ZZROBOD1', open_date='05/08/2026 10:00:00 MEST'),
+        ])
+        self.assertEqual(tmpl.x_amazon_sku, 'ZZT-ROBOD-B')
+        # Il più recente inattivo, l'altro attivo: vince l'attivo.
+        self._run(it, [
+            make_report_row('ZZT-ROBOD-A', asin='B0ZZROBOD1', open_date='01/03/2026 10:00:00 MET'),
+            make_report_row('ZZT-ROBOD-B', asin='B0ZZROBOD1', open_date='05/08/2026 10:00:00 MEST',
+                            status='Inactive'),
+        ])
+        self.assertEqual(tmpl.x_amazon_sku, 'ZZT-ROBOD-A')
+        listing = self._listing(tmpl.product_variant_id, self.it).filtered(lambda l: l.sku == 'ZZT-ROBOD-B')
+        self.assertEqual(str(listing.open_date), '2026-08-05 10:00:00')
+
+    def test_listing_moved_by_hand_stays_put(self):
+        it = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
+        self._run(it, [make_report_row('ZZT-ROBMH-1', asin='B0ZZROBMH1'),
+                       make_report_row('ZZT-ROBMH-2', asin='B0ZZROBMH2')])
+        p1 = self.env['product.template'].search([('x_amazon_asin', '=', 'B0ZZROBMH1')]).product_variant_id
+        p2 = self.env['product.template'].search([('x_amazon_asin', '=', 'B0ZZROBMH2')]).product_variant_id
+        listing = self._listing(p2, self.it)
+        listing.product_id = p1
+        self.assertTrue(listing.manual_product)
+        self._run(it, [make_report_row('ZZT-ROBMH-2', asin='B0ZZROBMH2', price='7.00')])
+        self.assertEqual((listing.product_id, listing.price), (p1, 7.0), "l'import non riporta indietro l'annuncio")
+
+    def test_similar_skus_on_different_products_are_reported(self):
+        it = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
+        self._run(it, [make_report_row('ZZT-ROBSIM-1', asin='B0ZZROBSIM1'),
+                       make_report_row('ZZT-ROBSIM-1+', asin='B0ZZROBSIM2')])
+        log = self.env['ke.amazon.sync.log'].create({'name': 'ZZT simili', 'sync_type': 'full_import'})
+        n = self.SyncEngine(self.env, None).report_similar_skus_on_different_products(log)
+        self.assertGreaterEqual(n, 1)
+        self.assertIn('"ZZT-ROBSIM-1"', log.log_lines)
+
     def test_old_sku_on_secondary_marketplace_registers_listing(self):
         # UK del 2026-11-04: il report aveva ancora il vecchio SKU (senza '+')
         # di prodotti già passati al '+' su IT → annuncio UK mai registrato.
+        # ES qui è secondario: lo SKU principale lo decide IT.
+        self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', 'ZZ_ROB_IT')
         it_client = FakeSpApiClient({'B0ZZROBPL2': 'B0ZZROBPLPA', 'B0ZZROBPL3': 'B0ZZROBPLPA'},
                                     marketplace_id='ZZ_ROB_IT')
         self._run(it_client, [
@@ -147,17 +298,20 @@ class TestFullImportRobustness(TransactionCase):
         self.assertEqual(simple.x_amazon_sku or simple.product_tmpl_id.x_amazon_sku, 'ZZT-ROBPL-1+',
                          "lo SKU '+' del prodotto non cambia")
         self.assertEqual(variant.x_amazon_sku, 'ZZT-ROBPL-2+')
-        self.assertIn('COLLEGATO (SKU senza "+" su questo marketplace)', log.log_lines)
 
-    def test_old_sku_skipped_when_marketplace_listing_has_plus(self):
+    def test_old_sku_is_a_second_listing_when_marketplace_has_plus(self):
+        # Dal 2026-11-05: il vecchio SKU è un annuncio a sé della stessa
+        # variante (prima veniva saltato se c'era già l'annuncio '+').
         it_client = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
         self._run(it_client, [make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1')])
         simple = self.env['product.template'].search([('default_code', '=', 'ZZT-ROBPK-1+')]).product_variant_id
         es_client = FakeSpApiClient(marketplace_id='ZZ_ROB_ES')
-        self._run(es_client, [make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1')])
-        log, _eng = self._run(es_client, [make_report_row('ZZT-ROBPK-1', asin='B0ZZROBPK1')])
-        self.assertEqual(self._listing(simple, self.es).sku, 'ZZT-ROBPK-1+')
-        self.assertIn('SALTATO (sostituito', log.log_lines)
+        self._run(es_client, [
+            make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1', open_date='05/08/2026 10:00:00 MEST'),
+            make_report_row('ZZT-ROBPK-1', asin='B0ZZROBPK1', open_date='01/03/2026 10:00:00 MET'),
+        ])
+        self.assertEqual(sorted(self._listing(simple, self.es).mapped('sku')), ['ZZT-ROBPK-1', 'ZZT-ROBPK-1+'])
+        self.assertEqual(simple.product_tmpl_id.x_amazon_sku, 'ZZT-ROBPK-1+')
 
     def test_row_not_recognized_as_variant_attaches_listing(self):
         child = 'B0ZZROBNV1'

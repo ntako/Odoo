@@ -1,9 +1,9 @@
-from odoo import fields, models
+from odoo import api, fields, models
 
 
 class AmazonListing(models.Model):
     _name = 'ke.amazon.listing'
-    _description = 'Inserzione Amazon (prodotto × marketplace)'
+    _description = 'Inserzione Amazon (marketplace × SKU)'
     _rec_name = 'sku'
 
     # Scoped per VARIANTE (product.product), non per template: ogni variante
@@ -40,6 +40,17 @@ class AmazonListing(models.Model):
              'modo su tutti i marketplace. Vuoto per i prodotti semplici o se non noto.',
     )
     fnsku = fields.Char('FNSKU')
+    open_date = fields.Datetime(
+        'Aperto su Amazon', readonly=True,
+        help="Data di apertura dell'annuncio (colonna open-date del report annunci). Tra più "
+             "SKU dello stesso prodotto, a parità di stato, il più recente è lo SKU principale.",
+    )
+    manual_product = fields.Boolean(
+        'Abbinato a mano', default=False,
+        help="Il prodotto di questo annuncio è stato scelto a mano: gli import non lo spostano "
+             "su un altro prodotto anche se l'abbinamento automatico (ASIN, SKU) direbbe altro. "
+             "Si attiva da solo quando si cambia la variante dell'annuncio.",
+    )
     product_type = fields.Char('Amazon Product Type')
 
     status = fields.Selection([
@@ -107,7 +118,36 @@ class AmazonListing(models.Model):
     sync_error = fields.Text('Errore sync', readonly=True)
 
     # Sintassi Odoo 19: vedi commento in amazon_marketplace.py.
-    _product_marketplace_uniq = models.Constraint(
-        'unique(product_id, marketplace_id)',
-        "Esiste già un'inserzione per questo prodotto su questo marketplace.",
+    # Un annuncio è marketplace + SKU; una variante può averne più d'uno
+    # sullo stesso marketplace (Amazon ammette più SKU sullo stesso ASIN:
+    # "TUB-20104" e "TUB-20104-in comune", vecchio SKU e nuovo con "+").
+    # Fino al 2026-11-05 il vincolo era unique(product_id, marketplace_id):
+    # il secondo SKU sovrascriveva il primo o, su una riga senza ASIN,
+    # diventava un prodotto doppio (migrazione 19.0.1.3.0).
+    _marketplace_sku_uniq = models.Constraint(
+        'unique(marketplace_id, sku)',
+        'Esiste già un annuncio con questo SKU su questo marketplace.',
     )
+
+    def write(self, vals):
+        # Variante cambiata a mano (non da un import, che passa ke_import_listing):
+        # l'abbinamento diventa manuale e gli import non lo toccano più.
+        if 'product_id' in vals and 'manual_product' not in vals and not self.env.context.get('ke_import_listing'):
+            vals = dict(vals, manual_product=True)
+        return super().write(vals)
+
+    @api.model
+    def _main_for(self, variant, marketplace):
+        """
+        Annuncio principale della variante sul marketplace, quando serve
+        UN annuncio (giacenza FBA da mostrare, condizione senza SKU): prima
+        gli attivi, poi quello con lo SKU principale della variante, poi il
+        più recente. Vuoto se la variante non ha annunci lì.
+        """
+        if not variant or not marketplace:
+            return self.browse()
+        listings = self.search([('product_id', '=', variant.id), ('marketplace_id', '=', marketplace.id)])
+        if len(listings) <= 1:
+            return listings
+        main_sku = variant._amazon_main_sku()
+        return listings.sorted(lambda l: (l.status != 'active', l.sku != main_sku, -l.id))[:1]
