@@ -21,6 +21,9 @@ class TestAmazonPriceVat(TransactionCase):
         self.SyncEngine = SyncEngine
         self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.marketplace_id', '')
         self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.default_vat_rate', '22')
+        # Questi test riguardano solo l'IVA: listino "Amazon" senza ricarico
+        # (il ricarico tolto alla creazione è in test_marketplace_pricelist).
+        self.env.ref('ke_amazon_sync.pricelist_amazon').item_ids.write({'price_discount': 0.0})
 
     def _make_log(self, name):
         return self.env['ke.amazon.sync.log'].create({'name': name, 'sync_type': 'full_import'})

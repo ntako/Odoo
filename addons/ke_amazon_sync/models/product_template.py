@@ -87,17 +87,54 @@ def _get_amazon_vat_info(product):
     return rate, False
 
 
-def compute_amazon_sale_price(product, base_price):
+def _require_currency_rate(currency, company):
+    """Errore se la valuta non ha tassi di cambio: Odoo convertirebbe 1:1 senza dirlo."""
+    if currency == company.currency_id:
+        return
+    if not currency.sudo().rate_ids:
+        raise UserError(
+            f'Manca il tasso di cambio {company.currency_id.name} → {currency.name}: attiva la '
+            f'valuta e inserisci il tasso (Contabilità → Configurazione → Valute) prima di '
+            f'calcolare prezzi in {currency.name}.')
+
+
+def compute_amazon_sale_price(product, base_price, marketplace=None):
     """
-    Prezzo finale IVA inclusa da comunicare ad Amazon, a partire da base_price
-    (list_price o lst_price del prodotto, nella convenzione — netta o lorda —
-    che risulta dalla sua configurazione fiscale): scorpora l'IVA se necessario
-    → applica il markup del listino 'Amazon' sul netto → reintegra l'IVA.
+    Prezzo finale IVA inclusa da comunicare ad Amazon, nella valuta del
+    marketplace, a partire da base_price (list_price o lst_price del
+    prodotto, nella convenzione — netta o lorda — della sua tassa di vendita).
+
+    - Marketplace con listino (ke.amazon.marketplace.pricelist_id, 2026-11-05):
+      prezzo dal motore listini di Odoo (tutte le regole: varianti, categorie,
+      quantità minime, date, arrotondamenti), già nella valuta del listino,
+      che deve essere quella del marketplace.
+    - Senza listino (o senza marketplace): come prima, listino "Amazon"
+      applicato sul netto (_apply_amazon_pricelist_markup), poi convertito
+      nella valuta del marketplace se diversa da quella aziendale.
+    In entrambi i casi l'IVA del prodotto viene scorporata e si ricarica
+    quella del paese (marketplace.vat_rate), o di nuovo quella del prodotto
+    se il marketplace non la indica. Senza tasso di cambio: errore, mai 1:1.
     """
     rate, price_include = _get_amazon_vat_info(product)
-    net_price = base_price / (1 + rate / 100.0) if price_include else base_price
-    marked_up = _apply_amazon_pricelist_markup(product, net_price)
-    return round(marked_up * (1 + rate / 100.0), 2)
+    company = product.env.company
+    target = (marketplace.currency_id if marketplace else False) or company.currency_id
+    pricelist = marketplace.pricelist_id if marketplace else False
+    if pricelist:
+        if pricelist.currency_id != target:
+            raise UserError(
+                f'Il listino "{pricelist.name}" è in {pricelist.currency_id.name}, ma il marketplace '
+                f'{marketplace.code} vende in {target.name}: serve un listino in {target.name}.')
+        _require_currency_rate(target, company)
+        price = pricelist._get_product_price(product, 1.0, currency=target)
+        net_price = price / (1 + rate / 100.0) if price_include else price
+    else:
+        net_price = base_price / (1 + rate / 100.0) if price_include else base_price
+        net_price = _apply_amazon_pricelist_markup(product, net_price)
+        if target != company.currency_id:
+            _require_currency_rate(target, company)
+            net_price = company.currency_id._convert(net_price, target, company, fields.Date.today())
+    country_rate = marketplace.vat_rate if marketplace and marketplace.vat_rate else rate
+    return round(net_price * (1 + country_rate / 100.0), 2)
 
 
 class ProductTemplate(models.Model):
@@ -454,15 +491,17 @@ class ProductTemplate(models.Model):
             raise UserError(str(exc)) from exc
         return client
 
-    def get_amazon_sale_price(self):
+    def get_amazon_sale_price(self, marketplace=None):
         """
-        Prezzo IVA inclusa da comunicare ad Amazon: list_price con il markup del
-        listino 'Amazon' applicato (Vendite/Inventario → Configurazione →
-        Listini prezzi) e l'IVA reintegrata — aliquota e convenzione
-        netto/lordo lette dalle tasse di vendita configurate sul prodotto.
+        Prezzo IVA inclusa da comunicare ad Amazon sul marketplace indicato
+        (listino e IVA del marketplace, vedi compute_amazon_sale_price); senza
+        marketplace: listino 'Amazon' e IVA del prodotto, in euro.
         """
         self.ensure_one()
-        return compute_amazon_sale_price(self, self.list_price)
+        return compute_amazon_sale_price(self, self.list_price, marketplace)
+
+    def _amazon_client_marketplace(self, client):
+        return self.env['ke.amazon.marketplace']._for_api_id(client.marketplace_id)
 
     def action_amazon_sync_price_qty(self):
         """Sincronizza prezzo e/o quantità di questo prodotto su Amazon."""
@@ -479,7 +518,8 @@ class ProductTemplate(models.Model):
 
         if self.x_amazon_sync_price:
             try:
-                client.patch_price(sku, product_type, self.get_amazon_sale_price())
+                client.patch_price(sku, product_type,
+                                   self.get_amazon_sale_price(self._amazon_client_marketplace(client)))
             except Exception as exc:
                 errors.append(f'prezzo: {exc}')
 
@@ -557,7 +597,7 @@ class ProductTemplate(models.Model):
         marketplace_id = client.marketplace_id
         product_type = self.x_amazon_product_type or 'PRODUCT'
         condition = self.x_amazon_condition or 'new_new'
-        price = self.get_amazon_sale_price()
+        price = self.get_amazon_sale_price(self._amazon_client_marketplace(client))
         is_fba = self.x_amazon_fulfillment == 'fba'
 
         if self.x_amazon_asin:

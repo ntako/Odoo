@@ -95,13 +95,11 @@ class AmazonListingNewWizard(models.TransientModel):
         self.quantity = self._default_quantity()
 
     def _default_price(self):
-        product = self.product_id
-        price = product.get_amazon_sale_price()
-        company = self.env.company
-        currency = self.marketplace_id.currency_id
-        if currency and currency != company.currency_id:
-            price = company.currency_id._convert(price, currency, company, fields.Date.today())
-        return round(price, 2)
+        # Listino e IVA del marketplace; se manca (es. tasso GBP) il prezzo si scrive a mano.
+        try:
+            return self.product_id.get_amazon_sale_price(self.marketplace_id)
+        except UserError:
+            return 0.0
 
     def _default_quantity(self):
         warehouse = self.env.company.amazon_fbm_warehouse_id

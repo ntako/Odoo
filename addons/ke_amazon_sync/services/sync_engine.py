@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 
 import requests
 
+from odoo import fields
 from odoo.exceptions import UserError
 
 _log = logging.getLogger(__name__)
@@ -881,6 +882,10 @@ class SyncEngine:
     def __init__(self, env, client):
         self.env = env
         self.client = client
+
+    def _price_currency_name(self):
+        marketplace = self._current_marketplace()
+        return (marketplace.currency_id or self.env.company.currency_id).name
 
     def _current_marketplace(self):
         """
@@ -2111,9 +2116,51 @@ class SyncEngine:
         risultante è comunque lo stesso (nessuna tassa reale trovata, o
         stessa aliquota del default).
         """
-        corrected = self._net_price(gross, product=template)
+        corrected = self._base_price_from_amazon(gross, template)
         if abs(corrected - template.list_price) > 0.001:
             template.write({'list_price': corrected})
+
+    def _base_price_from_amazon(self, gross, product):
+        """
+        Prezzo base di Odoo (prezzo di vendita) ricavato da un prezzo Amazon
+        IVA inclusa del marketplace corrente: il calcolo di
+        compute_amazon_sale_price fatto all'indietro, così che accendendo
+        "Sync prezzo" il prezzo su Amazon resti quello di oggi. Deciso con
+        l'utente il 2026-11-05: il prezzo di vendita in Odoo è il prezzo base,
+        quello Amazon ne deriva; prima qui si toglieva solo l'IVA e la sync
+        avrebbe alzato tutti i prezzi del ricarico del listino (+15%).
+
+        Toglie l'IVA del paese (o del prodotto), il ricarico della regola in
+        percentuale del listino del marketplace (o "Amazon") applicabile al
+        prodotto, riporta nella valuta aziendale se c'è il tasso di cambio, e
+        rimette l'IVA del prodotto se il suo prezzo è IVA inclusa. Regole a
+        prezzo fisso e supplementi non vengono invertiti (approssimazione).
+        """
+        from odoo.addons.ke_amazon_sync.models.product_template import (
+            _amazon_pricelist_items_by_priority, _get_amazon_vat_info,
+        )
+        if not gross:
+            return 0.0
+        marketplace = self._current_marketplace()
+        rate, price_include = _get_amazon_vat_info(product)
+        country_rate = marketplace.vat_rate if marketplace and marketplace.vat_rate else rate
+        net = gross / (1.0 + country_rate / 100.0)
+        pricelist = (marketplace.pricelist_id if marketplace else False) or self.env.ref(
+            'ke_amazon_sync.pricelist_amazon', raise_if_not_found=False)
+        if pricelist:
+            rule = next((i for i in _amazon_pricelist_items_by_priority(pricelist, product)
+                         if i.compute_price in ('formula', 'percentage')), None)
+            if rule:
+                discount = rule.price_discount if rule.compute_price == 'formula' else rule.percent_price
+                factor = 1.0 - (discount or 0.0) / 100.0
+                if factor > 0:
+                    net = net / factor
+        company = self.env.company
+        currency = marketplace.currency_id if marketplace else False
+        if currency and currency != company.currency_id and currency.sudo().rate_ids:
+            net = currency._convert(net, company.currency_id, company, fields.Date.today())
+        base = net * (1.0 + rate / 100.0) if price_include else net
+        return round(base, 2)
 
     def _marketplace_lang_context(self):
         """
@@ -3202,7 +3249,22 @@ class SyncEngine:
         self._remember_image_url(variant, product.get('image_url'))
         self._remember_gallery(variant, product)
         self._write_family_text(tmpl, product)
+        self._seed_variant_price(variant, product)
         return variant
+
+    def _seed_variant_price(self, variant, product):
+        """
+        Prezzo proprio della variante (ke_list_price, ke_product_catalog) alla
+        creazione, se il suo prezzo Amazon dà un prezzo base diverso da quello
+        della famiglia (seedato dal primo figlio): 276 famiglie Amazon IT con
+        varianti a prezzi diversi al 2026-11-05, prima tutte al prezzo del
+        primo figlio. Non tocca un prezzo variante già scelto.
+        """
+        if variant.ke_list_price or not product.get('price'):
+            return
+        base = self._base_price_from_amazon(product['price'], variant.product_tmpl_id)
+        if base and abs(base - variant.product_tmpl_id.list_price) > 0.005:
+            variant.ke_list_price = base
 
     @staticmethod
     def _format_description(data):
@@ -3502,9 +3564,9 @@ class SyncEngine:
 
             if product.x_amazon_sync_price:
                 try:
-                    amazon_price = product.get_amazon_sale_price()
+                    amazon_price = product.get_amazon_sale_price(self._current_marketplace())
                     self.client.patch_price(sku, product_type, amazon_price)
-                    ops_done.append(f'prezzo={amazon_price:.2f}€')
+                    ops_done.append(f'prezzo={amazon_price:.2f} {self._price_currency_name()}')
                 except Exception as exc:
                     error_msg += f'prezzo: {exc}; '
                     _log.error('Errore patch_price %s: %s', sku, exc)
@@ -3576,9 +3638,9 @@ class SyncEngine:
 
                 if tmpl.x_amazon_sync_price:
                     try:
-                        amazon_price = variant.get_amazon_sale_price()
+                        amazon_price = variant.get_amazon_sale_price(self._current_marketplace())
                         self.client.patch_price(sku, product_type, amazon_price)
-                        ops_done.append(f'prezzo={amazon_price:.2f}€')
+                        ops_done.append(f'prezzo={amazon_price:.2f} {self._price_currency_name()}')
                     except Exception as exc:
                         variant_error += f'prezzo: {exc}; '
                         _log.error('Errore patch_price variante %s: %s', sku, exc)
@@ -3676,9 +3738,9 @@ class SyncEngine:
 
             if listing.sync_price:
                 try:
-                    amazon_price = product.get_amazon_sale_price()
+                    amazon_price = product.get_amazon_sale_price(self._current_marketplace())
                     self.client.patch_price(sku, product_type, amazon_price)
-                    ops_done.append(f'prezzo={amazon_price:.2f}€')
+                    ops_done.append(f'prezzo={amazon_price:.2f} {self._price_currency_name()}')
                 except Exception as exc:
                     error_msg += f'prezzo: {exc}; '
                     _log.error('Errore patch_price %s (%s): %s', sku, marketplace.code, exc)

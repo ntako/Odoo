@@ -1,6 +1,6 @@
 {
     'name': 'KE Product Catalog',
-    'version': '19.0.1.0.0',
+    'version': '19.0.1.1.0',
     'category': 'Sales/Sales',
     'summary': 'Catalogo prodotti comune: marca con nomi alternativi, galleria immagini come indirizzi',
     'description': """
@@ -20,6 +20,9 @@ spazi, punteggiatura e ragione sociale). Gli import la riconoscono o la
 creano "Da verificare"; unione di marche e import della tabella delle
 corrispondenze (nome trovato → marca).
 
+Prezzo di vendita per variante: se compilato vale al posto del prezzo della
+famiglia (lst_price, listini, ordini, canali).
+
 In futuro: codice famiglia del fornitore.
 """,
     'author': 'KE',
@@ -28,6 +31,7 @@ In futuro: codice famiglia del fornitore.
         'security/ir.model.access.csv',
         'views/product_media_views.xml',
         'views/product_brand_views.xml',
+        'views/product_price_views.xml',
     ],
     'installable': True,
     'application': False,

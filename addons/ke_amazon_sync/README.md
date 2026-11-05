@@ -340,6 +340,7 @@ I prezzi restituiti dall'API Amazon per i mercati europei sono **IVA inclusa**.
 
 - **Righe ordine**: il modulo sottrae il campo `ItemTax` (restituito da Amazon per ogni riga) per ottenere il prezzo netto esatto. Odoo applica poi le imposte configurate sul prodotto, ottenendo il totale corretto senza doppia tassazione.
 - **Listino prodotti** (`list_price`): durante l'import, il prezzo lordo Amazon viene diviso per `(1 + aliquota/100)` usando l'**aliquota IVA predefinita** configurata in impostazioni (default 22% per l'Italia). Il valore risultante è il netto da inserire in Odoo.
+- **Prezzo inviato ad Amazon** (sync prezzo, Nuova inserzione, Pubblica): calcolato per marketplace dal prezzo di vendita del prodotto. Se il marketplace ha un **Listino** (scheda marketplace → "Prezzi inviati ad Amazon") si usa il motore listini di Odoo, con il listino nella valuta del marketplace (es. GBP per UK); senza listino, il listino "Amazon" (+15% di partenza) convertito nella valuta del marketplace. L'IVA del prodotto viene scorporata e ricaricata con l'**IVA del paese** del marketplace (0 = IVA del prodotto). Se la valuta non ha un tasso di cambio il calcolo si ferma con un errore: mai conversione 1:1.
 
 ---
 

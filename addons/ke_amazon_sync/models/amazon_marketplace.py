@@ -30,6 +30,19 @@ class AmazonMarketplace(models.Model):
              'Traduzioni → Lingue, altrimenti Odoo non la tiene distinta dalle altre.',
     )
     sequence = fields.Integer('Sequenza', default=10)
+    pricelist_id = fields.Many2one(
+        'product.pricelist', string='Listino',
+        help='Listino del prezzo inviato ad Amazon per questo marketplace, nella sua '
+             'valuta (es. un listino in GBP per UK). Calcolato dal motore listini di '
+             'Odoo sul prezzo di vendita del prodotto. Vuoto: listino "Amazon" '
+             '(+15% di partenza), convertito nella valuta del marketplace.',
+    )
+    vat_rate = fields.Float(
+        'IVA del paese (%)', digits=(5, 2),
+        help='IVA inclusa nel prezzo su questo marketplace (IT 22, ES 21, FR 20, '
+             'UK 20, DE 19). Il prezzo di Odoo viene scorporato dell\'IVA del prodotto '
+             'e ricaricato con questa. 0: si usa l\'IVA del prodotto.',
+    )
     fba_warehouse_id = fields.Many2one(
         'stock.warehouse', string='Magazzino FBA',
         help="Il magazzino Odoo dove questo marketplace tiene la sua giacenza FBA. "
@@ -43,6 +56,14 @@ class AmazonMarketplace(models.Model):
              "altri solo per un marketplace con inventario FBA realmente separato, non "
              "pooled (es. UK o US).",
     )
+
+    @api.model
+    def _for_api_id(self, api_marketplace_id):
+        """Marketplace con questo ID SP-API (es. APJ6JRA9NG5V4), anche se non attivo."""
+        if not api_marketplace_id:
+            return self.browse()
+        return self.with_context(active_test=False).search(
+            [('marketplace_id', '=', api_marketplace_id)], limit=1)
 
     def get_fba_warehouse(self):
         """

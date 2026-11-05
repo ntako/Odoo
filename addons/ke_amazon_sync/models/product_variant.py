@@ -129,12 +129,11 @@ class ProductProduct(models.Model):
         fnsku = self._get_amazon_fnsku()
         return bool(fnsku) and not fnsku.upper().startswith('B0')
 
-    def get_amazon_sale_price(self):
+    def get_amazon_sale_price(self, marketplace=None):
         """
         Prezzo IVA inclusa da comunicare ad Amazon per questa variante: lst_price
-        (prezzo template + extra variante) con il markup del listino 'Amazon' e
-        l'IVA reintegrata — aliquota e convenzione netto/lordo lette dalle tasse
-        di vendita configurate sul prodotto.
+        (prezzo template + extra variante) con listino e IVA del marketplace
+        (vedi compute_amazon_sale_price); senza marketplace: listino 'Amazon'.
         """
         self.ensure_one()
-        return compute_amazon_sale_price(self, self.lst_price)
+        return compute_amazon_sale_price(self, self.lst_price, marketplace)

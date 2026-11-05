@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Prezzo di vendita della variante: accanto al prezzo di vendita
+         nelle schede variante (solo per le varianti di una famiglia). -->
+    <record id="view_product_variant_easy_edit_ke_price" model="ir.ui.view">
+        <field name="name">product.product.easy.edit.ke.price</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_variant_easy_edit_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='pricing']/div[1]" position="after">
+                <field name="ke_list_price" invisible="product_variant_count &lt;= 1"
+                       widget="monetary" options="{'currency_field': 'currency_id', 'field_digits': True}"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_normal_form_ke_price" model="ir.ui.view">
+        <field name="name">product.product.form.ke.price</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_normal_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='lst_price']" position="after">
+                <field name="product_variant_count" invisible="1"/>
+                <span invisible="product_variant_count &lt;= 1" class="ms-3 text-muted">variante:</span>
+                <field name="ke_list_price" invisible="product_variant_count &lt;= 1" class="oe_inline"
+                       widget="monetary" options="{'currency_field': 'currency_id', 'field_digits': True}"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_variant_list_ke_price" model="ir.ui.view">
+        <field name="name">product.product.list.ke.price</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_product_tree_view"/>
+        <field name="arch" type="xml">
+            <field name="lst_price" position="after">
+                <field name="ke_list_price" optional="hide"/>
+            </field>
+        </field>
+    </record>
+</odoo>

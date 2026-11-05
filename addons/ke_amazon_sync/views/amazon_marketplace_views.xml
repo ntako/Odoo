@@ -32,6 +32,10 @@
                         <field name="sequence"/>
                         <field name="fba_warehouse_id"/>
                     </group>
+                    <group string="Prezzi inviati ad Amazon">
+                        <field name="pricelist_id" options="{'no_create': True}"/>
+                        <field name="vat_rate"/>
+                    </group>
                 </sheet>
             </form>
         </field>
