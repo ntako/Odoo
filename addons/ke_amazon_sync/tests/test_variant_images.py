@@ -252,3 +252,28 @@ class TestBestImageUrl(TransactionCase):
     def test_no_usable_image(self):
         self.assertEqual(self.best({}), '')
         self.assertEqual(self.best(self._catalog(('PT05', 500, 500, 'altro.jpg'))), '')
+
+
+@tagged('post_install', '-at_install', 'ke_amazon_sync_matching')
+class TestSimpleImagesSecondaryOnly(TransactionCase):
+    """Prodotto semplice presente solo su un marketplace secondario: niente
+    ASIN sul prodotto, solo sugli annunci (PFS-1530586, 2026-11-05)."""
+
+    def test_simple_product_without_template_asin_gets_image(self):
+        from odoo.addons.ke_amazon_sync.services import sync_engine as se
+        mp = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT ES img', 'code': 'ZZIE', 'marketplace_id': 'ZZ_IMG_ES', 'active': True,
+        })
+        tmpl = self.env['product.template'].create({'name': 'ZZT solo ES', 'type': 'consu'})
+        tmpl.product_variant_id.x_amazon_image_url = 'http://example.invalid/es.jpg'
+        self.env['ke.amazon.listing'].create({
+            'product_id': tmpl.product_variant_id.id, 'marketplace_id': mp.id,
+            'sku': 'ZZT-IMG-ES', 'asin': 'B0ZZIMGES1',
+        })
+        self.assertFalse(tmpl.x_amazon_asin)
+        eng = se.SyncEngine(self.env, FakeSpApiClient())
+        log = self.env['ke.amazon.sync.log'].create({'name': 'ZZT img es', 'sync_type': 'download_images'})
+        with patch.object(se, '_fetch_image_b64', lambda url: _FAKE_IMAGE_B64 if url else None), \
+                no_commit(self.env):
+            eng.download_missing_images(log)
+        self.assertTrue(tmpl.image_1920)

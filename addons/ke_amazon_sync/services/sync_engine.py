@@ -3315,8 +3315,15 @@ class SyncEngine:
         gallery_count = self.save_pending_galleries()
 
         Template = self.env['product.template']
+        # Semplici anche senza ASIN sul prodotto: chi esiste solo su ES/FR/UK
+        # ha ASIN e SKU solo sugli annunci (i campi del prodotto sono del
+        # marketplace principale) — 302 prodotti senza immagine così su
+        # arundo_prod il 2026-11-05 (es. PFS-1530586), pur con l'indirizzo.
         simple_products = Template.search([
-            ('x_amazon_asin', '!=', False),
+            ('x_amazon_parent_asin', '=', False),
+            '|', '|', ('x_amazon_asin', '!=', False),
+            ('product_variant_ids.x_amazon_image_url', '!=', False),
+            ('product_variant_ids.x_amazon_listing_ids.asin', '!=', False),
             ('image_1920', '=', False),
         ])
         family_variants = self.env['product.product'].search([
@@ -3334,7 +3341,9 @@ class SyncEngine:
         ])
 
         def simple_url(tmpl):
-            return tmpl.product_variant_id.x_amazon_image_url, tmpl.x_amazon_asin
+            variant = tmpl.product_variant_id
+            asin = tmpl.x_amazon_asin or variant.x_amazon_listing_ids.filtered('asin')[:1].asin
+            return variant.x_amazon_image_url, asin
 
         def variant_url(variant):
             return variant.x_amazon_image_url, variant.x_amazon_asin
