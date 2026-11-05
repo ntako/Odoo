@@ -119,7 +119,10 @@ class TestFullImportRobustness(TransactionCase):
         self.assertEqual((listing.sku, listing.asin, listing.price), ('ZZT-ROBNA-1', child, 12.5))
         self.assertEqual(len(family.product_variant_ids), variant_count, 'famiglia non modificata')
         self.assertEqual(log.products_skipped, 0)
-        self.assertIn('COLLEGATO (riga senza ASIN nel report, per SKU)', log.log_lines)
+        # Dal 2026-11-06 la riga prende l'ASIN dello stesso SKU (altro
+        # marketplace) e si collega per ASIN, prima per SKU: stesso esito.
+        self.assertIn('COLLEGATO', log.log_lines)
+        self.assertIn('ZZT-ROB', log.log_lines)
 
     def test_row_without_asin_fills_listing_asin_from_same_sku(self):
         # arundo_prod 2026-11-05: 1.577 annunci FR senza ASIN su prodotti
@@ -153,7 +156,10 @@ class TestFullImportRobustness(TransactionCase):
 
         self.assertEqual(self.env['product.template'].search_count([]), templates_before, 'nessun prodotto doppio')
         self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBDC-1')
-        self.assertIn('COLLEGATO (riga senza ASIN nel report, per SKU)', log.log_lines)
+        # Dal 2026-11-06 la riga prende l'ASIN dello stesso SKU (altro
+        # marketplace) e si collega per ASIN, prima per SKU: stesso esito.
+        self.assertIn('COLLEGATO', log.log_lines)
+        self.assertIn('ZZT-ROB', log.log_lines)
 
     def test_second_sku_on_same_asin_is_a_second_listing(self):
         child, sibling = 'B0ZZROBAC1', 'B0ZZROBAC2'

@@ -1270,16 +1270,26 @@ class SyncEngine:
         poi segue il percorso normale (Catalog API, abbinamento per ASIN).
         Senza, la riga diventava un prodotto nuovo: 12 casi nell'import di
         arundo_prod del 2026-11-05 (es. "PFS-73032}", "FRM-AMZ29PG-150.").
-        Uno SKU già noto non viene chiesto: si abbina già per SKU. Un errore
-        nella richiesta lascia la riga com'era. Ritorna (chiesti, trovati).
+        Uno SKU già noto non viene chiesto ad Amazon: prende l'ASIN dello
+        stesso SKU su un altro marketplace, se c'è (2026-11-06: nel report FR
+        quasi tutte le righe sono senza ASIN, il Catalog API non veniva mai
+        chiesto e le descrizioni francesi mancavano: 8 prodotti contro 2.446
+        in spagnolo). Un errore nella richiesta lascia la riga com'era.
+        Ritorna (chiesti, trovati, presi dallo stesso SKU).
         """
-        if not hasattr(self.client, 'get_listing_asin'):
-            return 0, 0
-        asked = found = 0
+        asked = found = known = 0
+        can_ask = hasattr(self.client, 'get_listing_asin')
         for row in chunk:
             sku = (row.get('seller-sku') or '').strip()
-            if (not sku or (row.get('asin1') or '').strip() or _is_grade_and_resell_sku(sku)
-                    or maps.knows_sku(sku)):
+            if not sku or (row.get('asin1') or '').strip() or _is_grade_and_resell_sku(sku):
+                continue
+            if maps.knows_sku(sku):
+                asin = self._known_asin_for_sku(sku)
+                if asin:
+                    row['asin1'] = asin
+                    known += 1
+                continue
+            if not can_ask:
                 continue
             asked += 1
             try:
@@ -1290,7 +1300,7 @@ class SyncEngine:
             if asin:
                 row['asin1'] = asin
                 found += 1
-        return asked, found
+        return asked, found, known
 
     @staticmethod
     def _parse_listing_report(row):
@@ -1400,7 +1410,7 @@ class SyncEngine:
         chunk = rows[row_offset:row_offset + chunk_size]
         if not chunk:
             return None
-        asin_asked, asin_found = self._fill_missing_asins(chunk, maps)
+        asin_asked, asin_found, _asin_known = self._fill_missing_asins(chunk, maps)
 
         # Arricchimento Catalog API a batch (10 ASIN/chiamata) PRIMA di creare
         # i prodotti — vedi docstring. Un fallimento di UNA chiamata batch non

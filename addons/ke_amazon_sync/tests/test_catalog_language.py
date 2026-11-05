@@ -98,6 +98,35 @@ class TestCatalogLanguage(TransactionCase):
         self.assertEqual(tmpl.with_context(lang='it_IT').description_sale, 'Descrizione italiana',
                          'la descrizione italiana non si tocca')
 
+    def test_row_without_asin_takes_asin_of_same_sku_and_gets_description(self):
+        # Report FR del 2026-11-05: quasi tutte le righe senza ASIN, il Catalog
+        # API non veniva chiesto e la descrizione francese non arrivava mai.
+        sku, asin = 'ZZT-LANG-NOASIN', 'B0ZZLANGNA1'
+        tmpl = self._complete_template(sku, asin)
+        it = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT IT lingua', 'code': 'ZZLI', 'marketplace_id': 'ZZ_LANG_IT', 'active': True})
+        self.env['ke.amazon.listing'].create({
+            'product_id': tmpl.product_variant_id.id, 'marketplace_id': it.id, 'sku': sku, 'asin': asin})
+        requested = []
+
+        class EsClient(FakeSpApiClient):
+            locale = 'es_ES'
+
+            def get_catalog_items_batch(self, asins):
+                requested.extend(asins)
+                out = super().get_catalog_items_batch(asins)
+                for a in asins:
+                    out[a]['attributes'] = {'product_description': _localized([('es_ES', 'Descripción ES')])}
+                return out
+
+        eng = self.se.SyncEngine(self.env, EsClient(marketplace_id='ZZ_LANG_ES'))
+        log = self.env['ke.amazon.sync.log'].create({'name': 'ZZT senza asin', 'sync_type': 'full_import'})
+        with no_commit(self.env):
+            eng.full_import_report_rows(log, [make_report_row(sku, asin='', name='Nombre ES')], 0, 1, True)
+        self.assertIn(asin, requested)
+        tmpl.invalidate_recordset()
+        self.assertIn('Descripción ES', tmpl.with_context(lang='es_ES').description_sale)
+
     def _es_family_client(self, mapping, marketplace_id, descriptions):
         class Client(FakeSpApiClient):
             def get_catalog_items_batch(self, asins):
