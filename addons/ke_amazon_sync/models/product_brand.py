@@ -1,6 +1,6 @@
 from collections import Counter
 
-from odoo import fields, models
+from odoo import api, fields, models
 
 
 class ProductBrand(models.Model):
@@ -20,3 +20,15 @@ class ProductBrand(models.Model):
             values = Counter(v for v in brand.with_context(active_test=False).product_tmpl_ids.mapped('x_amazon_brand') if v)
             if values:
                 brand.amazon_name = values.most_common(1)[0][0]
+
+    @api.model
+    def _reassign_products_for_name(self, name, old_brand, new_brand):
+        """Prodotti con marca Amazon uguale a 'name' (confronto normalizzato) passano a 'new_brand'."""
+        res = super()._reassign_products_for_name(name, old_brand, new_brand)
+        from odoo.addons.ke_product_catalog.models.product_brand import brand_key
+        key = brand_key(name)
+        products = self.env['product.template'].with_context(active_test=False).search([
+            ('ke_brand_id', '=', old_brand.id), ('x_amazon_brand', '!=', False),
+        ]).filtered(lambda t: brand_key(t.x_amazon_brand) == key)
+        products.write({'ke_brand_id': new_brand.id or False})
+        return res

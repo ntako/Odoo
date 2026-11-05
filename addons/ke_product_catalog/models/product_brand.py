@@ -112,6 +112,17 @@ class ProductBrand(models.Model):
     def action_confirm(self):
         self.write({'to_review': False})
 
+    @api.model
+    def _reassign_products_for_name(self, name, old_brand, new_brand):
+        """
+        Il nome alternativo 'name' è passato da 'old_brand' a 'new_brand' (vuoto
+        = "non è una marca"): sposta i prodotti che avevano 'old_brand' PER
+        QUEL nome. Qui non si sa da quale nome viene la marca di un prodotto
+        (dipende dalla fonte): ogni modulo che assegna marche lo estende (es.
+        ke_amazon_sync, dalla marca Amazon del prodotto).
+        """
+        return False
+
     def _merge_into(self, target):
         """
         Unisce queste marche in 'target': prodotti spostati, il nome e i nomi

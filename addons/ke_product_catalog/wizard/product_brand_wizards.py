@@ -78,8 +78,14 @@ class ProductBrandAliasImport(models.TransientModel):
                 continue
             wanted = str(row[target_col] or '').strip() if len(row) > target_col else ''
             if not wanted:
-                if not Alias.search([('key', '=', brand_key(found))], limit=1):
+                alias = Alias.search([('key', '=', brand_key(found))], limit=1)
+                if not alias:
                     Alias.create({'name': found, 'brand_id': False})
+                    ignored += 1
+                elif alias.brand_id:
+                    # Reimport con la scelta cambiata: ora "non è una marca".
+                    Brand._reassign_products_for_name(found, alias.brand_id, Brand.browse())
+                    alias.brand_id = False
                     ignored += 1
                 stray = Brand.search([('key', '=', brand_key(found)), ('to_review', '=', True)])
                 stray.filtered(lambda b: not b.product_count).unlink()
@@ -93,11 +99,19 @@ class ProductBrandAliasImport(models.TransientModel):
             if brand_key(found) == target.key:
                 continue
             stray = Brand.search([('key', '=', brand_key(found)), ('id', '!=', target.id)])
+            alias = Alias.search([('key', '=', brand_key(found))], limit=1)
             if stray:
                 (stray | target)._merge_into(target)
                 merged += len(stray)
-            elif not Alias.search([('key', '=', brand_key(found))], limit=1):
+            elif not alias:
                 Alias.create({'name': found, 'brand_id': target.id})
+                aliases += 1
+            elif alias.brand_id != target:
+                # Reimport con la scelta cambiata: il nome passa alla nuova marca,
+                # e con lui i prodotti che avevano quella marca per quel nome.
+                if alias.brand_id:
+                    Brand._reassign_products_for_name(found, alias.brand_id, target)
+                alias.brand_id = target
                 aliases += 1
         self.result = (f'Marche create: {created}. Nomi alternativi aggiunti: {aliases}. '
                        f'Marche unite: {merged}. Nomi segnati "non è una marca": {ignored}.')

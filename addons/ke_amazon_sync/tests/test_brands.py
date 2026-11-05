@@ -64,3 +64,20 @@ class TestBrands(TransactionCase):
         tmpl.ke_brand_id = other
         eng.assign_brands_from_amazon()
         self.assertEqual(tmpl.ke_brand_id, other, 'una marca confermata non si cambia')
+
+    def test_alias_reimport_with_changed_choice_moves_products(self):
+        import base64
+        self._run({'B0ZZBR5': 'ZZT マリア'}, [make_report_row('ZZT-BR-5', asin='B0ZZBR5')])
+        tmpl = self._tmpl('ZZT-BR-5')
+
+        def load(rows):
+            data = ('Marca su Amazon,Prodotti,Marca corretta\n' + rows).encode()
+            self.env['ke.product.brand.alias.import'].create({
+                'file_data': base64.b64encode(data), 'file_name': 'm.csv'}).action_import()
+
+        load('ZZT マリア,1,ZZT Maria\n')
+        self.assertEqual(tmpl.ke_brand_id.name, 'ZZT Maria')
+        load('ZZT マリア,1,ZZT Yamashita\n')
+        self.assertEqual(tmpl.ke_brand_id.name, 'ZZT Yamashita', 'reimport: il prodotto segue la nuova scelta')
+        load('ZZT マリア,1,\n')
+        self.assertFalse(tmpl.ke_brand_id, 'reimport: "non è una marca"')
