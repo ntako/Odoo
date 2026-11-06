@@ -42,3 +42,4 @@ access_ke_amazon_inbound_plan_option_manager,ke.amazon.inbound.plan.option manag
 access_ke_amazon_resell_offer_user,ke.amazon.resell.offer user,model_ke_amazon_resell_offer,stock.group_stock_user,1,0,0,0
 access_ke_amazon_resell_offer_manager,ke.amazon.resell.offer manager,model_ke_amazon_resell_offer,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_listing_new_wizard,ke.amazon.listing.new.wizard,model_ke_amazon_listing_new_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_price_analysis_user,ke.amazon.price.analysis user,model_ke_amazon_price_analysis,stock.group_stock_user,1,0,0,0

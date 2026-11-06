@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_price_analysis_list" model="ir.ui.view">
+        <field name="name">ke.amazon.price.analysis.list</field>
+        <field name="model">ke.amazon.price.analysis</field>
+        <field name="arch" type="xml">
+            <list string="Analisi prezzi Amazon" create="0" edit="0" delete="0">
+                <field name="marketplace_id"/>
+                <field name="sku"/>
+                <field name="product_id" optional="show"/>
+                <field name="brand_id" optional="hide"/>
+                <field name="categ_id" optional="hide"/>
+                <field name="fulfillment" optional="show"/>
+                <field name="currency_id" column_invisible="1"/>
+                <field name="price" widget="monetary" options="{'currency_field': 'currency_id'}"/>
+                <field name="price_net"/>
+                <field name="cost"/>
+                <field name="base_price" optional="show"/>
+                <field name="fee_referral" optional="hide"/>
+                <field name="fee_fulfillment" optional="hide"/>
+                <field name="fee_total"/>
+                <field name="fee_pct" optional="show"/>
+                <field name="margin"/>
+                <field name="margin_pct"/>
+                <field name="markup_cost_pct"/>
+                <field name="markup_base_pct" optional="show"/>
+                <field name="fee_date" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_price_analysis_pivot" model="ir.ui.view">
+        <field name="name">ke.amazon.price.analysis.pivot</field>
+        <field name="model">ke.amazon.price.analysis</field>
+        <field name="arch" type="xml">
+            <pivot string="Analisi prezzi Amazon" sample="1">
+                <field name="brand_id" type="row"/>
+                <field name="marketplace_id" type="col"/>
+                <field name="markup_cost_pct" type="measure"/>
+                <field name="margin_pct" type="measure"/>
+                <field name="fee_pct" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="view_amazon_price_analysis_graph" model="ir.ui.view">
+        <field name="name">ke.amazon.price.analysis.graph</field>
+        <field name="model">ke.amazon.price.analysis</field>
+        <field name="arch" type="xml">
+            <graph string="Analisi prezzi Amazon" type="bar" sample="1">
+                <field name="marketplace_id"/>
+                <field name="margin_pct" type="measure"/>
+            </graph>
+        </field>
+    </record>
+
+    <record id="view_amazon_price_analysis_search" model="ir.ui.view">
+        <field name="name">ke.amazon.price.analysis.search</field>
+        <field name="model">ke.amazon.price.analysis</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="sku"/>
+                <field name="product_tmpl_id"/>
+                <field name="brand_id"/>
+                <field name="marketplace_id"/>
+                <filter name="with_cost" string="Con costo" domain="[('has_cost', '=', True)]"/>
+                <filter name="with_fees" string="Con commissioni" domain="[('has_fees', '=', True)]"/>
+                <separator/>
+                <filter name="fba" string="FBA" domain="[('fulfillment', '=', 'fba')]"/>
+                <filter name="fbm" string="FBM" domain="[('fulfillment', '=', 'fbm')]"/>
+                <separator/>
+                <filter name="loss" string="In perdita" domain="[('margin', '&lt;', 0)]"/>
+                <filter name="low_margin" string="Margine sotto 10%" domain="[('margin_pct', '&lt;', 10)]"/>
+                <filter name="low_markup" string="Ricarico sul costo sotto 30%" domain="[('markup_cost_pct', '&lt;', 30)]"/>
+                <filter name="high_markup" string="Ricarico sul costo sopra 300%" domain="[('markup_cost_pct', '&gt;', 300)]"/>
+                <group>
+                    <filter name="group_marketplace" string="Marketplace" context="{'group_by': 'marketplace_id'}"/>
+                    <filter name="group_brand" string="Marca" context="{'group_by': 'brand_id'}"/>
+                    <filter name="group_categ" string="Categoria" context="{'group_by': 'categ_id'}"/>
+                    <filter name="group_fulfillment" string="Fulfillment" context="{'group_by': 'fulfillment'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_amazon_price_analysis" model="ir.actions.act_window">
+        <field name="name">Analisi prezzi</field>
+        <field name="res_model">ke.amazon.price.analysis</field>
+        <field name="view_mode">list,pivot,graph</field>
+        <field name="context">{'search_default_with_cost': 1, 'search_default_group_marketplace': 1}</field>
+        <field name="help" type="html">
+            <p>Una riga per annuncio attivo: prezzo netto, costo, commissioni Amazon, margine e ricarico.</p>
+            <p>Le commissioni arrivano con Impostazioni → Amazon → "Aggiorna commissioni Amazon"; per UK serve il tasso di cambio della sterlina.</p>
+        </field>
+    </record>
+</odoo>

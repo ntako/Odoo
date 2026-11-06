@@ -16,3 +16,4 @@ from . import amazon_inbound_plan
 from . import amazon_resell_offer
 from . import stock_warehouse
 from . import product_brand
+from . import amazon_price_analysis

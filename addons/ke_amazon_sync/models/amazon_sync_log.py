@@ -30,6 +30,7 @@ class AmazonSyncLog(models.Model):
         ('import_fnsku', 'Import FNSKU'),
         ('detect_marketplaces', 'Rileva Marketplace Attivi'),
         ('recover_renamed_families', 'Ripara Famiglie Rinominate su Amazon'),
+        ('listing_fees', 'Commissioni Amazon'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),
@@ -126,6 +127,8 @@ class AmazonSyncLog(models.Model):
             params.set_param('ke_amazon_sync.import_state', 'idle')
             params.set_param('ke_amazon_sync.import_marketplace_queue', '')
             params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
+        elif self.sync_type == 'listing_fees':
+            params.set_param('ke_amazon_sync.listing_fees_state', 'idle')
         elif self.sync_type == 'download_images':
             # Come sync_fba: thread di background, qui liberiamo solo lo
             # stato per permettere un nuovo avvio, non fermiamo un thread

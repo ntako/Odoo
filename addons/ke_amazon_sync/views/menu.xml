@@ -196,6 +196,12 @@
               action="action_amazon_listing"
               sequence="41"/>
 
+    <menuitem id="menu_amazon_price_analysis"
+              name="Analisi prezzi"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_price_analysis"
+              sequence="43"/>
+
     <menuitem id="menu_amazon_listing_new"
               name="Nuova inserzione"
               parent="menu_amazon_sync_root"

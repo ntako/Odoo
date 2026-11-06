@@ -3360,6 +3360,74 @@ class SyncEngine:
         catalog = self.client.get_catalog_item(asin) if (self.client and asin) else {}
         return _best_image_url(catalog)
 
+    _FEES_BATCH = 20
+
+    def update_listing_fees(self, log_rec, marketplaces, client_factory):
+        """
+        Commissioni Amazon stimate (Product Fees API) per gli annunci attivi
+        con prezzo, marketplace per marketplace, 20 per chiamata: commissione
+        di vendita reale per categoria e, per FBA, tariffa di logistica
+        (2026-11-06, per l'Analisi prezzi: prima si ipotizzava un 15% fisso).
+        Salta gli annunci già stimati allo stesso prezzo senza errori, così un
+        secondo giro (o la ripresa dopo un riavvio) chiede solo il resto.
+        Solo letture su Amazon. Ritorna (stimati, saltati, errori).
+        """
+        Listing = self.env['ke.amazon.listing'].sudo()
+        done = skipped = errors = 0
+        lines = []
+        for marketplace in marketplaces:
+            listings = Listing.search([
+                ('marketplace_id', '=', marketplace.id), ('status', '=', 'active'),
+                ('price', '>', 0), ('sku', '!=', False),
+            ])
+            todo = listings.filtered(lambda l: not (l.fee_date and not l.fee_error
+                                                    and abs(l.fee_price - l.price) < 0.005))
+            skipped += len(listings) - len(todo)
+            if not todo:
+                continue
+            client = client_factory(marketplace)
+            currency = (marketplace.currency_id or self.env.company.currency_id).name
+            mp_done = mp_err = 0
+            for start in range(0, len(todo), self._FEES_BATCH):
+                batch = todo[start:start + self._FEES_BATCH]
+                items = [{'id': l.id, 'sku': l.sku, 'price': l.price, 'currency': currency,
+                          'is_fba': l.fulfillment == 'fba'} for l in batch]
+                try:
+                    results = client.get_fees_estimates(items)
+                except Exception as exc:
+                    _log.warning('Commissioni %s: lotto fallito: %s', marketplace.code, exc)
+                    results = {str(l.id): {'error': str(exc)[:250]} for l in batch}
+                now = datetime.now()
+                for listing in batch:
+                    res = results.get(str(listing.id)) or {'error': 'nessuna stima restituita'}
+                    if res.get('error'):
+                        listing.write({'fee_error': res['error'], 'fee_date': now, 'fee_price': listing.price})
+                        mp_err += 1
+                        continue
+                    listing.write({
+                        'fee_total': res['total'], 'fee_referral': res['referral'],
+                        'fee_fulfillment': res['fulfillment'], 'fee_other': res['other'],
+                        'fee_price': listing.price, 'fee_date': now, 'fee_error': False,
+                    })
+                    mp_done += 1
+                log_rec.write({'products_total': done + mp_done + errors + mp_err + skipped,
+                               'products_updated': done + mp_done, 'products_error': errors + mp_err,
+                               'products_skipped': skipped,
+                               'log_lines': '\n'.join(lines + [f'[{marketplace.code}] {start + len(batch)}/{len(todo)}'])})
+                self.env.cr.commit()
+            done += mp_done
+            errors += mp_err
+            lines.append(f'[{marketplace.code}] commissioni stimate: {mp_done}, errori: {mp_err}')
+        lines.append(f'Già stimati allo stesso prezzo (saltati): {skipped}.')
+        log_rec.write({
+            'state': 'done' if done or not errors else 'error',
+            'products_total': done + errors + skipped, 'products_updated': done,
+            'products_skipped': skipped, 'products_error': errors,
+            'log_lines': '\n'.join(lines), 'end_date': datetime.now(),
+        })
+        self.env.cr.commit()
+        return done, skipped, errors
+
     def download_missing_images(self, log_rec):
         """
         Scarica l'immagine mancante per: prodotti semplici (product.template,

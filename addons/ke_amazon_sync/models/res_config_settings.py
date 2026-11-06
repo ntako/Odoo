@@ -473,6 +473,47 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_download_images', log_rec.id)
         return self._open_log_action()
 
+    def action_run_listing_fees(self):
+        """Stima le commissioni Amazon degli annunci attivi, in background."""
+        self._validate_credentials()
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.listing_fees_state') == 'running':
+            raise UserError('Un aggiornamento delle commissioni è già in corso.')
+        log_rec = self.env['ke.amazon.sync.log'].create({
+            'name': f'Commissioni Amazon — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'listing_fees',
+            'state': 'running',
+            'start_date': datetime.now(),
+        })
+        params.set_param('ke_amazon_sync.listing_fees_state', 'running')
+        self.env.cr.commit()
+        self._start_thread('_thread_listing_fees', log_rec.id)
+        return self._open_log_action()
+
+    @api.model
+    def _thread_listing_fees(self, db, uid, ctx, log_id):
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from ..services.sp_api_client import SpApiClient
+        from ..services.sync_engine import SyncEngine
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            params = env['ir.config_parameter'].sudo()
+            try:
+                marketplaces = env['ke.amazon.marketplace'].search([('active', '=', True)])
+                engine = SyncEngine(env, None)
+                engine.update_listing_fees(
+                    log_rec, marketplaces, lambda mp: SpApiClient(env, marketplace_id=mp.marketplace_id))
+            except Exception as exc:
+                _log.error('Thread listing_fees fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': datetime.now()})
+                cr.commit()
+            finally:
+                params.set_param('ke_amazon_sync.listing_fees_state', 'idle')
+                cr.commit()
+
     def action_run_detect_marketplaces(self):
         """
         Chiede ad Amazon su quali marketplace il venditore è realmente attivo

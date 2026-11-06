@@ -15,6 +15,7 @@ DELAY_LISTINGS_S = 0.3
 DELAY_SEARCH_S = 0.5
 DELAY_ORDERS_GET_S = 60.0   # getOrders (lista/pagina ordini): rate ufficiale sostenuto 0.0167 req/s (1 ogni 60s), burst 20
 DELAY_ORDERS_ITEMS_S = 2.0  # getOrderItems (righe ordine): rate ufficiale 0.5 req/s, burst 30
+DELAY_FEES_S = 2.2        # getMyFeesEstimates (fino a 20 stime per chiamata): rate 0.5 req/s, burst 1
 DELAY_INVENTORY_S = 0.5   # getInventorySummaries: max 2 req/s (burst 2) → 0.5s tra ogni chiamata
 DELAY_SELLERS_S = 60.0    # getMarketplaceParticipations: rate ufficiale 0.016 req/s (~1 ogni 60s), burst 15
 # Fulfillment Inbound v2024-03-20 (piano spedizioni inbound FBA): rate
@@ -103,6 +104,46 @@ def _with_retry(delay_s, retry_max=None, backoff_s=None):
         return wrapper
     return decorator
 
+
+
+def _fee_amount(detail):
+    block = detail.get('FinalFee') or detail.get('FeeAmount') or {}
+    try:
+        return float(block.get('Amount') or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def parse_fees_estimates(payload):
+    """
+    Risposta di getMyFeesEstimates → {identificativo: {'total', 'referral',
+    'fulfillment', 'other', 'error'}}. Commissione di vendita = ReferralFee
+    (+ VariableClosingFee/PerItemFee in "other"), logistica = FBAFees.
+    """
+    results = {}
+    rows = payload if isinstance(payload, list) else (payload or {}).get('FeesEstimateResult') or []
+    for row in rows if isinstance(rows, list) else [rows]:
+        ident = ((row.get('FeesEstimateIdentifier') or {}).get('SellerInputIdentifier') or '')
+        estimate = row.get('FeesEstimate') or {}
+        if row.get('Status') != 'Success' or not estimate:
+            err = row.get('Error') or {}
+            results[ident] = {'total': 0.0, 'referral': 0.0, 'fulfillment': 0.0, 'other': 0.0,
+                              'error': (err.get('Message') or err.get('Code') or row.get('Status') or 'errore')[:250]}
+            continue
+        referral = fulfillment = other = 0.0
+        for detail in estimate.get('FeeDetailList') or []:
+            fee_type = detail.get('FeeType') or ''
+            amount = _fee_amount(detail)
+            if fee_type == 'ReferralFee':
+                referral += amount
+            elif fee_type.startswith('FBA'):
+                fulfillment += amount
+            else:
+                other += amount
+        total = _fee_amount({'FeeAmount': estimate.get('TotalFeesEstimate')}) or (referral + fulfillment + other)
+        results[ident] = {'total': total, 'referral': referral, 'fulfillment': fulfillment,
+                          'other': other, 'error': ''}
+    return results
 
 class SpApiClient:
     """
@@ -758,6 +799,27 @@ class SpApiClient:
             includedData=['summaries', 'attributes', 'issues'],
         )
         return response.payload
+
+    @_with_retry(DELAY_FEES_S, retry_max=3, backoff_s=8)
+    def get_fees_estimates(self, items):
+        """
+        Commissioni Amazon stimate (Product Fees API, getMyFeesEstimates) per
+        fino a 20 annunci di questo marketplace in una chiamata. items:
+        [{'id', 'sku', 'price', 'currency', 'is_fba'}], prezzo IVA inclusa come
+        sull'annuncio. Ritorna {id: {'total', 'referral', 'fulfillment',
+        'other', 'error'}} negli importi della valuta del marketplace: la
+        commissione di vendita reale per categoria (non un 15% fisso) e, per
+        FBA, la tariffa di logistica. Ritentativi brevi: chiamata in ciclo.
+        """
+        from sp_api.api import ProductFees
+        api = ProductFees(marketplace=self._marketplace(), credentials=self.credentials, timeout=HTTP_TIMEOUT_S)
+        requests_ = [{
+            'price': round(float(it['price']), 2), 'currency': it['currency'], 'is_fba': bool(it['is_fba']),
+            'identifier': str(it['id']), 'marketplace_id': self.marketplace_id,
+            'id_type': 'SellerSKU', 'id_value': it['sku'],
+        } for it in items]
+        resp = api.get_product_fees_estimate(requests_)
+        return parse_fees_estimates(resp.payload)
 
     @_with_retry(DELAY_LISTINGS_S, retry_max=3, backoff_s=8)
     def get_listing_asin(self, sku):

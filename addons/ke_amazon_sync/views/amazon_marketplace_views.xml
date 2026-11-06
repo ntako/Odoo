@@ -143,6 +143,19 @@
                             <field name="sync_error"/>
                         </group>
                     </group>
+                    <group string="Commissioni Amazon (stima, valuta del marketplace)">
+                        <group>
+                            <field name="fee_referral"/>
+                            <field name="fee_fulfillment"/>
+                            <field name="fee_other"/>
+                            <field name="fee_total"/>
+                        </group>
+                        <group>
+                            <field name="fee_price"/>
+                            <field name="fee_date"/>
+                            <field name="fee_error" invisible="not fee_error"/>
+                        </group>
+                    </group>
                     <group string="Pubblicazione">
                         <field name="publish_state"/>
                         <field name="publish_error"/>

@@ -68,6 +68,15 @@ class AmazonListing(models.Model):
     ], string='Fulfillment', help='FBA: Amazon gestisce le spedizioni. FBM: spedisci tu.')
 
     price = fields.Float('Prezzo Amazon (attuale)', readonly=True)
+    # Commissioni stimate da Amazon (Product Fees API) per il prezzo fee_price,
+    # nella valuta del marketplace: "Aggiorna commissioni Amazon" (2026-11-06).
+    fee_total = fields.Float('Commissioni Amazon', readonly=True)
+    fee_referral = fields.Float('Commissione di vendita', readonly=True)
+    fee_fulfillment = fields.Float('Tariffa logistica FBA', readonly=True)
+    fee_other = fields.Float('Altre commissioni', readonly=True)
+    fee_price = fields.Float('Prezzo della stima', readonly=True)
+    fee_date = fields.Datetime('Data stima commissioni', readonly=True)
+    fee_error = fields.Char('Errore stima commissioni', readonly=True)
     qty = fields.Integer('Quantità Amazon (FBA)', readonly=True)
     # Campo SEPARATO da 'qty', uso esclusivo di sync_fba_quantities_page
     # (marketplace dedicato, non pooled) per decidere quanto consumare dal

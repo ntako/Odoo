@@ -42,6 +42,14 @@
                                  help="Se disattivo, i prodotti già presenti in Odoo non vengono toccati.">
                             <field name="amazon_import_update_existing"/>
                         </setting>
+                        <setting string="Commissioni Amazon"
+                                 help="Chiede ad Amazon la stima delle commissioni (vendita e logistica FBA) per il prezzo attuale di ogni annuncio attivo. Serve all'Analisi prezzi. Circa 20 minuti.">
+                            <button name="action_run_listing_fees"
+                                    string="Aggiorna commissioni Amazon"
+                                    type="object"
+                                    class="btn btn-secondary"
+                                    confirm="Avvio la stima delle commissioni in background (solo letture, nessuna modifica su Amazon). Continuare?"/>
+                        </setting>
                         <setting string="Immagini mancanti"
                                  help="Scarica da Amazon le immagini dei prodotti già importati che non hanno ancora una foto.">
                             <button name="action_run_download_images"

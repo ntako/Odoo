@@ -47,6 +47,7 @@
         'views/amazon_report_views.xml',
         'wizard/amazon_inbound_box_scan_wizard_views.xml',
         'views/amazon_inbound_plan_views.xml',
+        'views/amazon_price_analysis_views.xml',
         'views/menu.xml',
         'views/product_brand_views.xml',
     ],

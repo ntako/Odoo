@@ -344,6 +344,13 @@ I prezzi restituiti dall'API Amazon per i mercati europei sono **IVA inclusa**.
 
 ---
 
+## Analisi prezzi e commissioni
+
+- **Commissioni Amazon** (Impostazioni → Amazon → "Aggiorna commissioni Amazon"): stima di Amazon (Product Fees API) per il prezzo attuale di ogni annuncio attivo — commissione di vendita reale per categoria e, per FBA, tariffa di logistica — salvata sull'annuncio. In background, solo letture; un secondo giro stima solo gli annunci nuovi o con prezzo cambiato.
+- **Analisi prezzi** (Amazon Sync → Analisi prezzi): una riga per annuncio attivo con prezzo netto in euro (senza l'IVA del paese, convertito col tasso della valuta), costo, prezzo base, commissioni, margine (netto − commissioni − costo) e ricarico sul costo e sul prezzo base; lista, pivot e grafico per marketplace, marca, categoria, FBA/FBM. Non comprende spedizione FBM, resi, pubblicità e stoccaggio.
+
+---
+
 ## Log e monitoraggio
 
 Tutti gli eventi sono tracciati in **Magazzino → Amazon Sync → Log Sincronizzazioni** con:
