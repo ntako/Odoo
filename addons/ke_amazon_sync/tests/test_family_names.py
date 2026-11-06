@@ -35,6 +35,11 @@ class TestFamilyNames(TransactionCase):
         self.assertEqual(f(['C4 Disfraz de hombre Línea Accesorios, gris oscuro, XL'], ['Gris oscuro', 'XL']),
                          'C4 Disfraz de hombre Línea Accesorios')
         self.assertEqual(f(['Mulinello Test (Misura 1000)']), 'Mulinello Test')
+        # 2026-11-06: niente parole sospese o etichette sole in coda.
+        self.assertEqual(f(['Abu Garcia Reel Grease by Abu', 'Abu Garcia Reel Grease by Garcia']),
+                         'Abu Garcia Reel Grease')
+        self.assertEqual(f(['AKAMI IKEGAMI | COLOR IKY | MM 95', 'AKAMI IKEGAMI | COLOR TNP | MM 95']),
+                         'AKAMI IKEGAMI')
         # Parte comune troppo corta: ripiego sul primo titolo ripulito.
         self.assertEqual(f(['Amo 4 nichel', 'Amo 6 bronzo'], ['4 nichel']), 'Amo 4 nichel')
 
@@ -78,3 +83,30 @@ class TestFamilyNames(TransactionCase):
         eng.recompute_family_names(tmpl)
         tmpl.invalidate_recordset()
         self.assertEqual(tmpl.with_context(lang='it_IT').name, 'Canna spinning Prova (nome scelto a mano)')
+
+    def test_name_born_on_other_marketplace_is_recomputed(self):
+        # Famiglia Berkley "Power Hawg" (2026-11-06): nata su ES, in italiano
+        # aveva il nome spagnolo; il ricalcolo lo credeva scelto a mano.
+        mapping = {'B0ZZNAM5': 'B0ZZNAMPAR3', 'B0ZZNAM6': 'B0ZZNAMPAR3'}
+        self._run('ZZ_NAME_IT', mapping, [
+            make_report_row('ZZT-NAM-5', asin='B0ZZNAM5', name='Esca Morbida Prova Pesca 5 cm Rossa'),
+            make_report_row('ZZT-NAM-6', asin='B0ZZNAM6', name='Esca Morbida Prova Pesca 7 cm Verde'),
+        ])
+        eng = self._run('ZZ_NAME_ES', mapping, [
+            make_report_row('ZZT-NAM-5', asin='B0ZZNAM5', name='Cebo Blando Prueba Pesca 5 cm, rojo'),
+            make_report_row('ZZT-NAM-6', asin='B0ZZNAM6', name='Cebo Blando Prueba Pesca 7 cm, verde'),
+        ])
+        tmpl = self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZNAMPAR3')])
+        tmpl.with_context(lang='it_IT').write({'name': 'Cebo Blando Prueba Pesca'})
+        eng.recompute_family_names(tmpl)
+        tmpl.invalidate_recordset()
+        self.assertEqual(tmpl.with_context(lang='it_IT').name, 'Esca Morbida Prova Pesca')
+
+    def test_text_copied_from_other_language_is_not_own(self):
+        eng = self.se.SyncEngine(self.env, FakeSpApiClient(marketplace_id='ZZ_NAME_IT'))
+        tmpl = self.env['product.template'].with_context(lang='es_ES').create({
+            'name': 'ZZT Cebo copiado', 'description_sale': 'Descripción ES'})
+        tmpl.with_context(lang='it_IT').write({'name': 'ZZT Cebo copiado', 'description_sale': 'Descripción ES'})
+        self.assertFalse(eng._has_own_translation(tmpl, 'name', 'it_IT'), 'copia del testo spagnolo')
+        tmpl.with_context(lang='it_IT').write({'name': 'ZZT Esca italiana'})
+        self.assertTrue(eng._has_own_translation(tmpl, 'name', 'it_IT'))

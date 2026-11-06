@@ -116,6 +116,35 @@ _NAME_TRAILING = ' ,;:-–—|/(['
 _NAME_SEGMENT_SPLIT = re.compile(r'\s*(?:,|\s[-–—|]\s|\()\s*')
 
 
+# Parole che non possono chiudere il nome di una famiglia: la parte comune ai
+# titoli si ferma spesso subito dopo (es. "Abu Garcia Reel Grease by").
+_NAME_DANGLING = {
+    'by', 'with', 'for', 'and', 'the', 'of', 'di', 'da', 'per', 'con', 'e', 'il', 'la', 'le', 'del', 'della',
+    'de', 'para', 'con', 'y', 'el', 'pour', 'avec', 'et', 'du', 'des',
+}
+
+
+def _tidy_family_name(name):
+    """
+    Toglie in coda le parole sospese (_NAME_DANGLING) e un'etichetta rimasta
+    sola dopo l'ultimo separatore ("AKAMI IKEGAMI | COLOR"), se il nome che
+    resta ha almeno 2 parole e 12 caratteri (2026-11-06).
+    """
+    name = name.rstrip(_NAME_TRAILING).strip()
+    while True:
+        words = name.split()
+        if len(words) > 2 and words[-1].casefold() in _NAME_DANGLING:
+            name = ' '.join(words[:-1]).rstrip(_NAME_TRAILING).strip()
+            continue
+        parts = list(_NAME_SEGMENT_SPLIT.finditer(name))
+        if parts:
+            head, tail = name[:parts[-1].start()].strip(), name[parts[-1].end():].strip()
+            if tail and len(tail.split()) == 1 and len(head.split()) >= 2 and len(head) >= 12:
+                name = head.rstrip(_NAME_TRAILING).strip()
+                continue
+        return name
+
+
 def _family_common_name(titles, variant_values=()):
     """
     Nome di una famiglia dai titoli delle sue varianti in UNA lingua: la parte
@@ -136,7 +165,7 @@ def _family_common_name(titles, variant_values=()):
                 common.append(group[0])
             else:
                 break
-        name = ' '.join(common).rstrip(_NAME_TRAILING).strip()
+        name = _tidy_family_name(' '.join(common))
         if len(name.split()) >= 2 and len(name) >= 12:
             return name
     name = _strip_variant_suffix(titles[0])
@@ -154,7 +183,7 @@ def _family_common_name(titles, variant_values=()):
             else:
                 break
         name = name[:bounds[-1][1]]
-    return name.rstrip(_NAME_TRAILING).strip() or titles[0]
+    return _tidy_family_name(name) or titles[0]
 
 
 def _fetch_image_b64(url):
@@ -2234,6 +2263,29 @@ class SyncEngine:
         row = self.env.cr.fetchone()
         return bool(row and row[0])
 
+    def _marketplace_langs(self):
+        if not hasattr(self, '_mp_langs_cache'):
+            self._mp_langs_cache = set(self.env['ke.amazon.marketplace'].search([
+                ('active', '=', True), ('lang_id', '!=', False)]).mapped('lang_id.code'))
+        return self._mp_langs_cache
+
+    def _has_own_translation(self, template, field, lang):
+        """
+        Come _has_translation, ma un testo che è la copia esatta di quello di
+        un'altra lingua dei marketplace non conta come proprio: è il testo
+        con cui la famiglia è nata su un altro marketplace (2026-11-06: la
+        famiglia Berkley "Power Hawg" creata da ES aveva in italiano il nome
+        spagnolo, e l'import non lo sostituiva mai col titolo italiano).
+        """
+        template.flush_recordset([field])
+        self.env.cr.execute(f'SELECT {field} FROM product_template WHERE id = %s', (template.id,))
+        row = self.env.cr.fetchone()
+        values = (row and row[0]) or {}
+        own = values.get(lang)
+        if not own:
+            return False
+        return not any(values.get(other) == own for other in self._marketplace_langs() if other != lang)
+
     def _write_localized_text(self, template, name=None, description_sale=None):
         """
         Scrive nome/descrizione sul template, nello slot di traduzione del
@@ -2248,9 +2300,9 @@ class SyncEngine:
             return
         lang = ctx['lang']
         vals = {}
-        if name and not self._has_translation(template, 'name', lang):
+        if name and not self._has_own_translation(template, 'name', lang):
             vals['name'] = name
-        if description_sale and not self._has_translation(template, 'description_sale', lang):
+        if description_sale and not self._has_own_translation(template, 'description_sale', lang):
             vals['description_sale'] = description_sale
         if vals:
             template.with_context(**ctx).write(vals)
@@ -2351,6 +2403,12 @@ class SyncEngine:
             titles.setdefault((tmpl_id, lang_by_marketplace[marketplace_id]), []).append(title)
         self.env.cr.execute('SELECT id, name FROM product_template WHERE id = ANY(%s)', (list(templates.ids),))
         current_names = {tid: (name or {}) for tid, name in self.env.cr.fetchall()}
+        # Titoli di tutti i marketplace della famiglia: un nome nato dal
+        # titolo di un altro marketplace (famiglia creata da ES/FR/UK) è
+        # dell'import, non scelto a mano (2026-11-06).
+        all_titles = {}
+        for (tmpl_id, _lang), tmpl_titles in titles.items():
+            all_titles.setdefault(tmpl_id, []).extend(tmpl_titles)
         updated = 0
         for (tmpl_id, lang), tmpl_titles in titles.items():
             tmpl = Tmpl.browse(tmpl_id)
@@ -2359,7 +2417,7 @@ class SyncEngine:
             current = current_names.get(tmpl_id, {}).get(lang) or ''
             if not new_name or new_name == current:
                 continue
-            if not self._is_import_family_name(current, tmpl_titles):
+            if not self._is_import_family_name(current, all_titles[tmpl_id]):
                 continue
             tmpl.with_context(lang=lang).write({'name': new_name})
             updated += 1
