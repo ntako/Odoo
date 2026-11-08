@@ -50,6 +50,13 @@
                                     class="btn btn-secondary"
                                     confirm="Avvio la stima delle commissioni in background (solo letture, nessuna modifica su Amazon). Continuare?"/>
                         </setting>
+                        <setting string="Prezzi con sync"
+                                 help="Calcola per ogni annuncio attivo il prezzo che la sync prezzi manderebbe ad Amazon (listino e IVA del marketplace), da confrontare con quello attuale in Analisi prezzi. Nessuna chiamata ad Amazon. Da rilanciare dopo aver cambiato listini, IVA, tassi o prezzi base.">
+                            <button name="action_compute_sync_prices"
+                                    string="Ricalcola prezzi con sync"
+                                    type="object"
+                                    class="btn btn-secondary"/>
+                        </setting>
                         <setting string="Immagini mancanti"
                                  help="Scarica da Amazon le immagini dei prodotti già importati che non hanno ancora una foto.">
                             <button name="action_run_download_images"

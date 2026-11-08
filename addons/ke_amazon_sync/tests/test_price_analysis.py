@@ -86,3 +86,13 @@ class TestPriceAnalysis(TransactionCase):
         self.assertTrue(row.has_cost and row.has_fees)
         bad = self.env['ke.amazon.price.analysis'].search([('listing_id', '=', self.bad.id)])
         self.assertFalse(bad.has_fees, 'stima in errore: niente commissioni né margine')
+
+    def test_sync_price_and_variation(self):
+        self.env.ref('ke_amazon_sync.pricelist_amazon').item_ids.write({'price_discount': -15.0})
+        done, errors = self.env['ke.amazon.listing']._compute_sync_prices(self.fba | self.bad)
+        self.assertEqual((done, errors), (2, 0))
+        expected = self.variant.get_amazon_sale_price(self.mp)
+        self.assertAlmostEqual(self.fba.price_sync, expected, places=2)
+        self.env.flush_all()
+        row = self.env['ke.amazon.price.analysis'].search([('listing_id', '=', self.fba.id)])
+        self.assertAlmostEqual(row.price_sync_diff_pct, round(100 * (expected / 30.5 - 1), 1), places=1)

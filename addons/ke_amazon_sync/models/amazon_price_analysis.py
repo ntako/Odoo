@@ -51,6 +51,11 @@ class AmazonPriceAnalysis(models.Model):
     margin_pct = fields.Float('Margine % sul netto', readonly=True, aggregator='avg')
     markup_cost_pct = fields.Float('Ricarico % sul costo', readonly=True, aggregator='avg')
     markup_base_pct = fields.Float('Ricarico % sul prezzo base', readonly=True, aggregator='avg')
+    price_sync = fields.Float('Prezzo con sync', readonly=True, aggregator='avg',
+                              help='Prezzo che "Sync prezzo" manderebbe ad Amazon (listino e IVA del marketplace), '
+                                   'nella valuta del marketplace. Si aggiorna con "Ricalcola prezzi con sync".')
+    price_sync_diff_pct = fields.Float('Variazione %', readonly=True, aggregator='avg',
+                                       help='Prezzo con sync rispetto al prezzo attuale su Amazon.')
     has_cost = fields.Boolean('Con costo', readonly=True)
     has_fees = fields.Boolean('Con commissioni', readonly=True)
     fee_date = fields.Datetime('Data stima commissioni', readonly=True)
@@ -77,7 +82,8 @@ class AmazonPriceAnalysis(models.Model):
                        CASE WHEN l.fee_date IS NOT NULL AND COALESCE(l.fee_error, '') = '' THEN l.fee_total::numeric END AS fee_total,
                        CASE WHEN l.fee_date IS NOT NULL AND COALESCE(l.fee_error, '') = '' THEN l.fee_referral::numeric END AS fee_referral,
                        CASE WHEN l.fee_date IS NOT NULL AND COALESCE(l.fee_error, '') = '' THEN l.fee_fulfillment::numeric END AS fee_fulfillment,
-                       l.fee_date
+                       l.fee_date,
+                       NULLIF(l.price_sync, 0)::numeric AS price_sync
                   FROM ke_amazon_listing l
                   JOIN ke_amazon_marketplace m ON m.id = l.marketplace_id
                   JOIN product_product p ON p.id = l.product_id
@@ -108,6 +114,8 @@ class AmazonPriceAnalysis(models.Model):
                    ROUND(100 * (n.price_net / n.base_price - 1), 1) AS markup_base_pct,
                    n.cost IS NOT NULL AS has_cost,
                    n.fee_total IS NOT NULL AS has_fees,
-                   n.fee_date
+                   n.fee_date,
+                   n.price_sync,
+                   ROUND(100 * (n.price_sync / n.price - 1), 1) AS price_sync_diff_pct
               FROM net n
         """)

@@ -24,6 +24,8 @@
                 <field name="margin_pct"/>
                 <field name="markup_cost_pct"/>
                 <field name="markup_base_pct" optional="show"/>
+                <field name="price_sync" widget="monetary" options="{'currency_field': 'currency_id'}"/>
+                <field name="price_sync_diff_pct"/>
                 <field name="fee_date" optional="hide"/>
             </list>
         </field>
@@ -73,6 +75,10 @@
                 <filter name="low_margin" string="Margine sotto 10%" domain="[('margin_pct', '&lt;', 10)]"/>
                 <filter name="low_markup" string="Ricarico sul costo sotto 30%" domain="[('markup_cost_pct', '&lt;', 30)]"/>
                 <filter name="high_markup" string="Ricarico sul costo sopra 300%" domain="[('markup_cost_pct', '&gt;', 300)]"/>
+                <separator/>
+                <filter name="sync_same" string="Con sync: invariato (±2%)" domain="[('price_sync_diff_pct', '&gt;=', -2), ('price_sync_diff_pct', '&lt;=', 2)]"/>
+                <filter name="sync_down" string="Con sync: scende oltre 10%" domain="[('price_sync_diff_pct', '&lt;', -10)]"/>
+                <filter name="sync_up" string="Con sync: sale oltre 10%" domain="[('price_sync_diff_pct', '&gt;', 10)]"/>
                 <group>
                     <filter name="group_marketplace" string="Marketplace" context="{'group_by': 'marketplace_id'}"/>
                     <filter name="group_brand" string="Marca" context="{'group_by': 'brand_id'}"/>

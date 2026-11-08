@@ -154,6 +154,8 @@
                             <field name="fee_price"/>
                             <field name="fee_date"/>
                             <field name="fee_error" invisible="not fee_error"/>
+                            <field name="price_sync"/>
+                            <field name="price_sync_error" invisible="not price_sync_error"/>
                         </group>
                     </group>
                     <group string="Pubblicazione">

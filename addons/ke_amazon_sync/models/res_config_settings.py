@@ -473,6 +473,18 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_download_images', log_rec.id)
         return self._open_log_action()
 
+    def action_compute_sync_prices(self):
+        """Ricalcola il "Prezzo con sync" degli annunci attivi (nessuna chiamata Amazon)."""
+        done, errors = self.env['ke.amazon.listing'].sudo()._compute_sync_prices()
+        return {
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'title': 'Prezzi con sync',
+                'message': f'{done} annunci calcolati' + (f', {errors} non calcolabili (vedi "Errore prezzo con sync")' if errors else '') + '.',
+                'type': 'warning' if errors else 'success', 'sticky': bool(errors),
+            },
+        }
+
     def action_run_listing_fees(self):
         """Stima le commissioni Amazon degli annunci attivi, in background."""
         self._validate_credentials()
@@ -506,6 +518,8 @@ class ResConfigSettings(models.TransientModel):
                 engine = SyncEngine(env, None)
                 engine.update_listing_fees(
                     log_rec, marketplaces, lambda mp: SpApiClient(env, marketplace_id=mp.marketplace_id))
+                env['ke.amazon.listing'].sudo()._compute_sync_prices()
+                cr.commit()
             except Exception as exc:
                 _log.error('Thread listing_fees fallito: %s', exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': datetime.now()})

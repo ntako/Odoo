@@ -77,6 +77,11 @@ class AmazonListing(models.Model):
     fee_price = fields.Float('Prezzo della stima', readonly=True)
     fee_date = fields.Datetime('Data stima commissioni', readonly=True)
     fee_error = fields.Char('Errore stima commissioni', readonly=True)
+    # Prezzo che "Sync prezzo" manderebbe (listino e IVA del marketplace),
+    # salvato per poterlo filtrare nell'Analisi prezzi (2026-11-08): si
+    # aggiorna con "Ricalcola prezzi con sync" e a fine "Aggiorna commissioni".
+    price_sync = fields.Float('Prezzo con sync', readonly=True)
+    price_sync_error = fields.Char('Errore prezzo con sync', readonly=True)
     qty = fields.Integer('Quantità Amazon (FBA)', readonly=True)
     # Campo SEPARATO da 'qty', uso esclusivo di sync_fba_quantities_page
     # (marketplace dedicato, non pooled) per decidere quanto consumare dal
@@ -144,6 +149,31 @@ class AmazonListing(models.Model):
         if 'product_id' in vals and 'manual_product' not in vals and not self.env.context.get('ke_import_listing'):
             vals = dict(vals, manual_product=True)
         return super().write(vals)
+
+    @api.model
+    def _compute_sync_prices(self, listings=None):
+        """
+        Prezzo che la sync prezzi manderebbe ad Amazon per ogni annuncio
+        attivo con prezzo (compute_amazon_sale_price: listino e IVA del
+        marketplace, valuta del marketplace). Nessuna chiamata Amazon. Un
+        calcolo impossibile (es. tasso di cambio mancante) lascia 0 e il
+        motivo. Ritorna (calcolati, errori).
+        """
+        from odoo.exceptions import UserError
+        if listings is None:
+            listings = self.search([('status', '=', 'active'), ('price', '>', 0)])
+        done = errors = 0
+        for listing in listings:
+            try:
+                value = listing.product_id.get_amazon_sale_price(listing.marketplace_id)
+                vals = {'price_sync': value, 'price_sync_error': False}
+                done += 1
+            except UserError as exc:
+                vals = {'price_sync': 0.0, 'price_sync_error': str(exc)[:250]}
+                errors += 1
+            if abs(listing.price_sync - vals['price_sync']) > 0.001 or listing.price_sync_error != vals['price_sync_error']:
+                listing.write(vals)
+        return done, errors
 
     @api.model
     def _main_for(self, variant, marketplace):
