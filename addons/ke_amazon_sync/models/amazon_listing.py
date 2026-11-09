@@ -80,6 +80,13 @@ class AmazonListing(models.Model):
     # Prezzo che "Sync prezzo" manderebbe (listino e IVA del marketplace),
     # salvato per poterlo filtrare nell'Analisi prezzi (2026-11-08): si
     # aggiorna con "Ricalcola prezzi con sync" e a fine "Aggiorna commissioni".
+    price_manual = fields.Float(
+        'Prezzo manuale', digits='Product Price',
+        help='Prezzo da mandare ad Amazon per questo annuncio, così come appare su Amazon: IVA '
+             'inclusa, nella valuta del marketplace. Se compilato vale lui, senza listino né '
+             'ricalcolo dell\'IVA. Vuoto: listino del marketplace (o "Amazon") sul prezzo base, '
+             'più l\'IVA del paese.',
+    )
     price_sync = fields.Float('Prezzo con sync', readonly=True)
     price_sync_error = fields.Char('Errore prezzo con sync', readonly=True)
     qty = fields.Integer('Quantità Amazon (FBA)', readonly=True)
@@ -150,6 +157,36 @@ class AmazonListing(models.Model):
             vals = dict(vals, manual_product=True)
         return super().write(vals)
 
+    def _price_to_send(self):
+        """
+        Prezzo da mandare ad Amazon per questo annuncio (2026-11-09): il prezzo
+        manuale se c'è, così com'è; altrimenti listino del marketplace (o
+        "Amazon") sul prezzo base più IVA del paese (compute_amazon_sale_price).
+        """
+        self.ensure_one()
+        if self.price_manual:
+            return round(self.price_manual, 2)
+        return self.product_id.get_amazon_sale_price(self.marketplace_id)
+
+    @api.model
+    def _price_for(self, product, marketplace, sku):
+        """Prezzo da mandare per lo SKU sul marketplace (prodotto o variante): quello dell'annuncio se c'è."""
+        listing = self.search([('marketplace_id', '=', marketplace.id), ('sku', '=', sku)], limit=1) \
+            if marketplace and sku else self.browse()
+        if listing.price_manual:
+            return round(listing.price_manual, 2)
+        return product.get_amazon_sale_price(marketplace or None)
+
+    def action_fix_current_price(self):
+        """Il prezzo attuale su Amazon diventa il prezzo manuale (la sync non lo cambierà)."""
+        for listing in self.filtered(lambda l: l.price > 0):
+            listing.write({'price_manual': listing.price, 'price_sync': listing.price, 'price_sync_error': False})
+
+    def action_clear_manual_price(self):
+        """Torna al prezzo da listino."""
+        self.write({'price_manual': 0.0})
+        self._compute_sync_prices(self)
+
     @api.model
     def _compute_sync_prices(self, listings=None):
         """
@@ -165,7 +202,7 @@ class AmazonListing(models.Model):
         done = errors = 0
         for listing in listings:
             try:
-                value = listing.product_id.get_amazon_sale_price(listing.marketplace_id)
+                value = listing._price_to_send()
                 vals = {'price_sync': value, 'price_sync_error': False}
                 done += 1
             except UserError as exc:

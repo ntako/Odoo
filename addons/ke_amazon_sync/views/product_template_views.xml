@@ -124,6 +124,7 @@
                                    decoration-muted="status in ('inactive', 'not_listed')"/>
                             <field name="fulfillment" readonly="1"/>
                             <field name="price" readonly="1"/>
+                            <field name="price_manual" optional="show"/>
                             <field name="qty" readonly="1"/>
                             <field name="sync_price" readonly="1"/>
                             <field name="sync_qty" readonly="1"/>
@@ -198,6 +199,7 @@
                                decoration-muted="status in ('inactive', 'not_listed')"/>
                         <field name="fulfillment" readonly="1"/>
                         <field name="price" readonly="1"/>
+                        <field name="price_manual" optional="show"/>
                         <field name="qty" readonly="1"/>
                         <field name="sync_price" widget="boolean_toggle"/>
                         <field name="sync_qty" widget="boolean_toggle"/>

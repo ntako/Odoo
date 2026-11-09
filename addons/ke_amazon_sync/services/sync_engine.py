@@ -3709,7 +3709,8 @@ class SyncEngine:
 
             if product.x_amazon_sync_price:
                 try:
-                    amazon_price = product.get_amazon_sale_price(self._current_marketplace())
+                    amazon_price = self.env['ke.amazon.listing'].sudo()._price_for(
+                        product, self._current_marketplace(), sku)
                     self.client.patch_price(sku, product_type, amazon_price)
                     ops_done.append(f'prezzo={amazon_price:.2f} {self._price_currency_name()}')
                 except Exception as exc:
@@ -3783,7 +3784,8 @@ class SyncEngine:
 
                 if tmpl.x_amazon_sync_price:
                     try:
-                        amazon_price = variant.get_amazon_sale_price(self._current_marketplace())
+                        amazon_price = self.env['ke.amazon.listing'].sudo()._price_for(
+                            variant, self._current_marketplace(), sku)
                         self.client.patch_price(sku, product_type, amazon_price)
                         ops_done.append(f'prezzo={amazon_price:.2f} {self._price_currency_name()}')
                     except Exception as exc:
@@ -3883,7 +3885,7 @@ class SyncEngine:
 
             if listing.sync_price:
                 try:
-                    amazon_price = product.get_amazon_sale_price(self._current_marketplace())
+                    amazon_price = listing._price_to_send()
                     self.client.patch_price(sku, product_type, amazon_price)
                     ops_done.append(f'prezzo={amazon_price:.2f} {self._price_currency_name()}')
                 except Exception as exc:

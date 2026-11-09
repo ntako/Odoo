@@ -56,6 +56,7 @@ class AmazonPriceAnalysis(models.Model):
                                    'nella valuta del marketplace. Si aggiorna con "Ricalcola prezzi con sync".')
     price_sync_diff_pct = fields.Float('Variazione %', readonly=True, aggregator='avg',
                                        help='Prezzo con sync rispetto al prezzo attuale su Amazon.')
+    has_manual_price = fields.Boolean('Prezzo manuale', readonly=True)
     has_cost = fields.Boolean('Con costo', readonly=True)
     has_fees = fields.Boolean('Con commissioni', readonly=True)
     fee_date = fields.Datetime('Data stima commissioni', readonly=True)
@@ -83,7 +84,8 @@ class AmazonPriceAnalysis(models.Model):
                        CASE WHEN l.fee_date IS NOT NULL AND COALESCE(l.fee_error, '') = '' THEN l.fee_referral::numeric END AS fee_referral,
                        CASE WHEN l.fee_date IS NOT NULL AND COALESCE(l.fee_error, '') = '' THEN l.fee_fulfillment::numeric END AS fee_fulfillment,
                        l.fee_date,
-                       NULLIF(l.price_sync, 0)::numeric AS price_sync
+                       NULLIF(l.price_sync, 0)::numeric AS price_sync,
+                       COALESCE(l.price_manual, 0) > 0 AS has_manual_price
                   FROM ke_amazon_listing l
                   JOIN ke_amazon_marketplace m ON m.id = l.marketplace_id
                   JOIN product_product p ON p.id = l.product_id
@@ -116,6 +118,14 @@ class AmazonPriceAnalysis(models.Model):
                    n.fee_total IS NOT NULL AS has_fees,
                    n.fee_date,
                    n.price_sync,
-                   ROUND(100 * (n.price_sync / n.price - 1), 1) AS price_sync_diff_pct
+                   ROUND(100 * (n.price_sync / n.price - 1), 1) AS price_sync_diff_pct,
+                   n.has_manual_price
               FROM net n
         """)
+
+    def action_fix_current_price(self):
+        """Il prezzo attuale su Amazon diventa il prezzo manuale degli annunci selezionati."""
+        self.listing_id.action_fix_current_price()
+
+    def action_clear_manual_price(self):
+        self.listing_id.action_clear_manual_price()

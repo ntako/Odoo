@@ -96,3 +96,27 @@ class TestPriceAnalysis(TransactionCase):
         self.env.flush_all()
         row = self.env['ke.amazon.price.analysis'].search([('listing_id', '=', self.fba.id)])
         self.assertAlmostEqual(row.price_sync_diff_pct, round(100 * (expected / 30.5 - 1), 1), places=1)
+
+    def test_manual_price_wins_over_pricelist(self):
+        # 2026-11-09: prezzo manuale per annuncio, IVA inclusa, mandato così com'è.
+        computed = self.variant.get_amazon_sale_price(self.mp)
+        self.assertAlmostEqual(self.fba._price_to_send(), computed, places=2)
+        self.fba.price_manual = 29.99
+        self.assertEqual(self.fba._price_to_send(), 29.99)
+        Listing = self.env['ke.amazon.listing']
+        self.assertEqual(Listing._price_for(self.variant, self.mp, 'ZZT-PA-1'), 29.99)
+        self.assertAlmostEqual(Listing._price_for(self.variant, self.mp, 'ZZT-PA-ALTRO'), computed, places=2,
+                               msg='SKU senza annuncio: prezzo da listino')
+        Listing._compute_sync_prices(self.fba)
+        self.assertEqual(self.fba.price_sync, 29.99)
+
+    def test_fix_and_clear_manual_price(self):
+        self.fba.action_fix_current_price()
+        self.assertEqual((self.fba.price_manual, self.fba.price_sync), (30.5, 30.5))
+        self.env.flush_all()
+        row = self.env['ke.amazon.price.analysis'].search([('listing_id', '=', self.fba.id)])
+        self.assertTrue(row.has_manual_price)
+        self.assertEqual(row.price_sync_diff_pct, 0.0)
+        row.action_clear_manual_price()
+        self.assertFalse(self.fba.price_manual)
+        self.assertAlmostEqual(self.fba.price_sync, self.variant.get_amazon_sale_price(self.mp), places=2)

@@ -26,6 +26,7 @@
                 <field name="markup_base_pct" optional="show"/>
                 <field name="price_sync" widget="monetary" options="{'currency_field': 'currency_id'}"/>
                 <field name="price_sync_diff_pct"/>
+                <field name="has_manual_price" optional="show"/>
                 <field name="fee_date" optional="hide"/>
             </list>
         </field>
@@ -76,6 +77,7 @@
                 <filter name="low_markup" string="Ricarico sul costo sotto 30%" domain="[('markup_cost_pct', '&lt;', 30)]"/>
                 <filter name="high_markup" string="Ricarico sul costo sopra 300%" domain="[('markup_cost_pct', '&gt;', 300)]"/>
                 <separator/>
+                <filter name="manual" string="Prezzo manuale" domain="[('has_manual_price', '=', True)]"/>
                 <filter name="sync_same" string="Con sync: invariato (±2%)" domain="[('price_sync_diff_pct', '&gt;=', -2), ('price_sync_diff_pct', '&lt;=', 2)]"/>
                 <filter name="sync_down" string="Con sync: scende oltre 10%" domain="[('price_sync_diff_pct', '&lt;', -10)]"/>
                 <filter name="sync_up" string="Con sync: sale oltre 10%" domain="[('price_sync_diff_pct', '&gt;', 10)]"/>
@@ -87,6 +89,42 @@
                 </group>
             </search>
         </field>
+    </record>
+
+    <record id="action_server_price_analysis_fix" model="ir.actions.server">
+        <field name="name">Fissa il prezzo attuale (prezzo manuale)</field>
+        <field name="model_id" ref="model_ke_amazon_price_analysis"/>
+        <field name="binding_model_id" ref="model_ke_amazon_price_analysis"/>
+        <field name="binding_view_types">list</field>
+        <field name="state">code</field>
+        <field name="code">records.action_fix_current_price()</field>
+    </record>
+
+    <record id="action_server_price_analysis_clear" model="ir.actions.server">
+        <field name="name">Togli prezzo manuale (torna al listino)</field>
+        <field name="model_id" ref="model_ke_amazon_price_analysis"/>
+        <field name="binding_model_id" ref="model_ke_amazon_price_analysis"/>
+        <field name="binding_view_types">list</field>
+        <field name="state">code</field>
+        <field name="code">records.action_clear_manual_price()</field>
+    </record>
+
+    <record id="action_server_listing_fix_price" model="ir.actions.server">
+        <field name="name">Fissa il prezzo attuale (prezzo manuale)</field>
+        <field name="model_id" ref="model_ke_amazon_listing"/>
+        <field name="binding_model_id" ref="model_ke_amazon_listing"/>
+        <field name="binding_view_types">list,form</field>
+        <field name="state">code</field>
+        <field name="code">records.action_fix_current_price()</field>
+    </record>
+
+    <record id="action_server_listing_clear_price" model="ir.actions.server">
+        <field name="name">Togli prezzo manuale (torna al listino)</field>
+        <field name="model_id" ref="model_ke_amazon_listing"/>
+        <field name="binding_model_id" ref="model_ke_amazon_listing"/>
+        <field name="binding_view_types">list,form</field>
+        <field name="state">code</field>
+        <field name="code">records.action_clear_manual_price()</field>
     </record>
 
     <record id="action_amazon_price_analysis" model="ir.actions.act_window">

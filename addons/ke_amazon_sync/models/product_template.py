@@ -518,8 +518,8 @@ class ProductTemplate(models.Model):
 
         if self.x_amazon_sync_price:
             try:
-                client.patch_price(sku, product_type,
-                                   self.get_amazon_sale_price(self._amazon_client_marketplace(client)))
+                client.patch_price(sku, product_type, self.env['ke.amazon.listing']._price_for(
+                    self, self._amazon_client_marketplace(client), sku))
             except Exception as exc:
                 errors.append(f'prezzo: {exc}')
 
@@ -597,7 +597,7 @@ class ProductTemplate(models.Model):
         marketplace_id = client.marketplace_id
         product_type = self.x_amazon_product_type or 'PRODUCT'
         condition = self.x_amazon_condition or 'new_new'
-        price = self.get_amazon_sale_price(self._amazon_client_marketplace(client))
+        price = self.env['ke.amazon.listing']._price_for(self, self._amazon_client_marketplace(client), sku)
         is_fba = self.x_amazon_fulfillment == 'fba'
 
         if self.x_amazon_asin:

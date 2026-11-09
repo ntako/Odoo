@@ -68,6 +68,7 @@
                        decoration-danger="status == 'error'"
                        decoration-muted="status in ('inactive', 'not_listed')"/>
                 <field name="price"/>
+                <field name="price_manual" optional="show"/>
                 <field name="qty"/>
                 <field name="sync_price" widget="boolean_toggle" optional="hide"/>
                 <field name="sync_qty" widget="boolean_toggle" optional="hide"/>
@@ -132,6 +133,7 @@
                     <group>
                         <group string="Dati Amazon (sola lettura)">
                             <field name="price"/>
+                            <field name="price_manual"/>
                             <field name="qty"/>
                             <field name="category"/>
                             <field name="browse_node_id"/>
