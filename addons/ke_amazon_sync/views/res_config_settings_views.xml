@@ -57,6 +57,13 @@
                                     type="object"
                                     class="btn btn-secondary"/>
                         </setting>
+                        <setting string="Prezzi base da Amazon"
+                                 help="Ricava il prezzo base (prezzo di vendita) dai prezzi attuali su Amazon, togliendo IVA del paese e ricarico del listino. Di default solo per i prodotti con prezzo vuoto o 1,00. Mostra un'anteprima prima di scrivere.">
+                            <button name="%(ke_amazon_sync.action_amazon_base_price_wizard)d"
+                                    string="Ricalcola prezzi base da Amazon"
+                                    type="action"
+                                    class="btn btn-secondary"/>
+                        </setting>
                         <setting string="Immagini mancanti"
                                  help="Scarica da Amazon le immagini dei prodotti già importati che non hanno ancora una foto.">
                             <button name="action_run_download_images"

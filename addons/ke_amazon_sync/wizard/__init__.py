@@ -10,3 +10,4 @@ from . import amazon_fba_standalone_label_wizard
 from . import amazon_print_station_show_key_wizard
 from . import amazon_inbound_box_scan_wizard
 from . import amazon_listing_new_wizard
+from . import amazon_base_price_wizard

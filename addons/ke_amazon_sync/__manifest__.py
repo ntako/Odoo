@@ -33,6 +33,7 @@
         'views/amazon_print_station_views.xml',
         'views/amazon_print_job_views.xml',
         'views/amazon_marketplace_views.xml',
+        'wizard/amazon_base_price_wizard_views.xml',
         'views/res_config_settings_views.xml',
         'views/res_company_views.xml',
         'views/stock_warehouse_views.xml',

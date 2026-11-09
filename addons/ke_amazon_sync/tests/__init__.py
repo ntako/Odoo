@@ -26,3 +26,4 @@ from . import test_brands
 from . import test_listing_new_wizard
 from . import test_marketplace_pricelist
 from . import test_price_analysis
+from . import test_base_price_recalc

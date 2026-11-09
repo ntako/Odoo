@@ -2159,7 +2159,7 @@ class SyncEngine:
         if abs(corrected - template.list_price) > 0.001:
             template.write({'list_price': corrected})
 
-    def _base_price_from_amazon(self, gross, product):
+    def _base_price_from_amazon(self, gross, product, marketplace=None):
         """
         Prezzo base di Odoo (prezzo di vendita) ricavato da un prezzo Amazon
         IVA inclusa del marketplace corrente: il calcolo di
@@ -2174,13 +2174,16 @@ class SyncEngine:
         prodotto, riporta nella valuta aziendale se c'è il tasso di cambio, e
         rimette l'IVA del prodotto se il suo prezzo è IVA inclusa. Regole a
         prezzo fisso e supplementi non vengono invertiti (approssimazione).
+        'marketplace': quello del prezzo (default: il marketplace di questa
+        sync), usato da "Ricalcola prezzi base da Amazon".
         """
         from odoo.addons.ke_amazon_sync.models.product_template import (
             _amazon_pricelist_items_by_priority, _get_amazon_vat_info,
         )
         if not gross:
             return 0.0
-        marketplace = self._current_marketplace()
+        if marketplace is None:
+            marketplace = self._current_marketplace()
         rate, price_include = _get_amazon_vat_info(product)
         country_rate = marketplace.vat_rate if marketplace and marketplace.vat_rate else rate
         net = gross / (1.0 + country_rate / 100.0)

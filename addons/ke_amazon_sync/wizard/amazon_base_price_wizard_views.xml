@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_base_price_wizard_form" model="ir.ui.view">
+        <field name="name">ke.amazon.base.price.wizard.form</field>
+        <field name="model">ke.amazon.base.price.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Ricalcola prezzi base da Amazon">
+                <p class="text-muted">
+                    Il prezzo base (prezzo di vendita) è ricavato dal prezzo attuale su Amazon togliendo l'IVA
+                    del paese e il ricarico del listino del marketplace: accendendo la sync prezzi, su Amazon
+                    il prezzo resta quello di oggi. Prima configura listini e IVA dei marketplace.
+                    Nessuna chiamata ad Amazon. Nulla viene scritto finché non premi "Applica".
+                </p>
+                <group>
+                    <field name="include_existing"/>
+                    <field name="templates_count" invisible="1"/>
+                </group>
+                <field name="preview" nolabel="1"/>
+                <footer>
+                    <button name="action_apply" string="Applica" type="object" class="btn-primary"
+                            invisible="not templates_count"
+                            confirm="Scrivo i prezzi base dell'anteprima. Continuare?"/>
+                    <button string="Annulla" special="cancel" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_base_price_wizard" model="ir.actions.act_window">
+        <field name="name">Ricalcola prezzi base da Amazon</field>
+        <field name="res_model">ke.amazon.base.price.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>
