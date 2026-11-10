@@ -74,7 +74,7 @@ class TestFullImportRobustness(TransactionCase):
             self.env['product.template'].search([('x_amazon_parent_asin', '=', 'B0ZZROBPARB')]),
             'nessuna seconda famiglia creata',
         )
-        self.assertIn('COLLEGATO (famiglia diversa su ZZRE)', log.log_lines)
+        self.assertIn('[ZZRE] Righe senza problemi: collegati a famiglie di altri marketplace 1', log.log_lines)
         self.assertEqual(log.products_updated, 1)
 
     def test_different_family_with_different_sku_creates_no_empty_family(self):
@@ -98,7 +98,7 @@ class TestFullImportRobustness(TransactionCase):
         )
         self.assertEqual(self.env['product.template'].search_count([]), templates_before)
         self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBSK-1-ES')
-        self.assertIn('COLLEGATO (famiglia diversa su ZZRE)', log.log_lines)
+        self.assertIn('[ZZRE] Righe senza problemi: collegati a famiglie di altri marketplace 1', log.log_lines)
 
     def test_row_without_asin_attaches_listing_to_variant_by_sku(self):
         # Report FR del 2026-11-04: ASIN vuoto per 4.051 righe su 8.254,
@@ -121,8 +121,7 @@ class TestFullImportRobustness(TransactionCase):
         self.assertEqual(log.products_skipped, 0)
         # Dal 2026-11-06 la riga prende l'ASIN dello stesso SKU (altro
         # marketplace) e si collega per ASIN, prima per SKU: stesso esito.
-        self.assertIn('COLLEGATO', log.log_lines)
-        self.assertIn('ZZT-ROB', log.log_lines)
+        self.assertIn('collegati a famiglie di altri marketplace 1', log.log_lines)
 
     def test_row_without_asin_fills_listing_asin_from_same_sku(self):
         # arundo_prod 2026-11-05: 1.577 annunci FR senza ASIN su prodotti
@@ -158,8 +157,7 @@ class TestFullImportRobustness(TransactionCase):
         self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBDC-1')
         # Dal 2026-11-06 la riga prende l'ASIN dello stesso SKU (altro
         # marketplace) e si collega per ASIN, prima per SKU: stesso esito.
-        self.assertIn('COLLEGATO', log.log_lines)
-        self.assertIn('ZZT-ROB', log.log_lines)
+        self.assertIn('collegati a famiglie di altri marketplace 1', log.log_lines)
 
     def test_second_sku_on_same_asin_is_a_second_listing(self):
         child, sibling = 'B0ZZROBAC1', 'B0ZZROBAC2'
@@ -199,7 +197,7 @@ class TestFullImportRobustness(TransactionCase):
 
         it_client = FakeSpApiClient({child: 'B0ZZROBUPPB'}, marketplace_id='ZZ_ROB_IT')
         log, _eng = self._run(it_client, [make_report_row('ZZT-ROBUP-1+', asin=child)])
-        self.assertIn('COLLEGATO (famiglia diversa su ZZRI)', log.log_lines)
+        self.assertIn('[ZZRI] Righe senza problemi: collegati a famiglie di altri marketplace 1', log.log_lines)
         self.assertEqual((variant.x_amazon_sku, variant.default_code), ('ZZT-ROBUP-1+', 'ZZT-ROBUP-1+'))
         self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBUP-1', "l'annuncio ES resta col suo SKU")
 
@@ -331,8 +329,7 @@ class TestFullImportRobustness(TransactionCase):
         log, _eng = self._run(es_client, [make_report_row('ZZT-ROBNV-1-ES', asin=child)])
         listing = self._listing(variant, self.es)
         self.assertEqual(listing.sku, 'ZZT-ROBNV-1-ES')
-        self.assertIn('riga non riconosciuta come variante', log.log_lines)
-        self.assertIn('COLLEGATO', log.log_lines)
+        self.assertIn('collegati a famiglie di altri marketplace 1', log.log_lines)
 
     def test_failing_row_does_not_abort_the_rest_of_the_chunk(self):
         client = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
@@ -384,3 +381,37 @@ class TestFullImportRobustness(TransactionCase):
             self.env['mail.message'].search([('model', '=', 'product.template'), ('res_id', '=', tmpl.id)]),
             'nessun messaggio automatico "creato" né tracciamento',
         )
+
+
+@tagged('post_install', '-at_install')
+class TestThinImportLog(TransactionCase):
+    """Log del Full Import sfoltito (2026-11-10): routine contata, il resto per esteso."""
+
+    def test_routine_lines_counted_and_collapsed_per_marketplace(self):
+        from odoo.addons.ke_amazon_sync.services.sync_engine import _thin_import_lines, collapse_routine_lines
+        block = [
+            'AGGIORNATO: A / B0A — x', 'AGGIORNATO variante: B / B0B → y',
+            'COLLEGATO (famiglia diversa su IT): C / B0C → variante id=1',
+            'SALTATO (parent listing): P / B0P', 'CREATO: D / B0D — nuovo',
+            'SALTATO (conflitto): E / B0E esiste già come prodotto semplice',
+        ]
+        kept = _thin_import_lines(block, 'IT')
+        self.assertEqual(kept[:2], ['CREATO: D / B0D — nuovo', 'SALTATO (conflitto): E / B0E esiste già come prodotto semplice'])
+        self.assertEqual(kept[2], '[IT] Righe senza problemi: aggiornati 2, collegati a famiglie di altri '
+                                  'marketplace 1, schede famiglia Amazon 1')
+        text = '\n'.join(['Import su 2 marketplace: IT, ES.'] + kept + _thin_import_lines(block[:1], 'IT')
+                         + ['[ES] Righe senza problemi: aggiornati 5'])
+        collapsed = collapse_routine_lines(text, 'IT').splitlines()
+        self.assertEqual(collapsed[-1], '[IT] Righe senza problemi: aggiornati 3, collegati a famiglie di altri '
+                                        'marketplace 1, schede famiglia Amazon 1')
+        self.assertIn('[ES] Righe senza problemi: aggiornati 5', collapsed, 'gli altri marketplace non si toccano')
+        self.assertEqual(sum('[IT] Righe senza problemi' in l for l in collapsed), 1)
+
+    def test_fnsku_routine_lines_counted(self):
+        from odoo.addons.ke_amazon_sync.services.sync_engine import _thin_fnsku_lines
+        kept = _thin_fnsku_lines([
+            '[IT] OK A → X1', '[IT] OK B → X2 (variante)', '[IT] INVARIATO C: X3',
+            '[IT] SKU NON TROVATO (o ambiguo su più varianti): D — FNSKU: X4',
+        ], 'IT')
+        self.assertEqual(kept, ['[IT] SKU NON TROVATO (o ambiguo su più varianti): D — FNSKU: X4',
+                                '[IT] Righe senza problemi: FNSKU scritti 2, invariati 1'])

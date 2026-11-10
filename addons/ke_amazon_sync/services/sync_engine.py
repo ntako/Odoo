@@ -678,6 +678,79 @@ def _is_grade_and_resell_sku(sku):
     return (sku or '').strip().lower().startswith('amzn.gr.')
 
 
+# Log del Full Import sfoltito (2026-11-10, chiesto dall'utente): le righe di
+# routine (prodotto aggiornato, annuncio collegato alla famiglia di un altro
+# marketplace, scheda famiglia Amazon, già presente) diventano un conteggio;
+# restano per esteso creati, conflitti, errori e riepiloghi. Su odoo_2 erano
+# 29.846 righe di routine su 30.521. L'export CSV del log non ha più le righe
+# AGGIORNATO; "Ripara famiglie rinominate" legge le righe SALTATO (conflitto),
+# che restano.
+_ROUTINE_LOG_LINES = (
+    (re.compile(r'^AGGIORNATO( variante)?: '), 'aggiornati'),
+    (re.compile(r'^COLLEGATO \(famiglia diversa su '), 'collegati a famiglie di altri marketplace'),
+    (re.compile(r'^SALTATO \(parent listing\): '), 'schede famiglia Amazon'),
+    (re.compile(r'^SALTATO \((?:già esiste|variante già esiste)\): '), 'già presenti, non aggiornati'),
+)
+_ROUTINE_SUMMARY_RE = re.compile(r'^\[(\w+)\] Righe senza problemi: (.+)$')
+
+
+def _thin_import_lines(lines, code):
+    """Righe di un blocco senza quelle di routine, contate in una riga "[IT] Righe senza problemi: …"."""
+    counts = {label: 0 for _rx, label in _ROUTINE_LOG_LINES}
+    kept = []
+    for line in lines:
+        for rx, label in _ROUTINE_LOG_LINES:
+            if rx.match(line):
+                counts[label] += 1
+                break
+        else:
+            kept.append(line)
+    summary = _routine_summary(code or '?', counts)
+    return kept + [summary] if summary else kept
+
+
+def _routine_summary(code, counts):
+    parts = [f'{label} {n}' for label, n in counts.items() if n]
+    return f'[{code}] Righe senza problemi: ' + ', '.join(parts) if parts else ''
+
+
+def collapse_routine_lines(text, code):
+    """Le righe di conteggio dei blocchi di un marketplace diventano una sola, in fondo."""
+    counts, kept = {}, []
+    for line in (text or '').splitlines():
+        m = _ROUTINE_SUMMARY_RE.match(line)
+        if not m or m.group(1) != code:
+            kept.append(line)
+            continue
+        for part in m.group(2).split(', '):
+            label, _sep, n = part.rpartition(' ')
+            if n.isdigit():
+                counts[label] = counts.get(label, 0) + int(n)
+    summary = _routine_summary(code, counts)
+    return '\n'.join(kept + [summary] if summary else kept)
+
+
+_FNSKU_ROUTINE_RE = re.compile(r'^(?:\[\w+\] )?(OK|INVARIATO) ')
+
+
+def _thin_fnsku_lines(lines, code):
+    """
+    Import FNSKU: righe "OK" (FNSKU scritto) e "INVARIATO" contate in una riga
+    sola; restano SKU non trovati, saltati ed errori (30.000 righe su odoo_2
+    il 2026-11-10, quasi tutte di routine).
+    """
+    counts = {'OK': 0, 'INVARIATO': 0}
+    kept = []
+    for line in lines:
+        m = _FNSKU_ROUTINE_RE.match(line)
+        if m:
+            counts[m.group(1)] += 1
+        else:
+            kept.append(line)
+    summary = _routine_summary(code, {'FNSKU scritti': counts['OK'], 'invariati': counts['INVARIATO']})
+    return kept + [summary] if summary else kept
+
+
 def _grade_and_resell_log_line(skus, prefix='', tracked=False):
     """
     Una riga di log riassuntiva (non una per SKU) per gli SKU Grade & Resell
@@ -1285,7 +1358,7 @@ class SyncEngine:
             'products_updated': updated,
             'products_skipped': skipped,
             'products_error': errors,
-            'log_lines': '\n'.join(lines),
+            'log_lines': '\n'.join(_thin_import_lines(lines, self._current_marketplace().code)),
             'end_date': datetime.now(),
         })
         self.env.cr.commit()
@@ -1650,6 +1723,7 @@ class SyncEngine:
         gr_line = _grade_and_resell_log_line(grade_resell_skus, tracked=True)
         if gr_line:
             lines.append(gr_line)
+        lines = _thin_import_lines(lines, self._current_marketplace().code)
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
             'products_total': log_rec.products_total + len(chunk),
@@ -1798,6 +1872,7 @@ class SyncEngine:
         if gr_line:
             lines.append(gr_line)
         new_total = log_rec.products_total + len(items)
+        lines = _thin_import_lines(lines, self._current_marketplace().code)
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         update_vals = {
             'products_total': new_total,
@@ -5595,6 +5670,7 @@ class SyncEngine:
         gr_line = _grade_and_resell_log_line(grade_resell_skus, mp_tag)
         if gr_line:
             lines.append(gr_line)
+        lines = _thin_fnsku_lines(lines, marketplace.code if marketplace else '?')
         new_lines = ((log_rec.log_lines or '') + '\n' + '\n'.join(lines)).strip()
         log_rec.write({
             'products_total': log_rec.products_total + len(rows),

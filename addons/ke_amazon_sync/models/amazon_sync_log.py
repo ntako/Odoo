@@ -729,6 +729,10 @@ class AmazonSyncLog(models.Model):
                             # continuava a crescere.
                             env.invalidate_all()
 
+                    # Conteggi delle righe di routine dei blocchi: una riga sola
+                    # per marketplace (vedi sync_engine._thin_import_lines).
+                    from odoo.addons.ke_amazon_sync.services.sync_engine import collapse_routine_lines
+                    log_rec.write({'log_lines': collapse_routine_lines(log_rec.log_lines, marketplace.code)})
                     msg = f'Import completato per {marketplace.name} ({marketplace.code}).'
                     SyncLog._append_log_line(log_rec, msg)
                     params.set_param('ke_amazon_sync.import_current_marketplace_id', '')
