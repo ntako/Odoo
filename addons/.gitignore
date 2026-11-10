@@ -55,8 +55,6 @@ import_amazon_*
 # Credenziali reali (mai in git)
 ke_amazon_sync/_D_REFRESH_TOKEN.py
 
-resoconto.*
-
 # Script di test manuali contro l'account Amazon reale (via SpApiClient/
 # credenziali Odoo) e i dump di risposta che producono — mai in git, stesso
 # principio delle credenziali sopra: anche se gli script stessi non
@@ -66,11 +64,5 @@ AMZ_TESTS/
 AGENTS.md
 CLAUDE.md
 TASK.md
-progetto-odoo-amazon-fba-etichettatura.md
-full_export.xlsx
-fornitori_e_marche.xlsx
-progetto-*
-REVIEW_AMAZON*
-RICERCA_*
-PREVISIONE_*
-/docs/
+
+docs/
