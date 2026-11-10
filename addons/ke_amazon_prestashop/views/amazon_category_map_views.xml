@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_category_map_list_ps" model="ir.ui.view">
+        <field name="name">ke.amazon.category.map.list.ps</field>
+        <field name="model">ke.amazon.category.map</field>
+        <field name="inherit_id" ref="ke_amazon_sync.view_amazon_category_map_list"/>
+        <field name="arch" type="xml">
+            <field name="categ_id" position="after">
+                <field name="ps_category_id" options="{'no_create': True}"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_amazon_category_map_search_ps" model="ir.ui.view">
+        <field name="name">ke.amazon.category.map.search.ps</field>
+        <field name="model">ke.amazon.category.map</field>
+        <field name="inherit_id" ref="ke_amazon_sync.view_amazon_category_map_search"/>
+        <field name="arch" type="xml">
+            <filter name="unmapped" position="after">
+                <filter name="ps_unmapped" string="Senza categoria PrestaShop" domain="[('ps_category_id', '=', False)]"/>
+            </filter>
+        </field>
+    </record>
+</odoo>

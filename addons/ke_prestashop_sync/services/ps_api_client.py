@@ -346,12 +346,16 @@ class PsApiClient:
     _PRODUCT_READONLY = ('manufacturer_name', 'quantity', 'position_in_category')
 
     def update_product(self, ps_id, name, reference='', ean13='', price=0.0,
-                       description_short='', active=1, category_id=0, manufacturer_id=0):
+                       description_short='', active=1, category_id=0, manufacturer_id=0,
+                       replace_category=False):
         """
         Aggiorna un prodotto PS esistente (GET → modifica → PUT): nome e
-        descrizione breve nella lingua configurata, prezzo, codici, marca,
-        categoria predefinita e associazione alle categorie (sostituita: Odoo
-        è la fonte). L'indirizzo (link_rewrite) non viene cambiato.
+        descrizione breve nella lingua configurata, prezzo, codici, marca.
+        Categoria predefinita e associazione alle categorie: sostituite solo
+        con replace_category o se il prodotto su PS è soltanto nella radice /
+        nella categoria predefinita (2026-11-10: l'albero del negozio è più
+        dettagliato di quello Odoo, la scelta fatta sul sito resta).
+        L'indirizzo (link_rewrite) non viene cambiato.
         """
         ean13, upc = self._split_barcode(ean13)
         category_id = int(category_id or self._category_id)
@@ -368,7 +372,12 @@ class PsApiClient:
         set_text('ean13', ean13)
         set_text('upc', upc)
         set_text('id_manufacturer', str(int(manufacturer_id or 0)))
-        set_text('id_category_default', str(category_id))
+        cats = prod.find('associations/categories')
+        current = {int(c.findtext('id') or 0) for c in (list(cats) if cats is not None else [])}
+        current.add(int(prod.findtext('id_category_default') or 0))
+        set_category = replace_category or not (current - {0, 1, 2, self._category_id})
+        if set_category:
+            set_text('id_category_default', str(category_id))
         set_text('active', str(int(bool(active))))
         for tag, value in (('name', self._clean_name(name)),
                            ('description_short', (description_short or '')[:450])):
@@ -376,8 +385,7 @@ class PsApiClient:
             for lang in (el.findall('language') if el is not None else []):
                 if int(lang.get('id', 0)) == self._lang_id:
                     lang.text = value
-        cats = prod.find('associations/categories')
-        if cats is not None:
+        if set_category and cats is not None:
             for child in list(cats):
                 cats.remove(child)
             cat = ET.SubElement(cats, 'category')

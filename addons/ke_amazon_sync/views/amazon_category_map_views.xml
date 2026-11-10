@@ -49,7 +49,9 @@
                     File xlsx o csv con le colonne "Categoria trovata" e "Categoria Odoo" (percorso con " / ",
                     es. "Pesca / Fili / Monofilo"), facoltativa "Origine": le righe "Odoo produzione" spostano
                     i prodotti di quella vecchia categoria Odoo. Le categorie Odoo mancanti vengono create.
-                    Poi i prodotti vengono assegnati alle categorie. Nessuna chiamata ad Amazon.
+                    Poi i prodotti vengono assegnati alle categorie. Con il modulo PrestaShop, la colonna
+                    "Categoria PrestaShop" (percorso o ID) imposta anche la categoria del sito.
+                    Nessuna chiamata ad Amazon.
                 </p>
                 <group invisible="result">
                     <field name="file_data" filename="file_name"/>

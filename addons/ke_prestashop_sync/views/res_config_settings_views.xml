@@ -31,6 +31,10 @@
                                  help="Spento: l'export crea su PS solo i prodotti con disponibilità maggiore di zero nel magazzino selezionato">
                             <field name="ps_export_all"/>
                         </setting>
+                        <setting string="Categoria dei prodotti già su PrestaShop"
+                                 help="Spento: la categoria si imposta solo sui prodotti nuovi o rimasti nella categoria predefinita; quella scelta sul sito non si tocca">
+                            <field name="ps_force_category"/>
+                        </setting>
                         <setting string="Listino PrestaShop"
                                  help="Prezzo per il sito, IVA esclusa. Vuoto: prezzo di vendita Odoo (e della variante)">
                             <field name="ps_pricelist_id" options="{'no_create': True}"/>

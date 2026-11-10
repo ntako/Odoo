@@ -26,3 +26,18 @@ class ProductTemplate(models.Model):
         copy=False,
         help='True se l\'immagine principale è stata caricata su PrestaShop.',
     )
+
+    def _ke_ps_category(self):
+        """
+        Categoria PS del prodotto: quella mappata sulla sua categoria Odoo o
+        sulla prima categoria padre mappata; vuota = predefinita. Estesa da
+        ke_amazon_prestashop (categoria PS della corrispondenza Amazon).
+        """
+        self.ensure_one()
+        categ = self.categ_id
+        while categ:
+            if categ.ps_category_id:
+                return categ.ps_category_id
+            categ = categ.parent_id
+        return self.env['ke.prestashop.category']
+

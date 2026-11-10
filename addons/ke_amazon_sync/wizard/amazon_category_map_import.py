@@ -40,6 +40,10 @@ class AmazonCategoryMapImport(models.TransientModel):
         wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         return [[c if c is not None else '' for c in row] for row in wb.worksheets[0].iter_rows(values_only=True)]
 
+    def _import_extra_columns(self, rows, mapper):
+        """Colonne in più del file, per i moduli che estendono l'import (es. ke_amazon_prestashop). Testo per il risultato."""
+        return ''
+
     def action_import(self):
         self.ensure_one()
         rows = self._rows()
@@ -47,6 +51,7 @@ class AmazonCategoryMapImport(models.TransientModel):
             raise UserError('Il file è vuoto.')
         mapper = CategoryMapper(self.env)
         stats = mapper.import_rows(rows, self.default_path)
+        extra = self._import_extra_columns(rows, mapper)
         assigned = mapper.assign()
         deleted = mapper.delete_unused(stats['old_categories']) if self.delete_empty else 0
         self.result = (
@@ -54,7 +59,7 @@ class AmazonCategoryMapImport(models.TransientModel):
             f'Corrispondenze Amazon: {stats["maps"]} ({stats["unmapped"]} senza categoria, vanno nella predefinita). '
             f'Prodotti spostati dalle vecchie categorie Odoo: {stats["moved"]}. '
             f'Prodotti assegnati dalle corrispondenze: {assigned}. '
-            f'Vecchie categorie eliminate: {deleted}.')
+            f'Vecchie categorie eliminate: {deleted}.' + (f' {extra}' if extra else ''))
         return {
             'type': 'ir.actions.act_window', 'res_model': self._name, 'res_id': self.id,
             'view_mode': 'form', 'target': 'new',

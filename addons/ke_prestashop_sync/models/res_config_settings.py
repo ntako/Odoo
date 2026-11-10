@@ -65,6 +65,16 @@ class ResConfigSettings(models.TransientModel):
              'nel magazzino selezionato. Acceso: tutti i prodotti con "Sync PS attiva". '
              'Le sync di giacenze e prezzi riguardano sempre tutti i prodotti già su PS.',
     )
+    # 2026-11-10: l'albero PS del negozio è più dettagliato di quello Odoo;
+    # sostituire la categoria a ogni aggiornamento rimetteva i prodotti già
+    # classificati sul sito in una categoria più generica.
+    ps_force_category = fields.Boolean(
+        string='Aggiorna la categoria dei prodotti già su PrestaShop',
+        config_parameter='ke_prestashop_sync.force_category',
+        help='Spento (default): la categoria si imposta sui prodotti nuovi e su quelli che su PS '
+             'sono solo nella categoria predefinita; quella scelta sul sito non si tocca. '
+             'Acceso: a ogni aggiornamento la categoria PS è quella della mappatura.',
+    )
     ps_pricelist_id = fields.Many2one(
         'product.pricelist', string='Listino PrestaShop',
         config_parameter='ke_prestashop_sync.pricelist_id',
