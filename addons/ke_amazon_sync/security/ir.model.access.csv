@@ -44,3 +44,6 @@ access_ke_amazon_resell_offer_manager,ke.amazon.resell.offer manager,model_ke_am
 access_ke_amazon_listing_new_wizard,ke.amazon.listing.new.wizard,model_ke_amazon_listing_new_wizard,stock.group_stock_manager,1,1,1,1
 access_ke_amazon_price_analysis_user,ke.amazon.price.analysis user,model_ke_amazon_price_analysis,stock.group_stock_user,1,0,0,0
 access_ke_amazon_base_price_wizard,ke.amazon.base.price.wizard,model_ke_amazon_base_price_wizard,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_category_map_user,ke.amazon.category.map user,model_ke_amazon_category_map,stock.group_stock_user,1,0,0,0
+access_ke_amazon_category_map_manager,ke.amazon.category.map manager,model_ke_amazon_category_map,stock.group_stock_manager,1,1,1,1
+access_ke_amazon_category_map_import,ke.amazon.category.map.import,model_ke_amazon_category_map_import,stock.group_stock_manager,1,1,1,1

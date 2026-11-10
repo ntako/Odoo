@@ -196,6 +196,12 @@
               action="action_amazon_listing"
               sequence="41"/>
 
+    <menuitem id="menu_amazon_category_map"
+              name="Corrispondenze categorie"
+              parent="menu_amazon_sync_root"
+              action="action_amazon_category_map"
+              sequence="42"/>
+
     <menuitem id="menu_amazon_price_analysis"
               name="Analisi prezzi"
               parent="menu_amazon_sync_root"

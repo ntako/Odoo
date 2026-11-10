@@ -767,6 +767,15 @@ class AmazonSyncLog(models.Model):
                 except Exception as exc:
                     _log.warning('Assegnazione marche fallita (non bloccante): %s', exc)
 
+                try:
+                    from ..services.category_map import CategoryMapper
+                    with env.cr.savepoint():
+                        n_categ = CategoryMapper(env).assign()
+                    SyncLog._append_log_line(log_rec, f'Categorie assegnate dalle corrispondenze: {n_categ} prodotti.')
+                    env.cr.commit()
+                except Exception as exc:
+                    _log.warning('Assegnazione categorie fallita (non bloccante): %s', exc)
+
                 SyncLog._finish_full_import(log_rec)
             except Exception as exc:
                 _log.error('Thread full_import fallito: %s', exc, exc_info=True)

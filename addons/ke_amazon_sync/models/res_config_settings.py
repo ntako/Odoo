@@ -95,6 +95,13 @@ class ResConfigSettings(models.TransientModel):
              "funzionante sulla postazione scelta — se non c'è, le etichette resteranno "
              "in coda senza mai stamparsi.",
     )
+    amazon_default_categ_id = fields.Many2one(
+        'product.category',
+        string='Categoria predefinita',
+        config_parameter='ke_amazon_sync.default_categ_id',
+        help='Categoria dei prodotti la cui categoria Amazon non ha una corrispondenza (es. "Altro / Da classificare"). '
+             'Vuota: "Tutti".',
+    )
     amazon_zpl_default_station_id = fields.Many2one(
         'ke.amazon.print.station',
         string='Postazione di stampa predefinita',
@@ -294,6 +301,20 @@ class ResConfigSettings(models.TransientModel):
                 'title': 'Marche', 'type': 'success', 'sticky': False,
                 'message': f'Prodotti aggiornati: {updated}. Marche da verificare: {to_review} '
                            f'(Magazzino → Configurazione → Marche).',
+            },
+        }
+
+    def action_assign_categories(self):
+        """Categoria Odoo dalla corrispondenza della categoria Amazon (services/category_map.py)."""
+        from ..services.category_map import CategoryMapper
+        moved = CategoryMapper(self.env).assign()
+        unmapped = self.env['ke.amazon.category.map'].search_count([('categ_id', '=', False)])
+        return {
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'title': 'Categorie', 'type': 'success', 'sticky': False,
+                'message': f'Prodotti spostati: {moved}. Categorie Amazon da mappare: {unmapped} '
+                           f'(Amazon Sync → Corrispondenze categorie).',
             },
         }
 

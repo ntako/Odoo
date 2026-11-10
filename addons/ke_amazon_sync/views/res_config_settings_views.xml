@@ -79,6 +79,20 @@
                                     type="object"
                                     class="btn btn-secondary"/>
                         </setting>
+                        <setting string="Categorie"
+                                 help="Categoria Odoo dalla categoria Amazon del prodotto, in qualunque lingua (Amazon Sync → Corrispondenze categorie). Il Full Import non crea categorie: i prodotti senza corrispondenza vanno nella categoria predefinita. Gira anche da solo a fine Full Import. Nessuna chiamata Amazon.">
+                            <field name="amazon_default_categ_id" options="{'no_create': True}"/>
+                            <div class="mt-2">
+                                <button name="%(ke_amazon_sync.action_amazon_category_map_import)d"
+                                        string="Importa corrispondenze categorie"
+                                        type="action"
+                                        class="btn btn-secondary"/>
+                                <button name="action_assign_categories"
+                                        string="Assegna categorie"
+                                        type="object"
+                                        class="btn btn-secondary ms-2"/>
+                            </div>
+                        </setting>
                         <setting string="Nomi famiglie"
                                  help="Nome di ogni famiglia in ogni lingua dei marketplace attivi: la parte comune ai titoli Amazon delle sue varianti. Gira anche da solo a fine Full Import. Non tocca i nomi scelti a mano. Nessuna chiamata Amazon.">
                             <button name="action_recompute_family_names"

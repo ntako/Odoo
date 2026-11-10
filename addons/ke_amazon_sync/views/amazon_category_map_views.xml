@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_amazon_category_map_list" model="ir.ui.view">
+        <field name="name">ke.amazon.category.map.list</field>
+        <field name="model">ke.amazon.category.map</field>
+        <field name="arch" type="xml">
+            <list string="Corrispondenze categorie" editable="bottom">
+                <field name="name"/>
+                <field name="categ_id" options="{'no_create': True}"/>
+                <field name="product_count"/>
+                <button name="action_open_products" type="object" string="Prodotti" icon="fa-list"
+                        invisible="not product_count"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_amazon_category_map_search" model="ir.ui.view">
+        <field name="name">ke.amazon.category.map.search</field>
+        <field name="model">ke.amazon.category.map</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="categ_id"/>
+                <filter name="unmapped" string="Da mappare" domain="[('categ_id', '=', False)]"/>
+                <group>
+                    <filter name="group_categ" string="Categoria Odoo" context="{'group_by': 'categ_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_amazon_category_map" model="ir.actions.act_window">
+        <field name="name">Corrispondenze categorie</field>
+        <field name="res_model">ke.amazon.category.map</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Nessuna corrispondenza</p>
+            <p>Ogni categoria Amazon (in qualunque lingua) punta a una categoria Odoo. Le categorie
+               nuove le aggiunge il Full Import; senza categoria Odoo vale quella predefinita.</p>
+        </field>
+    </record>
+
+    <record id="view_amazon_category_map_import_form" model="ir.ui.view">
+        <field name="name">ke.amazon.category.map.import.form</field>
+        <field name="model">ke.amazon.category.map.import</field>
+        <field name="arch" type="xml">
+            <form string="Importa corrispondenze categorie">
+                <p class="text-muted">
+                    File xlsx o csv con le colonne "Categoria trovata" e "Categoria Odoo" (percorso con " / ",
+                    es. "Pesca / Fili / Monofilo"), facoltativa "Origine": le righe "Odoo produzione" spostano
+                    i prodotti di quella vecchia categoria Odoo. Le categorie Odoo mancanti vengono create.
+                    Poi i prodotti vengono assegnati alle categorie. Nessuna chiamata ad Amazon.
+                </p>
+                <group invisible="result">
+                    <field name="file_data" filename="file_name"/>
+                    <field name="file_name" invisible="1"/>
+                    <field name="default_path"/>
+                    <field name="delete_empty"/>
+                </group>
+                <field name="result" invisible="not result" nolabel="1"/>
+                <footer>
+                    <button name="action_import" string="Importa" type="object" class="btn-primary"
+                            invisible="result"/>
+                    <button string="Chiudi" special="cancel" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_amazon_category_map_import" model="ir.actions.act_window">
+        <field name="name">Importa corrispondenze categorie</field>
+        <field name="res_model">ke.amazon.category.map.import</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

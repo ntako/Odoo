@@ -511,15 +511,15 @@ def _convert_length(d):
 
 
 def _get_or_create_category(env, name):
-    if not name:
-        ref = env.ref('product.product_category_all', raise_if_not_found=False)
-        if ref:
-            return ref
-        return env['product.category'].search([], limit=1, order='id asc')
-    cat = env['product.category'].search([('name', '=', name)], limit=1)
-    if not cat:
-        cat = env['product.category'].create({'name': name})
-    return cat
+    """
+    Categoria Odoo di un prodotto nuovo dalla sua categoria Amazon, tramite
+    le corrispondenze (services/category_map.py). Dal 2026-11-10 non crea
+    più una categoria Odoo per ogni nome Amazon (una per lingua: 440 su
+    odoo_2); un nome nuovo va nella categoria predefinita e compare fra le
+    corrispondenze da completare.
+    """
+    from .category_map import CategoryMapper
+    return CategoryMapper(env).category_for(name)
 
 
 # ---------------------------------------------------------------------------
