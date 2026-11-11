@@ -75,6 +75,13 @@ class ResConfigSettings(models.TransientModel):
              'sono solo nella categoria predefinita; quella scelta sul sito non si tocca. '
              'Acceso: a ogni aggiornamento la categoria PS è quella della mappatura.',
     )
+    ps_force_texts = fields.Boolean(
+        string='Aggiorna i testi dei prodotti già su PrestaShop',
+        config_parameter='ke_prestashop_sync.force_texts',
+        help='Spento (default): nome, descrizioni, meta title, meta description e URL si scrivono solo '
+             'quando il prodotto viene creato su PS; quelli dei prodotti già sul sito non si toccano. '
+             'Acceso: a ogni aggiornamento i testi vengono da Odoo (scheda Sito web del prodotto).',
+    )
     ps_pricelist_id = fields.Many2one(
         'product.pricelist', string='Listino PrestaShop',
         config_parameter='ke_prestashop_sync.pricelist_id',

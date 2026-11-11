@@ -286,14 +286,34 @@ class PsApiClient:
             return '', code
         return '', ''
 
+    # Limiti dei campi PS 8 (validate dell'ObjectModel Product).
+    _META_TITLE_MAX = 255
+    _META_DESCRIPTION_MAX = 512
+
+    @staticmethod
+    def _cdata(value):
+        return (value or '').replace(']]>', ']]&gt;')
+
+    def _seo_xml(self, description, meta_title, meta_description):
+        """Blocchi XML dei testi del sito presenti (descrizione, meta title, meta description)."""
+        out = ''
+        for tag, value in (('description', description),
+                           ('meta_title', (meta_title or '')[:self._META_TITLE_MAX]),
+                           ('meta_description', (meta_description or '')[:self._META_DESCRIPTION_MAX])):
+            if value:
+                out += (f'\n    <{tag}>\n      <language id="{self._lang_id}"><![CDATA[{self._cdata(value)}]]>'
+                        f'</language>\n    </{tag}>')
+        return out
+
     @staticmethod
     def _clean_name(name):
         # PS isCatalogName vieta ; < > = { } e in questa installazione anche #
         return re.sub(r'[<>={}#]', '', (name or '')).replace(';', ',').strip()[:128]
 
     def create_product(self, name, reference='', ean13='', price=0.0,
-                       description_short='', active=1, category_id=0, manufacturer_id=0):
-        """Crea un prodotto su PS e restituisce il nuovo ID."""
+                       description_short='', active=1, category_id=0, manufacturer_id=0,
+                       description='', meta_title='', meta_description='', link_rewrite=''):
+        """Crea un prodotto su PS e restituisce il nuovo ID (testi del sito: ke_web_* di ke_product_catalog)."""
         ean13, upc = self._split_barcode(ean13)
         name = self._clean_name(name)
         category_id = int(category_id or self._category_id)
@@ -307,7 +327,8 @@ class PsApiClient:
         desc_cdata = description_short.replace(']]>', ']]&gt;')
         # reference: sanificato (PS vieta < > ; = { }, max 64 char)
         ref_cdata = self._clean_reference(reference).replace(']]>', ']]&gt;')
-        slug = self._make_slug(name)
+        slug = self._make_slug(link_rewrite or name)
+        seo = self._seo_xml(description, meta_title, meta_description)
         xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <product>
@@ -331,7 +352,7 @@ class PsApiClient:
     </link_rewrite>
     <description_short>
       <language id="{self._lang_id}"><![CDATA[{desc_cdata}]]></language>
-    </description_short>
+    </description_short>{seo}
     <id_category_default>{category_id}</id_category_default>
     <associations>
       <categories>
@@ -347,7 +368,8 @@ class PsApiClient:
 
     def update_product(self, ps_id, name, reference='', ean13='', price=0.0,
                        description_short='', active=1, category_id=0, manufacturer_id=0,
-                       replace_category=False):
+                       replace_category=False, description='', meta_title='', meta_description='',
+                       link_rewrite='', replace_texts=False):
         """
         Aggiorna un prodotto PS esistente (GET → modifica → PUT): nome e
         descrizione breve nella lingua configurata, prezzo, codici, marca.
@@ -379,8 +401,19 @@ class PsApiClient:
         if set_category:
             set_text('id_category_default', str(category_id))
         set_text('active', str(int(bool(active))))
-        for tag, value in (('name', self._clean_name(name)),
-                           ('description_short', (description_short or '')[:450])):
+        # Testi (nome, descrizioni, meta, URL): solo con replace_texts. Deciso con
+        # l'utente il 2026-11-11: i testi si scrivono alla creazione; sui
+        # prodotti già sul sito si aggiornano solo con l'opzione "Aggiorna testi".
+        texts = [('name', self._clean_name(name)), ('description_short', (description_short or '')[:450])]
+        if description:
+            texts.append(('description', description))
+        if meta_title:
+            texts.append(('meta_title', meta_title[:self._META_TITLE_MAX]))
+        if meta_description:
+            texts.append(('meta_description', meta_description[:self._META_DESCRIPTION_MAX]))
+        if link_rewrite:
+            texts.append(('link_rewrite', self._make_slug(link_rewrite)))
+        for tag, value in (texts if replace_texts else []):
             el = prod.find(tag)
             for lang in (el.findall('language') if el is not None else []):
                 if int(lang.get('id', 0)) == self._lang_id:

@@ -65,3 +65,41 @@ class TestCategoryPs(TransactionCase):
         self.assertEqual(self._update(30, [2, 30]), ('30', ['2', '30']), 'scelta del sito non toccata')
         self.assertEqual(self._update(2, [2]), ('55', ['55']), 'solo nella predefinita: si imposta')
         self.assertEqual(self._update(30, [2, 30], replace=True), ('55', ['55']))
+
+    def _update_texts(self, replace):
+        client = PsApiClient(self.env)
+        xml = _PRODUCT_XML.format(default=30, cats='<category><id>30</id></category>').replace(
+            '<description_short>', '<meta_title><language id="1">vecchio</language></meta_title><description_short>')
+        sent = {}
+        with patch.object(PsApiClient, '_get_xml_str', return_value=xml), \
+                patch.object(PsApiClient, '_put_xml', side_effect=lambda r, i, b: sent.update(xml=b)):
+            client.update_product(7, 'Nome nuovo', meta_title='Meta nuovo', replace_texts=replace)
+        prod = ET.fromstring(sent['xml']).find('product')
+        return prod.findtext('name/language'), prod.findtext('meta_title/language')
+
+    def test_texts_only_on_creation_unless_forced(self):
+        self.assertEqual(self._update_texts(False), ('x', 'vecchio'), 'prodotto già sul sito: testi non toccati')
+        self.assertEqual(self._update_texts(True), ('Nome nuovo', 'Meta nuovo'))
+
+    def test_create_sends_website_texts(self):
+        client = PsApiClient(self.env)
+        sent = {}
+        with patch.object(PsApiClient, '_post_xml', side_effect=lambda r, b: sent.update(xml=b) or 99):
+            client.create_product('DAM Quick 1', meta_title='DAM Quick 1 | DAM', meta_description='Mulinello',
+                                  description='<p>Testo</p>', link_rewrite='dam-quick-uno')
+        prod = ET.fromstring(sent['xml']).find('product')
+        self.assertEqual(prod.findtext('link_rewrite/language'), 'dam-quick-uno')
+        self.assertEqual(prod.findtext('meta_title/language'), 'DAM Quick 1 | DAM')
+        self.assertEqual(prod.findtext('description/language'), '<p>Testo</p>')
+
+    def test_engine_uses_website_texts(self):
+        from odoo.addons.ke_prestashop_sync.services.sync_engine import SyncEngine as PsSyncEngine
+        tmpl = self.env['product.template'].create({'name': 'ZZT titolo lungo, Amazon', 'ke_web_name': 'ZZT Breve',
+                                                    'ke_web_meta_title': 'ZZT Meta'})
+        engine = PsSyncEngine.__new__(PsSyncEngine)
+        engine.env = self.env
+        with patch.object(PsSyncEngine, '_ps_price', return_value=1.0), \
+                patch.object(PsSyncEngine, '_ps_manufacturer_id', return_value=0), \
+                patch.object(PsSyncEngine, '_ps_lang', return_value='en_US'):
+            vals = engine._ps_product_vals(tmpl, [])
+        self.assertEqual((vals['name'], vals['meta_title']), ('ZZT Breve', 'ZZT Meta'))

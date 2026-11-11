@@ -35,6 +35,10 @@
                                  help="Spento: la categoria si imposta solo sui prodotti nuovi o rimasti nella categoria predefinita; quella scelta sul sito non si tocca">
                             <field name="ps_force_category"/>
                         </setting>
+                        <setting string="Testi dei prodotti già su PrestaShop"
+                                 help="Spento: nome, descrizioni, meta e URL si scrivono solo alla creazione del prodotto su PS">
+                            <field name="ps_force_texts"/>
+                        </setting>
                         <setting string="Listino PrestaShop"
                                  help="Prezzo per il sito, IVA esclusa. Vuoto: prezzo di vendita Odoo (e della variante)">
                             <field name="ps_pricelist_id" options="{'no_create': True}"/>

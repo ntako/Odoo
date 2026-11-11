@@ -117,6 +117,9 @@ class SyncEngine:
         """Categoria PS del prodotto (product.template._ke_ps_category); 0 = predefinita."""
         return tmpl._ke_ps_category().ps_id or 0
 
+    def _force_texts(self):
+        return self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.force_texts') in ('True', '1')
+
     def _force_category(self):
         return self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.force_category') in ('True', '1')
 
@@ -156,12 +159,18 @@ class SyncEngine:
         if not category_id and tmpl.categ_id:
             lines.append(f'[CATEGORIA] {tmpl.name}: categoria Odoo "{tmpl.categ_id.display_name}" '
                          f'non mappata, usata la categoria PS predefinita')
+        # Testi del sito (scheda "Sito web", ke_product_catalog) se compilati,
+        # altrimenti nome e descrizione di vendita come prima.
         return {
-            'name': tmpl.name,
+            'name': tmpl.ke_web_name or tmpl.name,
             'reference': reference,
             'ean13': ean13,
             'price': self._ps_price(tmpl),
-            'description_short': tmpl.description_sale or '',
+            'description_short': tmpl.ke_web_short_description or tmpl.description_sale or '',
+            'description': tmpl.ke_web_description or '',
+            'meta_title': tmpl.ke_web_meta_title or '',
+            'meta_description': tmpl.ke_web_meta_description or '',
+            'link_rewrite': tmpl.ke_web_slug or '',
             'category_id': category_id,
             'manufacturer_id': self._ps_manufacturer_id(tmpl.ke_brand_id, lines),
         }
@@ -650,7 +659,8 @@ class SyncEngine:
         result = 'updated'
         if ps_id:
             try:
-                self.client.update_product(ps_id, replace_category=self._force_category(), **vals)
+                self.client.update_product(ps_id, replace_category=self._force_category(),
+                                           replace_texts=self._force_texts(), **vals)
             except PsResourceNotFound:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
                 tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
@@ -659,7 +669,8 @@ class SyncEngine:
             ps_id = self.client.find_product_by_reference(vals['reference']) or 0
             if ps_id:
                 tmpl.write({'ps_product_id': ps_id})
-                self.client.update_product(ps_id, replace_category=self._force_category(), **vals)
+                self.client.update_product(ps_id, replace_category=self._force_category(),
+                                           replace_texts=self._force_texts(), **vals)
                 lines.append(f'[LINK] {tmpl.name} → ps_id={ps_id}')
         if not ps_id:
             ps_id = self.client.create_product(**vals)
@@ -691,7 +702,8 @@ class SyncEngine:
 
         if ps_id:
             try:
-                self.client.update_product(ps_id, replace_category=self._force_category(), **vals)
+                self.client.update_product(ps_id, replace_category=self._force_category(),
+                                           replace_texts=self._force_texts(), **vals)
             except PsResourceNotFound:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
                 tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
