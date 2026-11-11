@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Sincronizzazioni manuali (2026-11-11): le voci tolte dal menu Amazon
+         Sync, qui con conferma. Vista a parte perché le azioni sono definite
+         in views/menu.xml, caricato dopo la pagina di configurazione. -->
+    <record id="res_config_settings_view_amazon_manual" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.amazon.manual</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="ke_amazon_sync.res_config_settings_view_amazon"/>
+        <field name="arch" type="xml">
+            <xpath expr="//block[@name='amazon_import']" position="before">
+                <block title="Sincronizzazioni manuali" name="amazon_manual_syncs">
+                    <setting string="Full Import"
+                             help="Scarica i report degli annunci di tutti i marketplace attivi, crea e abbina i prodotti, poi Import FNSKU. Circa 2 ore. Solo letture da Amazon.">
+                        <button name="%(ke_amazon_sync.action_amazon_full_import_server)d"
+                                string="Avvia Full Import" type="action" class="btn btn-secondary"
+                                confirm="Avvio il Full Import in background (circa 2 ore): crea e aggiorna i prodotti di Odoo dai report Amazon. Continuare?"/>
+                    </setting>
+                    <setting string="Report Amazon"
+                             help="Chiede ad Amazon un nuovo report (annunci, inventario…). I report scaricati sono in Amazon Sync → Registri → Report Amazon scaricati.">
+                        <button name="%(ke_amazon_sync.action_amazon_report_request_wizard)d"
+                                string="Richiedi nuovo report" type="action" class="btn btn-secondary"/>
+                    </setting>
+                    <setting string="Ordini"
+                             help="Importa gli ordini Amazon dei giorni indicati in &quot;Import Ordini&quot;. Gira anche con l'azione pianificata.">
+                        <button name="%(ke_amazon_sync.action_amazon_import_orders_server)d"
+                                string="Importa ordini" type="action" class="btn btn-secondary"
+                                confirm="Avvio l'import degli ordini Amazon in background. Continuare?"/>
+                    </setting>
+                    <setting string="Resi"
+                             help="Importa i resi FBA da Amazon e registra i rientri in Odoo.">
+                        <button name="%(ke_amazon_sync.action_amazon_returns_server)d"
+                                string="Importa resi" type="action" class="btn btn-secondary"
+                                confirm="Avvio l'import dei resi Amazon: registra i rientri in magazzino in Odoo. Continuare?"/>
+                    </setting>
+                    <setting string="Giacenze FBA"
+                             help="Legge da Amazon la quantità vendibile FBA di ogni marketplace e aggiorna il magazzino FBA di Odoo.">
+                        <button name="%(ke_amazon_sync.action_amazon_sync_fba_server)d"
+                                string="Sincronizza giacenze FBA" type="action" class="btn btn-secondary"
+                                confirm="Avvio la sync delle giacenze FBA: aggiorna le quantità del magazzino FBA in Odoo. Continuare?"/>
+                    </setting>
+                    <setting string="FNSKU"
+                             help="Legge gli FNSKU (codici etichetta FBA) da Amazon e li salva su annunci e prodotti. Gira anche a fine Full Import.">
+                        <button name="%(ke_amazon_sync.action_amazon_fnsku_import_server)d"
+                                string="Importa FNSKU" type="action" class="btn btn-secondary"
+                                confirm="Avvio l'import FNSKU in background. Continuare?"/>
+                    </setting>
+                    <setting string="Dati da Catalog API"
+                             help="Completa categoria Amazon, dimensioni, peso, marca e descrizioni dei prodotti con ASIN a cui mancano. Il Full Import lo fa già per i prodotti che tocca.">
+                        <button name="%(ke_amazon_sync.action_apply_cat_mapping_server)d"
+                                string="Aggiorna da Catalog API" type="action" class="btn btn-secondary"
+                                confirm="Avvio l'aggiornamento dei prodotti da Catalog API in background. Continuare?"/>
+                    </setting>
+                </block>
+            </xpath>
+            <xpath expr="//block[@name='amazon_warehouses']" position="inside">
+                <setting string="Sposta giacenza verso il Magazzino Generale"
+                         help="Operazione una tantum della separazione dei magazzini: sposta giacenza esistente verso il Magazzino Generale.">
+                    <button name="%(ke_amazon_sync.action_amazon_move_to_general_wizard)d"
+                            string="Sposta giacenza esistente" type="action" class="btn btn-secondary"/>
+                </setting>
+            </xpath>
+        </field>
+    </record>
+</odoo>

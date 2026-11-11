@@ -51,6 +51,7 @@
         'views/amazon_inbound_plan_views.xml',
         'views/amazon_price_analysis_views.xml',
         'views/menu.xml',
+        'views/res_config_settings_manual_views.xml',
         'views/product_brand_views.xml',
     ],
     'assets': {

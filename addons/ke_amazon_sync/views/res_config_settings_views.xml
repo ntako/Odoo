@@ -238,7 +238,7 @@
                                     class="btn btn-primary"
                                     confirm="Interroga Amazon per i marketplace realmente attivi e aggiorna l'elenco qui sopra. Continuare?"/>
                         </setting>
-                        <setting string="Migra a modello multi-marketplace"
+                        <setting string="Migra a modello multi-marketplace" groups="base.group_no_one"
                                  help="Operazione una tantum: crea le inserzioni (ke.amazon.listing) sul marketplace oggi configurato qui sopra, a partire dai campi Amazon già presenti sui prodotti. Non tocca i campi originali, sicura da rilanciare più volte. Non ancora usata dalle sync (fase successiva) — serve solo a preparare i dati.">
                             <button name="action_migrate_to_amazon_listings"
                                     string="Migra dati esistenti"
