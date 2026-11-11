@@ -92,3 +92,17 @@ class TestCategoryMap(TransactionCase):
         self.assertEqual(product.categ_id.complete_name, 'ZZT Pesca / ZZT Calamaro')
         self.assertIn('Corrispondenze Amazon: 1', wizard.result)
         self.assertFalse(legacy.exists())
+
+    def test_assign_refines_from_parent_category(self):
+        parent = self.Category.create({'name': 'ZZT Esche'})
+        child = self.Category.create({'name': 'ZZT Siliconiche', 'parent_id': parent.id})
+        other = self.Category.create({'name': 'ZZT Minuteria'})
+        self.Map.create({'name': 'ZZT Soft bait', 'categ_id': child.id})
+        self.Map.create({'name': 'ZZT Altro ramo', 'categ_id': parent.id})
+        self.Map.create({'name': 'ZZT Minuteria Amazon', 'categ_id': other.id})
+        up = self._product('ZZT padre', 'ZZT Soft bait', parent)
+        side = self._product('ZZT altro ramo', 'ZZT Soft bait', other)
+        CategoryMapper(self.env).assign()
+        self.assertEqual(up.categ_id, child, 'affinato nella sottocategoria')
+        self.assertEqual(side.categ_id, other, 'categoria di un altro ramo: resta')
+

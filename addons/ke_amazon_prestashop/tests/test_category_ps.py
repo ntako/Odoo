@@ -35,6 +35,10 @@ class TestCategoryPs(TransactionCase):
         self.env['ke.amazon.category.map'].create({
             'name': 'ZZT Mulinelli da surfcasting', 'categ_id': self.reels.id, 'ps_category_id': self.ps_surf.id})
         self.assertEqual(tmpl._ke_ps_category(), self.ps_surf)
+        ps_acc = self.env['ke.prestashop.category'].create({'ps_id': 91003, 'name': 'ZZT Accessori',
+                                                            'complete_name': 'ZZT Pesca / ZZT Accessori'})
+        tmpl.categ_id = self.env['product.category'].create({'name': 'ZZT Accessori', 'ps_category_id': ps_acc.id})
+        self.assertEqual(tmpl._ke_ps_category(), ps_acc, 'spostato a mano: vale la mappatura della nuova categoria')
 
     def test_import_reads_prestashop_column(self):
         data = ('Origine;Categoria trovata;Prodotti;Categoria Odoo;Categoria PrestaShop\n'

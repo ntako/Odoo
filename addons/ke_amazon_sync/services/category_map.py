@@ -95,7 +95,7 @@ class CategoryMapper:
             current = tmpl.categ_id
             if not target or current == target:
                 continue
-            if not force and not self._replaceable(current, default, all_categ, targets, maps):
+            if not force and not self._replaceable(current, default, all_categ, targets, maps, target):
                 continue
             moves[target.id].append(tmpl.id)
         # Senza categoria Amazon salvata (famiglie del vecchio import: la
@@ -113,8 +113,15 @@ class CategoryMapper:
         return sum(len(ids) for ids in moves.values())
 
     @staticmethod
-    def _replaceable(current, default, all_categ, targets, maps):
+    def _replaceable(current, default, all_categ, targets, maps, target=None):
         if not current or current == default or current == all_categ:
+            return True
+        # Affinamento (2026-11-11): da una categoria padre alla sottocategoria
+        # della corrispondenza, es. "Pesca / Esche artificiali" → "… / Siliconiche"
+        # (67 prodotti originali con giacenza su odoo_prod). Mai verso l'alto né
+        # verso una categoria di un altro ramo.
+        if target and target.parent_path and current.parent_path \
+                and target.parent_path.startswith(current.parent_path):
             return True
         return current.id not in targets and category_key(current.name) in maps
 
