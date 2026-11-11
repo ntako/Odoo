@@ -11,11 +11,17 @@
                  specifici di Amazon: qui vengono solo scritti durante la sync. -->
             <xpath expr="//notebook" position="inside">
                 <page string="Amazon" name="amazon_tab">
+                    <field name="ke_amazon_safe_mode" invisible="1"/>
+                    <div class="alert alert-info" role="status" invisible="not ke_amazon_safe_mode">
+                        Modalità sicura attiva: da Odoo non si modifica nulla su Amazon (pubblicazione,
+                        prezzo, quantità). Si disattiva in Configurazione Amazon.
+                    </div>
                     <div class="mb-3">
                         <button name="action_amazon_publish"
                                 string="Pubblica su Amazon"
                                 type="object"
                                 class="btn btn-primary me-2"
+                                invisible="ke_amazon_safe_mode"
                                 confirm="Pubblica o aggiorna questo prodotto su Amazon. Continuare?"/>
                         <button name="%(action_amazon_listing_new_wizard)d"
                                 string="Nuova inserzione"
@@ -39,7 +45,7 @@
                                 string="Sync prezzo/quantità"
                                 type="object"
                                 class="btn btn-secondary me-2"
-                                invisible="not x_amazon_sync_price and not x_amazon_sync_qty"
+                                invisible="ke_amazon_safe_mode or (not x_amazon_sync_price and not x_amazon_sync_qty)"
                                 confirm="Invia prezzo e/o quantità aggiornati ad Amazon. Continuare?"/>
                         <button name="action_amazon_download_image"
                                 string="Scarica immagine"

@@ -1198,6 +1198,10 @@ class AmazonSyncLog(models.Model):
                              'sarà idle al prossimo ciclo.')
 
     def _cron_sync_prices_quantities(self):
+        from odoo.addons.ke_amazon_sync.services.sp_api_client import amazon_writes_enabled
+        if not amazon_writes_enabled(self.env):
+            _log.info('Cron sync_prices_quantities saltato: modalità sicura attiva (nessuna scrittura su Amazon).')
+            return
         client = SpApiClient(self.env)
         try:
             client.validate_credentials()

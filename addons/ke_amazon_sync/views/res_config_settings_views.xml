@@ -8,6 +8,12 @@
             <xpath expr="//app[@name='general_settings']" position="after">
                 <app string="Amazon Seller Central" name="ke_amazon_sync">
 
+                    <block title="Sicurezza" name="amazon_safety">
+                        <setting string="Modalità sicura"
+                                 help="Attiva: da Odoo non parte nessuna modifica su Amazon (prezzi, quantità, pubblicazione, nuove inserzioni, piani inbound FBA), da nessun pulsante né azione pianificata; i pulsanti che scrivono sono nascosti. Letture, report, ordini, giacenze, commissioni ed etichette restano attivi. Spegnila solo quando vuoi davvero aggiornare Amazon.">
+                            <field name="amazon_safe_mode"/>
+                        </setting>
+                    </block>
                     <block title="Credenziali SP-API" name="amazon_credentials">
                         <setting string="Seller ID (Merchant Token)">
                             <field name="amazon_seller_id"/>
@@ -142,6 +148,7 @@
                                     <button name="action_run_sync_prices_quantities"
                                             string="Esegui ora"
                                             type="object"
+                                            invisible="amazon_safe_mode"
                                             class="btn btn-secondary btn-sm"
                                             confirm="Avvio la sincronizzazione prezzi/quantità in background. Il risultato sarà visibile nel log. Continuare?"/>
                                 </div>

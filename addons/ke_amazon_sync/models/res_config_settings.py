@@ -95,6 +95,11 @@ class ResConfigSettings(models.TransientModel):
              "funzionante sulla postazione scelta — se non c'è, le etichette resteranno "
              "in coda senza mai stamparsi.",
     )
+    amazon_safe_mode = fields.Boolean(
+        string='Modalità sicura',
+        help='Attiva: nessuna modifica su Amazon da Odoo (prezzi, quantità, pubblicazione, piani '
+             'inbound FBA); i pulsanti che scrivono sono nascosti. Le letture restano libere.',
+    )
     amazon_default_categ_id = fields.Many2one(
         'product.category',
         string='Categoria predefinita',
@@ -230,6 +235,10 @@ class ResConfigSettings(models.TransientModel):
 
     def action_run_sync_prices_quantities(self):
         """Avvia manualmente la funzione 3 in background e apre il log."""
+        from ..services.sp_api_client import amazon_writes_enabled
+        if not amazon_writes_enabled(self.env):
+            raise UserError('Modalità sicura attiva: la sync prezzi e quantità scrive su Amazon. '
+                            'Disattiva prima la modalità sicura in questa pagina.')
         self._validate_credentials()
         if not self.env['ke.amazon.marketplace'].search([('active', '=', True)]):
             raise UserError(
@@ -303,6 +312,21 @@ class ResConfigSettings(models.TransientModel):
                            f'(Magazzino → Configurazione → Marche).',
             },
         }
+
+    @api.model
+    def get_values(self):
+        from ..services.sp_api_client import amazon_writes_enabled
+        res = super().get_values()
+        res['amazon_safe_mode'] = not amazon_writes_enabled(self.env)
+        return res
+
+    def set_values(self):
+        from ..services.sp_api_client import WRITES_ENABLED_PARAM
+        super().set_values()
+        # Salvato come "scritture abilitate": un parametro assente (DB appena
+        # ripristinato) vuol dire modalità sicura attiva.
+        self.env['ir.config_parameter'].sudo().set_param(
+            WRITES_ENABLED_PARAM, 'False' if self.amazon_safe_mode else 'True')
 
     def action_assign_categories(self):
         """Categoria Odoo dalla corrispondenza della categoria Amazon (services/category_map.py)."""

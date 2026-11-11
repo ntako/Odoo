@@ -28,3 +28,4 @@ from . import test_marketplace_pricelist
 from . import test_price_analysis
 from . import test_base_price_recalc
 from . import test_category_map
+from . import test_safe_mode

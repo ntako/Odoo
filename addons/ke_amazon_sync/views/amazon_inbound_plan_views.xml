@@ -82,20 +82,21 @@
                     <!-- Un bottone per ogni decisione vera (2026-10-30): i passi senza
                          scelte si concatenano da soli e ci si ferma prima dei due che
                          impegnano. I metodi dei singoli passi restano nel modello. -->
+                    <field name="ke_amazon_safe_mode" invisible="1"/>
                     <button name="action_prepare_placement" string="Crea piano e prepara collocazione"
-                            type="object" class="btn-primary" invisible="state != 'draft'"
+                            type="object" class="btn-primary" invisible="ke_amazon_safe_mode or state != 'draft'"
                             help="Crea il piano su Amazon, conferma l'imballaggio, invia i colli e genera le opzioni di collocazione. Nessuno di questi passi impegna; si ferma prima della conferma della collocazione."/>
                     <button name="action_prepare_placement" string="Riprendi preparazione collocazione"
                             type="object" class="btn-primary"
-                            invisible="state not in ('plan_created', 'packing_confirmed', 'packing_info_sent')"/>
+                            invisible="ke_amazon_safe_mode or state not in ('plan_created', 'packing_confirmed', 'packing_info_sent')"/>
                     <button name="action_confirm_placement_option" string="Conferma collocazione (IRREVERSIBILE)"
-                            type="object" class="btn-danger" invisible="state != 'placement_options_ready'"
+                            type="object" class="btn-danger" invisible="ke_amazon_safe_mode or state != 'placement_options_ready'"
                             confirm="Confermi l'opzione di collocazione SCELTA nella scheda Opzioni? È IRREVERSIBILE lato Amazon: non si può più annullare o cambiare. Dopo, Odoo prepara da solo finestre di consegna e preventivi di trasporto."/>
                     <button name="action_prepare_transport" string="Prepara trasporto"
                             type="object" class="btn-primary"
-                            invisible="state not in ('placement_confirmed', 'delivery_window_options_ready', 'delivery_window_confirmed')"/>
+                            invisible="ke_amazon_safe_mode or state not in ('placement_confirmed', 'delivery_window_options_ready', 'delivery_window_confirmed')"/>
                     <button name="action_confirm_transportation_options" string="Conferma trasporto"
-                            type="object" class="btn-danger" invisible="state != 'transport_options_ready'"
+                            type="object" class="btn-danger" invisible="ke_amazon_safe_mode or state != 'transport_options_ready'"
                             confirm="Confermi il trasporto SCELTO nella scheda Opzioni? Impegna il corriere e il relativo costo. Dopo, Odoo scarica da solo le etichette dei colli."/>
                     <button name="action_get_labels" string="Scarica etichette collo"
                             type="object" class="btn-primary" invisible="state != 'transport_confirmed'"/>

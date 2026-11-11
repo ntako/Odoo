@@ -30,6 +30,7 @@ class AmazonListingNewWizard(models.TransientModel):
     verifica di Amazon.
     """
     _name = 'ke.amazon.listing.new.wizard'
+    _inherit = ['ke.amazon.safe.mode.mixin']
     _description = 'Nuova inserzione Amazon'
 
     product_id = fields.Many2one('product.product', string='Variante', required=True)

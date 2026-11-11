@@ -43,6 +43,40 @@ RETRY_NET_BACKOFF_S = 15  # Attesa fissa per errori di rete/SSL (non throttling)
 HTTP_TIMEOUT_S = 30
 
 
+# ---------------------------------------------------------------------------
+# Modalità sicura (2026-11-11, chiesta dall'utente): finché non viene spenta in
+# Configurazione Amazon, nessuna chiamata che MODIFICA Amazon (prezzo,
+# quantità, pubblicazione, piani inbound FBA) parte, da qualunque punto venga
+# chiamata (pulsanti, azioni pianificate, thread, wizard). Le letture
+# (report, catalogo, ordini, giacenze, commissioni, etichette, verifica di
+# un annuncio senza crearlo) restano libere. Il parametro è "scritture
+# abilitate" e non "modalità sicura" apposta: se manca (database appena
+# ripristinato) la modalità sicura è attiva.
+# ---------------------------------------------------------------------------
+WRITES_ENABLED_PARAM = 'ke_amazon_sync.writes_enabled'
+
+
+def amazon_writes_enabled(env):
+    return bool(env) and env['ir.config_parameter'].sudo().get_param(WRITES_ENABLED_PARAM) in ('True', '1')
+
+
+def _amazon_write(fn):
+    """Blocca il metodo (prima di qualunque attesa o chiamata) se la modalità sicura è attiva."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if kwargs.get('validation_only'):
+            return fn(self, *args, **kwargs)
+        if self._env is not None and not amazon_writes_enabled(self._env):
+            from odoo.exceptions import UserError
+            _log.warning('Modalità sicura: bloccata la scrittura su Amazon %s', fn.__name__)
+            raise UserError(
+                f'Modalità sicura attiva: nessuna modifica su Amazon ({fn.__name__}). '
+                'Si disattiva in Inventario → Amazon Sync → Configurazione Amazon → "Modalità sicura".')
+        return fn(self, *args, **kwargs)
+    wrapper._amazon_write = True
+    return wrapper
+
+
 def _with_retry(delay_s, retry_max=None, backoff_s=None):
     """
     retry_max/backoff_s permettono di stringere i tempi di attesa per le
@@ -868,6 +902,7 @@ class SpApiClient:
     # PATCH prezzo
     # ------------------------------------------------------------------
 
+    @_amazon_write
     @_with_retry(DELAY_LISTINGS_S)
     def patch_price(self, sku, product_type, price):
         """Aggiorna il prezzo di un listing via PATCH."""
@@ -949,6 +984,7 @@ class SpApiClient:
     # PUT listing (crea o sostituisce offerta/listing completo)
     # ------------------------------------------------------------------
 
+    @_amazon_write
     @_with_retry(DELAY_LISTINGS_S)
     def put_listing(self, sku, product_type, attributes, requirements='LISTING_OFFER_ONLY',
                     validation_only=False):
@@ -978,6 +1014,7 @@ class SpApiClient:
     # PATCH quantità (FBM only)
     # ------------------------------------------------------------------
 
+    @_amazon_write
     @_with_retry(DELAY_LISTINGS_S)
     def patch_quantity(self, sku, product_type, qty):
         """Aggiorna la quantità FBM di un listing via PATCH."""
@@ -1070,6 +1107,7 @@ class SpApiClient:
             pageSize=page_size, sortBy='CREATION_TIME', sortOrder='DESC',
         ).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def create_inbound_plan(self, name, source_address, destination_marketplace_ids, items):
         """
@@ -1085,6 +1123,7 @@ class SpApiClient:
             items=items,
         ).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def generate_packing_options(self, inbound_plan_id):
         return self._inbound_api().generate_packing_options(inbound_plan_id).payload
@@ -1093,10 +1132,12 @@ class SpApiClient:
     def list_packing_options(self, inbound_plan_id):
         return self._inbound_api().list_packing_options(inbound_plan_id).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def confirm_packing_option(self, inbound_plan_id, packing_option_id):
         return self._inbound_api().confirm_packing_option(inbound_plan_id, packing_option_id).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def set_packing_information(self, inbound_plan_id, package_groupings):
         """'package_groupings': lista di {'packingGroupId', 'boxes': [...]}."""
@@ -1104,6 +1145,7 @@ class SpApiClient:
             inbound_plan_id, packageGroupings=package_groupings,
         ).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def generate_placement_options(self, inbound_plan_id):
         return self._inbound_api().generate_placement_options(inbound_plan_id).payload
@@ -1115,6 +1157,7 @@ class SpApiClient:
             kwargs['paginationToken'] = pagination_token
         return self._inbound_api().list_placement_options(inbound_plan_id, **kwargs).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def confirm_placement_option(self, inbound_plan_id, placement_option_id):
         """
@@ -1130,6 +1173,7 @@ class SpApiClient:
     def get_shipment(self, inbound_plan_id, shipment_id):
         return self._inbound_api().get_shipment(inbound_plan_id, shipment_id).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def generate_transportation_options(self, inbound_plan_id, placement_option_id,
                                          shipment_transportation_configurations):
@@ -1160,6 +1204,7 @@ class SpApiClient:
             kwargs['paginationToken'] = pagination_token
         return self._inbound_api().list_shipment_boxes(inbound_plan_id, shipment_id, **kwargs).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def confirm_transportation_options(self, inbound_plan_id, transportation_selections):
         """
@@ -1173,6 +1218,7 @@ class SpApiClient:
             inbound_plan_id, transportationSelections=transportation_selections,
         ).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def generate_delivery_window_options(self, inbound_plan_id, shipment_id):
         return self._inbound_api().generate_delivery_window_options(inbound_plan_id, shipment_id).payload
@@ -1181,6 +1227,7 @@ class SpApiClient:
     def list_delivery_window_options(self, inbound_plan_id, shipment_id):
         return self._inbound_api().list_delivery_window_options(inbound_plan_id, shipment_id).payload
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def confirm_delivery_window_options(self, inbound_plan_id, shipment_id, delivery_window_option_id):
         return self._inbound_api().confirm_delivery_window_options(
@@ -1246,6 +1293,7 @@ class SpApiClient:
         response.raise_for_status()
         return response.content
 
+    @_amazon_write
     @_with_retry(DELAY_INBOUND_S, retry_max=3, backoff_s=8)
     def cancel_inbound_plan(self, inbound_plan_id):
         """

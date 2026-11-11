@@ -18,3 +18,4 @@ from . import stock_warehouse
 from . import product_brand
 from . import amazon_price_analysis
 from . import amazon_category_map
+from . import amazon_safe_mode

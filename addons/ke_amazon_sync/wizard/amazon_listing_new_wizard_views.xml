@@ -47,8 +47,9 @@
                 </div>
                 <footer>
                     <button name="action_check" type="object" string="Verifica con Amazon" class="btn-primary"/>
+                    <field name="ke_amazon_safe_mode" invisible="1"/>
                     <button name="action_publish" type="object" string="Pubblica" class="btn-primary"
-                            invisible="not check_ok"
+                            invisible="not check_ok or ke_amazon_safe_mode"
                             confirm="L'offerta viene pubblicata davvero su Amazon. Continuare?"/>
                     <button special="cancel" string="Chiudi"/>
                 </footer>
