@@ -1565,7 +1565,21 @@ class AmazonSyncLog(models.Model):
                 # commento in sync_fba_quantities_page. page_token/token_restarts
                 # sono resettati ad ogni marketplace (ognuno ha la propria paginazione
                 # SP-API indipendente).
+                # Un solo giro per magazzino FBA (2026-11-11): Amazon restituisce lo
+                # stesso inventario a tutti i marketplace dello stesso pool — anche a
+                # UK, verificato su odoo_prod (6.740 ASIN e 894 offerte usato identici
+                # a IT/ES/FR) — quindi rileggerlo per ogni marketplace era solo tempo
+                # perso, e con un magazzino dedicato a torto (UK → FBAUK) contava la
+                # stessa merce due volte.
+                warehouses_done = set()
                 for marketplace in marketplaces:
+                    warehouse = marketplace.get_fba_warehouse()
+                    if warehouse and warehouse.id in warehouses_done:
+                        env['ke.amazon.sync.log']._append_log_line(
+                            log_rec, f'[{marketplace.code}] Stesso magazzino FBA ({warehouse.name}) già aggiornato: '
+                                     f'inventario non riletto.')
+                        continue
+                    warehouses_done.add(warehouse.id if warehouse else None)
                     client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
                     engine = SyncEngine(env, client)
                     page_token = None
