@@ -159,21 +159,37 @@ class SyncEngine:
         if not category_id and tmpl.categ_id:
             lines.append(f'[CATEGORIA] {tmpl.name}: categoria Odoo "{tmpl.categ_id.display_name}" '
                          f'non mappata, usata la categoria PS predefinita')
-        # Testi del sito (scheda "Sito web", ke_product_catalog) se compilati,
-        # altrimenti nome e descrizione di vendita come prima.
+        # Testi del sito (scheda "Sito web", ke_product_catalog): quelli
+        # compilati, altrimenti la proposta automatica (URL breve e pulito,
+        # punti elenco veri); il nome resta quello del prodotto finché non si
+        # compila "Nome sul sito".
+        texts = tmpl._ke_web_texts()
         return {
-            'name': tmpl.ke_web_name or tmpl.name,
-            'reference': reference,
+            'name': texts['name'],
+            'reference': self._ps_reference(reference),
             'ean13': ean13,
             'price': self._ps_price(tmpl),
-            'description_short': tmpl.ke_web_short_description or tmpl.description_sale or '',
-            'description': tmpl.ke_web_description or '',
-            'meta_title': tmpl.ke_web_meta_title or '',
-            'meta_description': tmpl.ke_web_meta_description or '',
-            'link_rewrite': tmpl.ke_web_slug or '',
+            'description_short': texts['short_description'] or tmpl.description_sale or '',
+            'description': texts['description'],
+            'meta_title': texts['meta_title'],
+            'meta_description': texts['meta_description'],
+            'link_rewrite': texts['slug'],
             'category_id': category_id,
             'manufacturer_id': self._ps_manufacturer_id(tmpl.ke_brand_id, lines),
+            **self._ps_dimensions(tmpl),
         }
+
+    @staticmethod
+    def _ps_reference(code):
+        """Riferimento sul sito: lo SKU senza il "+" finale (convenzione Amazon dei pezzi rietichettati)."""
+        return (code or '').strip().rstrip('+')
+
+    @staticmethod
+    def _ps_dimensions(tmpl):
+        """Dimensioni (cm) e peso (kg) per il calcolo della spedizione su PS (ke_product_dimensions)."""
+        get = lambda field: float(tmpl[field] or 0.0) if field in tmpl._fields else 0.0
+        return {'width': get('product_width'), 'height': get('product_height'),
+                'depth': get('product_length'), 'weight': get('weight')}
 
     def _push_stock(self, tmpl, lines, qty_by_variant=None):
         """Allinea su PS la giacenza del prodotto (o di ogni combinazione). Ritorna (ok, skip)."""
@@ -660,7 +676,7 @@ class SyncEngine:
         if ps_id:
             try:
                 self.client.update_product(ps_id, replace_category=self._force_category(),
-                                           replace_texts=self._force_texts(), **vals)
+                                           replace_texts=self._force_texts(), product_type='standard', **vals)
             except PsResourceNotFound:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
                 tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
@@ -670,7 +686,7 @@ class SyncEngine:
             if ps_id:
                 tmpl.write({'ps_product_id': ps_id})
                 self.client.update_product(ps_id, replace_category=self._force_category(),
-                                           replace_texts=self._force_texts(), **vals)
+                                           replace_texts=self._force_texts(), product_type='standard', **vals)
                 lines.append(f'[LINK] {tmpl.name} → ps_id={ps_id}')
         if not ps_id:
             ps_id = self.client.create_product(**vals)
@@ -684,6 +700,8 @@ class SyncEngine:
             lines.append(f'[UPD] {tmpl.name} → ps_id={ps_id}')
         tmpl.write({'ps_sync_enabled': True, 'ps_last_sync_date': fields.Datetime.now()})
         self._push_stock(tmpl, lines)
+        if not tmpl.ps_image_synced:
+            self._push_images(tmpl, lines)
         return result
 
     def _export_configurable(self, tmpl, lines):
@@ -703,7 +721,7 @@ class SyncEngine:
         if ps_id:
             try:
                 self.client.update_product(ps_id, replace_category=self._force_category(),
-                                           replace_texts=self._force_texts(), **vals)
+                                           replace_texts=self._force_texts(), product_type='combinations', **vals)
             except PsResourceNotFound:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
                 tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
@@ -711,7 +729,7 @@ class SyncEngine:
                 ps_id = 0
 
         if not ps_id:
-            ps_id = self.client.create_product(**vals)
+            ps_id = self.client.create_product(product_type='combinations', **vals)
             if not ps_id:
                 lines.append(f'[ERR] {tmpl.name}: creazione prodotto padre PS fallita')
                 return 'err'
@@ -728,7 +746,7 @@ class SyncEngine:
                     try:
                         self.client.update_combination(
                             variant.ps_combination_id, price_impact=impact,
-                            reference=variant.default_code or '', ean13=variant.barcode or '')
+                            reference=self._ps_reference(variant.default_code), ean13=variant.barcode or '')
                         ok_combos += 1
                         continue
                     except PsResourceNotFound:
@@ -742,7 +760,7 @@ class SyncEngine:
                 combo_id = self.client.create_combination(
                     ps_product_id=ps_id,
                     option_value_ids=option_value_ids,
-                    reference=variant.default_code or '',
+                    reference=self._ps_reference(variant.default_code),
                     ean13=variant.barcode or '',
                     price_impact=impact,
                 )
@@ -762,6 +780,8 @@ class SyncEngine:
         tag = '[NEW-CONFIG]' if created_parent else '[UPD-CONFIG]'
         lines.append(f'{tag} {tmpl.name} → ps_id={ps_id} | combinazioni: {ok_combos}/{n_tot}')
         self._push_stock(tmpl, lines)
+        if not tmpl.ps_image_synced:
+            self._push_images(tmpl, lines)
         if err_combos and not ok_combos:
             return 'err'
         return 'created' if created_parent else 'updated'
@@ -770,10 +790,91 @@ class SyncEngine:
     # 5. Sync immagini Odoo → PrestaShop
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _order_row_variant(product, row):
+        """
+        Variante della riga d'ordine PS: quella della combinazione acquistata
+        (product_attribute_id), poi per riferimento (anche con il "+" tolto
+        sul sito), poi la prima. Prima del 2026-11-11 era sempre la prima.
+        """
+        variants = product.product_variant_ids
+        combo_id = int(row.get('product_attribute_id') or 0)
+        variant = combo_id and variants.filtered(lambda v: v.ps_combination_id == combo_id)[:1]
+        if not variant:
+            ref = (row.get('product_reference') or '').strip()
+            variant = ref and variants.filtered(lambda v: (v.default_code or '') in (ref, ref + '+'))[:1]
+        return variant or variants[:1]
+
+    _MAX_IMAGES = 40          # per prodotto PS (famiglie con molte varianti)
+    _IMAGE_TIMEOUT_S = 20
+
+    def _image_sources(self, variant):
+        """Immagini di una variante: galleria (principale prima, poi PT01…) o, senza galleria, l'immagine Odoo."""
+        media = self.env['ke.product.media'].sudo().search(
+            [('product_id', '=', variant.id)]).sorted(lambda m: (m.role != 'MAIN', m.role or '', m.sequence, m.id))
+        sources = [('url', m.url) for m in media if m.url]
+        if not sources:
+            image = variant.image_variant_1920 or variant.product_tmpl_id.image_1920
+            if image:
+                sources.append(('b64', image))
+        return sources
+
+    def _image_bytes(self, kind, value):
+        if kind == 'b64':
+            return base64.b64decode(value)
+        import requests
+        resp = requests.get(value, timeout=self._IMAGE_TIMEOUT_S)
+        resp.raise_for_status()
+        return resp.content
+
+    def _push_images(self, tmpl, lines, force=False):
+        """
+        Immagini del prodotto su PS (2026-11-11, prima solo l'immagine
+        principale e solo dalla sync immagini): tutta la galleria
+        (ke.product.media, principale per prima = copertina); nelle famiglie
+        quella di ogni variante, associata alla sua combinazione (immagini in
+        comune caricate una volta sola). force: cancella prima le immagini già
+        su PS. Ritorna il numero di immagini caricate.
+        """
+        ps_id = tmpl.ps_product_id
+        if not ps_id:
+            return 0
+        if force:
+            for image_id in self.client.get_product_image_ids(ps_id):
+                self.client.delete_product_image(ps_id, image_id)
+        configurable = self._is_configurable(tmpl)
+        variants = tmpl.product_variant_ids.filtered(lambda v: not configurable or v.ps_combination_id)
+        uploaded, by_combo, errors = {}, {}, 0
+        for variant in variants:
+            for kind, value in self._image_sources(variant):
+                key = value if kind == 'url' else f'b64:{variant.id}'
+                if key not in uploaded and len(uploaded) < self._MAX_IMAGES:
+                    try:
+                        uploaded[key] = self.client.upload_product_image(ps_id, self._image_bytes(kind, value))
+                    except PsResourceNotFound:
+                        raise
+                    except Exception as exc:
+                        errors += 1
+                        _log.warning('Immagine %s per %s non caricata: %s', key[:80], tmpl.name, exc)
+                        continue
+                if configurable and uploaded.get(key):
+                    by_combo.setdefault(variant.ps_combination_id, []).append(uploaded[key])
+        for combo_id, image_ids in by_combo.items():
+            try:
+                self.client.set_combination_images(combo_id, image_ids)
+            except Exception as exc:
+                errors += 1
+                _log.warning('Immagini della combinazione %s non associate: %s', combo_id, exc)
+        if uploaded:
+            tmpl.write({'ps_image_synced': True})
+        lines.append(f'[IMG] {tmpl.name}: {len(uploaded)} immagini' + (f', {errors} errori' if errors else ''))
+        return len(uploaded)
+
     def sync_images_to_prestashop(self, log_rec, force=False):
         """
-        Carica l'immagine principale (image_1920) di ogni prodotto collegato su PS.
-        Se force=False, salta i prodotti con ps_image_synced=True.
+        Carica le immagini (galleria, vedi _push_images) di ogni prodotto collegato su PS.
+        Se force=False, salta i prodotti con ps_image_synced=True; con force
+        sostituisce quelle già su PS.
         """
         domain = [('ps_product_id', '>', 0), ('ps_sync_enabled', '=', True)]
         if not force:
@@ -786,20 +887,16 @@ class SyncEngine:
 
         for i, tmpl in enumerate(products, 1):
             ps_id = tmpl.ps_product_id
-            image_b64 = tmpl.image_1920
-            if not image_b64:
+            if not any(self._image_sources(v) for v in tmpl.product_variant_ids):
                 lines.append(f'[SKIP] {tmpl.name}: nessuna immagine in Odoo')
                 skip += 1
             else:
                 try:
-                    image_bytes = base64.b64decode(image_b64)
-                    self.client.upload_product_image(ps_id, image_bytes)
-                    tmpl.write({
-                        'ps_image_synced': True,
-                        'ps_last_sync_date': fields.Datetime.now(),
-                    })
-                    lines.append(f'[OK] {tmpl.name} (ps_id={ps_id})')
-                    ok += 1
+                    if self._push_images(tmpl, lines, force=force):
+                        tmpl.write({'ps_last_sync_date': fields.Datetime.now()})
+                        ok += 1
+                    else:
+                        err += 1
                 except PsResourceNotFound:
                     tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
                     lines.append(
@@ -966,7 +1063,7 @@ class SyncEngine:
                     [('name', '=ilike', product_name)], limit=1)
 
             if product:
-                variant = product.product_variant_ids[:1]
+                variant = self._order_row_variant(product, row)
                 order_lines.append((0, 0, {
                     'product_id': variant.id,
                     'product_uom_qty': qty,

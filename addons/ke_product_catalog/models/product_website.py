@@ -112,7 +112,7 @@ class ProductTemplate(models.Model):
         plain = _plain(source)
         # Un punto elenco Amazon può contenere più righe: una voce per riga.
         bullets = [line.strip(' -•·') for b in re.findall(r'<li[^>]*>(.*?)</li>', source, flags=re.S | re.I)
-                   for line in _plain(b).split('\n')]
+                   for line in re.split(r'\n|\s*•\s*', _plain(b))]
         bullets = [b[:1].upper() + b[1:] for b in bullets if b]
         body = _plain(re.sub(r'<ul.*?</ul>', '', source, flags=re.S | re.I))
         name = self.ke_web_name or short_name(self.name)
@@ -137,6 +137,30 @@ class ProductTemplate(models.Model):
             vals['ke_web_description'] = paragraphs + (f'<ul>{items}</ul>' if items else '')
         return vals
 
+    def _ke_web_texts(self):
+        """
+        Testi per il sito, da usare negli export: i campi della scheda Sito web
+        se compilati, altrimenti la proposta automatica (senza salvarla). Il
+        nome resta quello del prodotto finché non si compila "Nome sul sito".
+        """
+        self.ensure_one()
+        proposal = self._ke_web_proposal()
+
+        def pick(field, html_field=False):
+            value = self[field]
+            if html_field and not _plain(value or ''):
+                value = False
+            return str(value or proposal.get(field) or '')
+
+        return {
+            'name': self.ke_web_name or self.name or '',
+            'slug': pick('ke_web_slug') or slugify(self.ke_web_name or short_name(self.name)),
+            'meta_title': pick('ke_web_meta_title'),
+            'meta_description': pick('ke_web_meta_description'),
+            'short_description': pick('ke_web_short_description', True),
+            'description': pick('ke_web_description', True),
+        }
+
     def action_ke_web_propose(self):
         """Compila i campi vuoti della scheda Sito web (anche da azione di gruppo)."""
         done = 0
@@ -152,3 +176,11 @@ class ProductTemplate(models.Model):
                            'message': f'Testi proposti per {done} prodotti su {len(self)} (solo campi vuoti).'},
             }
         return True
+
+
+class ProductProduct(models.Model):
+    _inherit = 'product.product'
+
+    def action_ke_web_propose(self):
+        """La scheda Sito web compare anche nel modulo della variante (eredita quello del prodotto): testi del prodotto."""
+        return self.product_tmpl_id.action_ke_web_propose()

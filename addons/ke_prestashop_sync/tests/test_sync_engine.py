@@ -71,6 +71,22 @@ class FakePsClient:
     def find_product_by_reference(self, reference):
         return None
 
+    # Immagini (2026-11-11): caricate su un prodotto, associate alle combinazioni.
+    def upload_product_image(self, ps_id, image_bytes):
+        self.images = getattr(self, 'images', [])
+        self.images.append((ps_id, image_bytes))
+        return 900 + len(self.images)
+
+    def get_product_image_ids(self, ps_id):
+        return [i for i, (pid, _b) in enumerate(getattr(self, 'images', []), 901) if pid == ps_id]
+
+    def delete_product_image(self, ps_id, image_id):
+        self.deleted_images = getattr(self, 'deleted_images', []) + [image_id]
+
+    def set_combination_images(self, combo_id, image_ids):
+        self.combo_images = getattr(self, 'combo_images', {})
+        self.combo_images[combo_id] = list(image_ids)
+
     def update_product_price(self, ps_id, price):
         self._guard(ps_id)
         self.price_updates.append((ps_id, price))
@@ -478,3 +494,76 @@ class TestPsCatalogExport(TransactionCase):
         self.engine.sync_stock_to_prestashop(log)
         pushed = [u for u in self.client.stock_updates if u['ps_product_id'] == 321]
         self.assertEqual(pushed[-1]['quantity'], 0, 'giacenza solo in un altro magazzino: su PS va a zero')
+
+
+@tagged('post_install', '-at_install')
+class TestPsProductPage(TransactionCase):
+    """Pagina prodotto PS (2026-11-11): immagini, dimensioni, riferimento, testi, varianti degli ordini."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(self.env.cr, 'commit', lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = FakePsClient()
+        self.engine = SyncEngine(self.env, self.client)
+        self.Media = self.env['ke.product.media']
+
+    def _family(self):
+        attr = self.env['product.attribute'].create({'name': 'ZZT Colore PS', 'create_variant': 'always'})
+        vals = self.env['product.attribute.value'].create([{'name': n, 'attribute_id': attr.id} for n in ('Rosso', 'Blu')])
+        return self.env['product.template'].create({
+            'name': 'ZZT Famiglia PS', 'type': 'consu',
+            'attribute_line_ids': [(0, 0, {'attribute_id': attr.id, 'value_ids': [(6, 0, vals.ids)]})]})
+
+    def test_reference_without_plus_and_dimensions(self):
+        self.assertEqual(SyncEngine._ps_reference('PFS-1515227+'), 'PFS-1515227')
+        self.assertEqual(SyncEngine._ps_reference('PFS-1532034.'), 'PFS-1532034.', 'il punto distingue un altro ASIN')
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT dimensioni, titolo lungo Amazon', 'type': 'consu', 'weight': 0.25,
+            'product_length': 20.0, 'product_width': 10.0, 'product_height': 5.0,
+            'description_sale': 'Testo.<ul><li>• Uno • Due</li></ul>'})
+        with patch.object(SyncEngine, '_ps_price', return_value=1.0), \
+                patch.object(SyncEngine, '_ps_manufacturer_id', return_value=0):
+            vals = self.engine._ps_product_vals(tmpl, [], reference='ZZT-1+')
+        self.assertEqual((vals['depth'], vals['width'], vals['height'], vals['weight']), (20.0, 10.0, 5.0, 0.25))
+        self.assertEqual(vals['reference'], 'ZZT-1')
+        self.assertEqual(vals['link_rewrite'], 'zzt-dimensioni')
+        self.assertIn('<li>Uno</li><li>Due</li>', vals['description'])
+
+    def test_images_simple_product_gallery(self):
+        tmpl = self.env['product.template'].create({'name': 'ZZT immagini', 'type': 'consu', 'ps_product_id': 55})
+        variant = tmpl.product_variant_id
+        self.Media.create([{'product_tmpl_id': tmpl.id, 'product_id': variant.id, 'url': u, 'role': r}
+                           for u, r in (('https://x/pt1.jpg', 'PT01'), ('https://x/main.jpg', 'MAIN'))])
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()):
+            n = self.engine._push_images(tmpl, [])
+        self.assertEqual(n, 2)
+        self.assertEqual([b for _pid, b in self.client.images], [b'https://x/main.jpg', b'https://x/pt1.jpg'],
+                         'la principale per prima (copertina)')
+        self.assertTrue(tmpl.ps_image_synced)
+
+    def test_images_family_per_combination(self):
+        tmpl = self._family()
+        tmpl.ps_product_id = 56
+        red, blue = tmpl.product_variant_ids
+        red.ps_combination_id, blue.ps_combination_id = 11, 12
+        self.Media.create([
+            {'product_tmpl_id': tmpl.id, 'product_id': red.id, 'url': 'https://x/rosso.jpg', 'role': 'MAIN'},
+            {'product_tmpl_id': tmpl.id, 'product_id': blue.id, 'url': 'https://x/blu.jpg', 'role': 'MAIN'},
+            {'product_tmpl_id': tmpl.id, 'product_id': blue.id, 'url': 'https://x/rosso.jpg', 'role': 'PT01'},
+        ])
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()):
+            self.engine._push_images(tmpl, [])
+        self.assertEqual(len(self.client.images), 2, 'immagine in comune caricata una volta')
+        self.assertEqual(self.client.combo_images, {11: [901], 12: [902, 901]})
+
+    def test_order_row_goes_to_bought_combination(self):
+        tmpl = self._family()
+        red, blue = tmpl.product_variant_ids
+        blue.ps_combination_id = 77
+        blue.default_code = 'ZZT-BLU+'
+        self.assertEqual(SyncEngine._order_row_variant(tmpl, {'product_attribute_id': '77'}), blue)
+        self.assertEqual(SyncEngine._order_row_variant(tmpl, {'product_reference': 'ZZT-BLU'}), blue)
+        self.assertEqual(SyncEngine._order_row_variant(tmpl, {}), red)
+

@@ -43,3 +43,12 @@ class TestProductWebsite(TransactionCase):
         tmpl.ke_web_name = 'Nome mio'
         tmpl.action_ke_web_propose()
         self.assertEqual(tmpl.ke_web_name, 'Nome mio')
+
+    def test_bullets_joined_with_dots_and_export_texts(self):
+        tmpl = self._product(description_sale='Treccia liscia.<ul><li>• Sottile • Alta resistenza al nodo • 8 filamenti</li></ul>')
+        texts = tmpl._ke_web_texts()
+        self.assertIn('<li>Sottile</li><li>Alta resistenza al nodo</li><li>8 filamenti</li>', texts['description'])
+        self.assertEqual(texts['name'], tmpl.name, 'senza "Nome sul sito" il nome resta quello del prodotto')
+        self.assertEqual(texts['slug'], 'zzt-dam-quick-1')
+        self.assertFalse(tmpl.ke_web_description, 'la proposta per l\'export non viene salvata')
+

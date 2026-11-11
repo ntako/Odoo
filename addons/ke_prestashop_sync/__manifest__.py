@@ -4,7 +4,7 @@
     'category': 'Inventory/Configuration',
     'summary': 'Sincronizzazione prodotti, stock, prezzi, immagini e ordini con PrestaShop (WebService API)',
     'author': 'KE',
-    'depends': ['stock', 'product', 'sale', 'base_setup', 'ke_product_catalog'],
+    'depends': ['stock', 'product', 'sale', 'base_setup', 'ke_product_catalog', 'ke_product_dimensions'],
     'data': [
         'security/ir.model.access.csv',
         'data/ir_cron.xml',

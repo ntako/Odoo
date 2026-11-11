@@ -8,7 +8,6 @@ Scritture: body XML (GET-then-PUT per aggiornamenti parziali).
 
 import logging
 import re
-import unicodedata
 import xml.etree.ElementTree as ET
 
 import requests
@@ -186,7 +185,7 @@ class PsApiClient:
         return entries[0].get('value', '') if entries else ''
 
     def upload_product_image(self, ps_id, image_bytes):
-        """Carica l'immagine principale di un prodotto su PS via multipart POST."""
+        """Carica un'immagine del prodotto su PS (multipart POST) e ne restituisce l'ID (0 se non letto)."""
         url = f'{self._url}/api/images/products/{ps_id}'
         mime, filename = self._detect_image_mime(image_bytes)
         resp = requests.post(
@@ -196,6 +195,42 @@ class PsApiClient:
             timeout=60,
         )
         self._check(resp, f'POST images/products/{ps_id}')
+        try:
+            return int((resp.json().get('image') or {}).get('id') or 0)
+        except ValueError:
+            match = re.search(r'<id>\s*(?:<!\[CDATA\[)?(\d+)', resp.text or '')
+            return int(match.group(1)) if match else 0
+
+    def get_product_image_ids(self, ps_id):
+        """ID delle immagini di un prodotto PS ([] se non ne ha)."""
+        url = f'{self._url}/api/images/products/{ps_id}'
+        resp = requests.get(url, params=self._ps_key_param() or None, timeout=30)
+        if resp.status_code == 404:
+            return []
+        self._check(resp, f'GET images/products/{ps_id}')
+        return [int(x) for x in re.findall(r'<declination[^>]*\bid="(\d+)"', resp.text or '')]
+
+    def delete_product_image(self, ps_id, image_id):
+        url = f'{self._url}/api/images/products/{ps_id}/{image_id}'
+        resp = requests.delete(url, params=self._ps_key_param() or None, timeout=30)
+        if resp.status_code != 404:
+            self._check(resp, f'DELETE images/products/{ps_id}/{image_id}')
+
+    def set_combination_images(self, combo_id, image_ids):
+        """Associa le immagini (già caricate sul prodotto) a una combinazione."""
+        root = ET.fromstring(self._get_xml_str('combinations', combo_id))
+        combo = root.find('combination')
+        assoc = combo.find('associations')
+        if assoc is None:
+            assoc = ET.SubElement(combo, 'associations')
+        images = assoc.find('images')
+        if images is None:
+            images = ET.SubElement(assoc, 'images')
+        for child in list(images):
+            images.remove(child)
+        for image_id in image_ids:
+            ET.SubElement(ET.SubElement(images, 'image'), 'id').text = str(image_id)
+        self._put_xml('combinations', combo_id, ET.tostring(root, encoding='utf-8', xml_declaration=True))
 
     @staticmethod
     def _detect_image_mime(data):
@@ -248,13 +283,8 @@ class PsApiClient:
     @staticmethod
     def _make_slug(name):
         """Genera un link_rewrite ASCII valido per PrestaShop (obbligatorio alla creazione)."""
-        # Normalizza Unicode → ASCII (è→e, à→a, ecc.) — PS richiede [a-zA-Z0-9_-]
-        slug = unicodedata.normalize('NFKD', (name or '').lower())
-        slug = slug.encode('ascii', 'ignore').decode('ascii')
-        slug = re.sub(r'[^\w\s-]', '', slug)
-        slug = re.sub(r'[\s_]+', '-', slug)
-        slug = slug.strip('-')
-        return (slug or 'product')[:128]
+        from odoo.addons.ke_product_catalog.models.product_website import slugify
+        return slugify(name)
 
     def find_product_by_reference(self, reference):
         """Cerca un prodotto PS per codice riferimento; restituisce l'ID o None."""
@@ -312,7 +342,8 @@ class PsApiClient:
 
     def create_product(self, name, reference='', ean13='', price=0.0,
                        description_short='', active=1, category_id=0, manufacturer_id=0,
-                       description='', meta_title='', meta_description='', link_rewrite=''):
+                       description='', meta_title='', meta_description='', link_rewrite='',
+                       width=0.0, height=0.0, depth=0.0, weight=0.0, product_type='standard'):
         """Crea un prodotto su PS e restituisce il nuovo ID (testi del sito: ke_web_* di ke_product_catalog)."""
         ean13, upc = self._split_barcode(ean13)
         name = self._clean_name(name)
@@ -339,6 +370,11 @@ class PsApiClient:
     <available_for_order>1</available_for_order>
     <show_price>1</show_price>
     <price>{float(price):.6f}</price>
+    <product_type>{product_type}</product_type>
+    <width>{float(width or 0):.6f}</width>
+    <height>{float(height or 0):.6f}</height>
+    <depth>{float(depth or 0):.6f}</depth>
+    <weight>{float(weight or 0):.6f}</weight>
     <id_tax_rules_group>{self._tax_rules_group_id}</id_tax_rules_group>
     <id_manufacturer>{int(manufacturer_id or 0)}</id_manufacturer>
     <reference><![CDATA[{ref_cdata}]]></reference>
@@ -369,7 +405,8 @@ class PsApiClient:
     def update_product(self, ps_id, name, reference='', ean13='', price=0.0,
                        description_short='', active=1, category_id=0, manufacturer_id=0,
                        replace_category=False, description='', meta_title='', meta_description='',
-                       link_rewrite='', replace_texts=False):
+                       link_rewrite='', replace_texts=False, width=0.0, height=0.0, depth=0.0,
+                       weight=0.0, product_type=''):
         """
         Aggiorna un prodotto PS esistente (GET → modifica → PUT): nome e
         descrizione breve nella lingua configurata, prezzo, codici, marca.
@@ -401,6 +438,14 @@ class PsApiClient:
         if set_category:
             set_text('id_category_default', str(category_id))
         set_text('active', str(int(bool(active))))
+        # Tipo prodotto: solo se su PS è vuoto (prodotti creati prima del 2026-11-11).
+        type_el = prod.find('product_type')
+        if product_type and type_el is not None and not (type_el.text or '').strip():
+            type_el.text = product_type
+        # Dimensioni e peso dell'imballo (spedizione): sempre, se Odoo li ha.
+        for tag, value in (('width', width), ('height', height), ('depth', depth), ('weight', weight)):
+            if value:
+                set_text(tag, f'{float(value):.6f}')
         # Testi (nome, descrizioni, meta, URL): solo con replace_texts. Deciso con
         # l'utente il 2026-11-11: i testi si scrivono alla creazione; sui
         # prodotti già sul sito si aggiornano solo con l'opzione "Aggiorna testi".
