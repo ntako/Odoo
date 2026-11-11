@@ -105,7 +105,7 @@ class ProductTemplate(models.Model):
         if self.ke_web_name and not self.ke_web_slug:
             self.ke_web_slug = slugify(self.ke_web_name)
 
-    def _ke_web_proposal(self):
+    def _ke_web_proposal(self, empty=None):
         """Valori proposti per i campi vuoti (nella lingua del contesto)."""
         self.ensure_one()
         source = self.description_sale or ''
@@ -115,23 +115,26 @@ class ProductTemplate(models.Model):
                    for line in re.split(r'\n|\s*•\s*', _plain(b))]
         bullets = [b[:1].upper() + b[1:] for b in bullets if b]
         body = _plain(re.sub(r'<ul.*?</ul>', '', source, flags=re.S | re.I))
-        name = self.ke_web_name or short_name(self.name)
+        # 'empty': campi da proporre (scelti per lingua da action_ke_web_propose);
+        # None = quelli vuoti nella lingua del contesto.
+        need = (lambda f: f in empty) if empty is not None else (lambda f: not _plain(str(self[f] or '')))
+        name = (not need('ke_web_name') and self.ke_web_name) or short_name(self.name)
         brand = self.ke_brand_id.name if 'ke_brand_id' in self._fields and self.ke_brand_id else ''
         vals = {}
-        if not self.ke_web_name:
+        if need('ke_web_name'):
             vals['ke_web_name'] = name
-        if not self.ke_web_meta_title:
+        if need('ke_web_meta_title'):
             title = name if not brand or brand.lower() in name.lower() else f'{name} | {brand}'
             vals['ke_web_meta_title'] = _cut(title, META_TITLE_MAX)
-        if not self.ke_web_meta_description and (body or bullets or plain):
+        if need('ke_web_meta_description') and (body or bullets or plain):
             vals['ke_web_meta_description'] = _summary(body or ' '.join(bullets) or plain, META_DESCRIPTION_MAX)
-        if not self.ke_web_slug:
+        if need('ke_web_slug'):
             vals['ke_web_slug'] = slugify(name)
-        if not _plain(self.ke_web_short_description) and (bullets or body):
+        if need('ke_web_short_description') and (bullets or body):
             vals['ke_web_short_description'] = (
                 '<ul>' + ''.join(f'<li>{_esc(b)}</li>' for b in bullets[:3]) + '</ul>' if bullets
                 else f'<p>{_esc(_cut(body, 300))}</p>')
-        if not _plain(self.ke_web_description) and plain:
+        if need('ke_web_description') and plain:
             paragraphs = ''.join(f'<p>{_esc(p)}</p>' for p in body.split('\n') if p.strip())
             items = ''.join(f'<li>{_esc(b)}</li>' for b in bullets)
             vals['ke_web_description'] = paragraphs + (f'<ul>{items}</ul>' if items else '')
@@ -161,14 +164,61 @@ class ProductTemplate(models.Model):
             'description': pick('ke_web_description', True),
         }
 
+    def _ke_web_langs(self):
+        """Lingue attive da proporre: prima quella dell'utente, poi le altre; mai en_US (ripiego tecnico di Odoo)."""
+        codes = self.env['res.lang'].search([('active', '=', True)]).mapped('code')
+        first = self.env.lang or self.env.user.lang or 'it_IT'
+        return [first] * (first in codes) + sorted(c for c in codes if c not in (first, 'en_US'))
+
+    def _ke_raw(self, fields_):
+        """Valori per lingua così come salvati (senza il ripiego di Odoo sulle lingue mancanti)."""
+        self.env.flush_all()
+        self.env.cr.execute(
+            f'SELECT {", ".join(fields_)} FROM product_template WHERE id = %s', (self.id,))
+        return dict(zip(fields_, (row or {} for row in self.env.cr.fetchone())))
+
+    @staticmethod
+    def _ke_own(values, lang, primary):
+        """Testo proprio della lingua: presente, non vuoto e non la copia di quello della lingua principale."""
+        value = (values or {}).get(lang)
+        if not value or not _plain(str(value)):
+            return False
+        return lang == primary or value != (values or {}).get(primary)
+
     def action_ke_web_propose(self):
-        """Compila i campi vuoti della scheda Sito web (anche da azione di gruppo)."""
+        """
+        Compila i campi vuoti della scheda Sito web in ogni lingua attiva
+        che ha nome o descrizione propri (2026-11-11: prima solo nella
+        lingua dell'utente, e le altre mostravano l'italiano di ripiego).
+        Un campo che in una lingua è solo la copia di quello della lingua
+        principale conta come vuoto; i testi propri non si toccano.
+        """
+        web_fields = ['ke_web_name', 'ke_web_meta_title', 'ke_web_meta_description', 'ke_web_slug',
+                      'ke_web_short_description', 'ke_web_description']
+        langs = self._ke_web_langs()
+        primary = langs[0] if langs else self.env.lang
         done = 0
         for tmpl in self:
-            vals = tmpl._ke_web_proposal()
-            if vals:
-                tmpl.write(vals)
-                done += 1
+            changed = False
+            for lang in langs:
+                raw = tmpl._ke_raw(['name', 'description_sale'] + web_fields)
+                own_source = any(self._ke_own(raw[f], lang, primary) for f in ('name', 'description_sale'))
+                # Prodotti creati senza lingua (import, azioni pianificate): i testi
+                # stanno solo nel ripiego en_US e valgono per la lingua principale.
+                if not own_source and lang == primary:
+                    own_source = any((raw[f] or {}).get('en_US') for f in ('name', 'description_sale'))
+                if not own_source:
+                    continue
+                empty = {f for f in web_fields if not (
+                    self._ke_own(raw[f], lang, primary)
+                    or (lang == primary and not (raw[f] or {}).get(lang) and _plain(str((raw[f] or {}).get('en_US') or ''))))}
+                if not empty:
+                    continue
+                vals = tmpl.with_context(lang=lang)._ke_web_proposal(empty=empty)
+                if vals:
+                    tmpl.with_context(lang=lang).write(vals)
+                    changed = True
+            done += changed
         if len(self) > 1:
             return {
                 'type': 'ir.actions.client', 'tag': 'display_notification',

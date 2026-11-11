@@ -52,3 +52,25 @@ class TestProductWebsite(TransactionCase):
         self.assertEqual(texts['slug'], 'zzt-dam-quick-1')
         self.assertFalse(tmpl.ke_web_description, 'la proposta per l\'export non viene salvata')
 
+    def test_propose_per_language(self):
+        for code in ('es_ES', 'fr_FR'):
+            self.env['res.lang']._activate_lang(code)
+        tmpl = self._product()
+        tmpl.with_context(lang='es_ES').write({
+            'name': 'ZZT DAM Quick 1, Carrete de pesca giratorio',
+            'description_sale': 'Carrete ligero con cuerpo de grafito.<ul><li>Bobina de aluminio</li></ul>'})
+        tmpl.with_context(lang=self.env.lang).action_ke_web_propose()
+        es = tmpl.with_context(lang='es_ES')
+        self.assertTrue(es.ke_web_meta_description.startswith('Carrete ligero'), 'testo spagnolo dalla descrizione spagnola')
+        self.assertIn('Bobina de aluminio', str(es.ke_web_short_description))
+        raw = tmpl._ke_raw(['ke_web_meta_description'])['ke_web_meta_description']
+        self.assertNotIn('fr_FR', raw, 'francese senza testi propri: nessuna copia')
+        # una copia della lingua principale conta come vuota e viene rifatta
+        primary = tmpl._ke_web_langs()[0]
+        es.ke_web_meta_description = tmpl.with_context(lang=primary).ke_web_meta_description
+        tmpl.action_ke_web_propose()
+        self.assertTrue(es.ke_web_meta_description.startswith('Carrete ligero'))
+        es.ke_web_meta_description = 'Scritta a mano'
+        tmpl.action_ke_web_propose()
+        self.assertEqual(es.ke_web_meta_description, 'Scritta a mano')
+
