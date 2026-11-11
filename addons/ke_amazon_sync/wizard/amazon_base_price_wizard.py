@@ -50,6 +50,9 @@ class AmazonBasePriceWizard(models.TransientModel):
         if plan['variants']:
             own = sum(1 for p in plan['variants'].values() if p)
             items.append(f'{own} varianti con prezzo diverso dalla famiglia ("Prezzo di vendita variante")')
+        if plan.get('families_from_variants'):
+            items.append(f'{plan["families_from_variants"]} famiglie a 0/1 € prendono il prezzo più frequente delle loro '
+                         f'varianti (il prezzo delle varianti non cambia)')
         if plan['kept_existing'] or plan['variant_own_kept']:
             items.append(f'Non toccati perché hanno già un prezzo: {plan["kept_existing"]} prodotti, '
                          f'{plan["variant_own_kept"]} varianti con prezzo proprio')

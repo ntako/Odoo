@@ -100,7 +100,8 @@ class BasePriceRecalc:
             by_template[variant.product_tmpl_id].append(variant)
 
         plan = {'templates': {}, 'variants': {}, 'rows': [], 'by_marketplace': Counter(),
-                'kept_existing': 0, 'variant_own_kept': 0, 'changed': 0, 'variants_total': 0}
+                'kept_existing': 0, 'variant_own_kept': 0, 'changed': 0, 'variants_total': 0,
+                'families_from_variants': 0}
         for template, tmpl_variants in by_template.items():
             if not template.active:
                 continue
@@ -116,10 +117,20 @@ class BasePriceRecalc:
                 base = self.engine._base_price_from_amazon(gross, variant, mp)
                 if base > 0:
                     computed[variant] = (base, mp, gross)
-            if not computed:
+            # Famiglia a 0/1 € con prezzi già sulle varianti (49 su odoo_prod,
+            # 2026-11-11): la famiglia prende il prezzo più frequente, le
+            # varianti con quel prezzo tornano a seguirla (stesso prezzo).
+            own_prices = {} if include_existing else {
+                v: round(v.ke_list_price, 2) for v in template.product_variant_ids if v.ke_list_price}
+            if not computed and not own_prices:
                 continue
-            family = self._family_price([v[0] for v in computed.values()])
+            family = self._family_price([v[0] for v in computed.values()] + list(own_prices.values()))
             plan['templates'][template.id] = family
+            for variant, price in own_prices.items():
+                if abs(price - family) <= 0.005:
+                    plan['variants'][variant.id] = 0.0
+            if not computed:
+                plan['families_from_variants'] += 1
             for variant, (base, mp, gross) in computed.items():
                 own = base if abs(base - family) > 0.005 and len(template.product_variant_ids) > 1 else 0.0
                 if own or variant.ke_list_price:

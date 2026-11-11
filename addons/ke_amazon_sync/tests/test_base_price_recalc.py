@@ -116,3 +116,19 @@ class TestBasePriceRecalc(TransactionCase):
         wizard.action_apply()
         self.assertAlmostEqual(tmpl.list_price, 20.0, places=2)
         self.assertAlmostEqual(listing.price_sync, 28.06, places=2)
+
+    def test_family_takes_price_from_its_variants(self):
+        tmpl = self._family()
+        red, blue, green = tmpl.product_variant_ids
+        red.ke_list_price, blue.ke_list_price, green.ke_list_price = 20.0, 20.0, 30.0
+        self._listing(red, self.it, 28.06, 'ZZT-RC-FV')
+        before = {v.id: v.lst_price for v in tmpl.product_variant_ids}
+        recalc = BasePriceRecalc(self.env)
+        plan = recalc.plan()
+        self.assertEqual(plan['families_from_variants'], 1)
+        recalc.apply(plan)
+        self.assertAlmostEqual(tmpl.list_price, 20.0, places=2)
+        self.assertFalse(red.ke_list_price or blue.ke_list_price, 'tornano a seguire la famiglia')
+        self.assertAlmostEqual(green.ke_list_price, 30.0, places=2)
+        self.assertEqual({v.id: v.lst_price for v in tmpl.product_variant_ids}, before, 'prezzi effettivi invariati')
+
