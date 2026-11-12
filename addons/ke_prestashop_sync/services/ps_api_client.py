@@ -295,6 +295,8 @@ class PsApiClient:
             'display': '[id]',
             'filter[reference]': f'[{reference}]',
         })
+        if isinstance(data, list) and not data:
+            return None  # nessun prodotto con quel riferimento: PS risponde []
         if not isinstance(data, dict):
             _log.warning('find_product_by_reference: risposta PS inattesa (tipo %s): %s',
                          type(data).__name__, str(data)[:200])

@@ -567,3 +567,30 @@ class TestPsProductPage(TransactionCase):
         self.assertEqual(SyncEngine._order_row_variant(tmpl, {'product_reference': 'ZZT-BLU'}), blue)
         self.assertEqual(SyncEngine._order_row_variant(tmpl, {}), red)
 
+
+
+@tagged('post_install', '-at_install')
+class TestPsExportTimeBudget(TransactionCase):
+    """Export a turni (2026-11-11): il cron della coda viene interrotto da Odoo dopo 120 s."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(self.env.cr, 'commit', lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = FakePsClient()
+        self.engine = SyncEngine(self.env, self.client)
+
+    def test_export_requeues_rest_when_turn_is_over(self):
+        tmpls = self.env['product.template'].create(
+            [{'name': f'ZZT turno {i}', 'type': 'consu', 'list_price': 10.0} for i in range(3)])
+        log = self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'export_products', 'state': 'running'})
+        with patch.object(SyncEngine, '_EXPORT_TIME_BUDGET_S', -1), \
+                patch.object(SyncEngine, '_ps_price', return_value=10.0), \
+                patch.object(SyncEngine, '_ps_manufacturer_id', return_value=0):
+            self.engine.export_products_to_ps(log, product_ids=tmpls.ids)
+        self.assertEqual(len(self.client.created_products), 1, 'un prodotto nel primo turno')
+        follow = self.env['ke.prestashop.sync.log'].search([('state', '=', 'queued')], order='id desc', limit=1)
+        import json
+        self.assertEqual(sorted(json.loads(follow.job_kwargs)['product_ids']), sorted(tmpls[1:].ids))
+        self.assertIn('[CONTINUA]', log.log_lines)

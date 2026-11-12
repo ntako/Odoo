@@ -12,6 +12,7 @@ sync_images_to_prestashop  – Odoo image_1920 → PS immagine prodotto (cron + 
 import base64
 import logging
 import re
+import time
 from datetime import datetime, timedelta
 
 from odoo import fields
@@ -37,6 +38,10 @@ class SyncEngine:
     # Prodotti per singola esecuzione dell'export "Solo nuovi": oltre, si
     # riaccoda un nuovo job (evita il timeout del cron worker).
     _EXPORT_BATCH = 400
+    # L'export gira nel cron della coda, che Odoo interrompe dopo 120 s
+    # (limit_time_real): 2026-11-11 un export di 334 prodotti si è fermato a
+    # 25, ucciso a metà. Si lavora a turni e si riaccoda il resto.
+    _EXPORT_TIME_BUDGET_S = 75
 
     def __init__(self, env, client):
         self.env = env
@@ -585,8 +590,23 @@ class SyncEngine:
         total = len(products)
         created = updated = skipped = err = 0
         lines = []
+        started = time.monotonic()
+        time_cut = False
 
         for i, tmpl in enumerate(products, 1):
+            if i > 1 and time.monotonic() - started > self._EXPORT_TIME_BUDGET_S:
+                rest = all_candidates[i - 1:]
+                lines.append(f'[CONTINUA] turno di {self._EXPORT_TIME_BUDGET_S} s finito: restano {len(rest)} '
+                             f'prodotti, accodato il turno successivo')
+                self.env['ke.prestashop.sync.log'].enqueue(
+                    'export_products', 'export_products_to_ps',
+                    label=f'Export prodotti → PS (segue, {len(rest)} prodotti) — '
+                          f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+                    product_ids=rest.ids, full_resync=full_resync,
+                    only_in_stock=only_in_stock, warehouse_id=warehouse_id,
+                )
+                time_cut = True
+                break
             try:
                 if self._is_configurable(tmpl):
                     res = self._export_configurable(tmpl, lines)
@@ -620,7 +640,7 @@ class SyncEngine:
                 return created, updated, err
 
         # --- Lotto successivo: riaccoda un export per i prodotti rimanenti ---
-        if auto_continue and remaining > 0 and (created + updated) > 0:
+        if not time_cut and auto_continue and remaining > 0 and (created + updated) > 0:
             lines.append(
                 f'[CONTINUA] restano ~{remaining} prodotti da esportare: '
                 f'accodato un nuovo job')
@@ -632,7 +652,7 @@ class SyncEngine:
             )
 
         # --- Prodotti archiviati in Odoo → disattiva su PS (solo ultimo lotto) ---
-        if not product_ids and remaining == 0:
+        if not time_cut and not product_ids and remaining == 0:
             archived = self.env['product.template'].with_context(active_test=False).search([
                 ('active', '=', False),
                 ('ps_product_id', '>', 0),
