@@ -15,6 +15,12 @@
                             <field name="ps_image_synced"/>
                             <field name="ps_last_sync_date"/>
                         </group>
+                        <group string="Categoria sul negozio">
+                            <field name="ps_category_effective_id" readonly="1"/>
+                            <field name="ps_category_source" readonly="1"/>
+                            <field name="ps_category_override_id" options="{'no_create': True}"/>
+                            <field name="ps_extra_category_ids" widget="many2many_tags" options="{'no_create': True}"/>
+                        </group>
                         <group string="Varianti PS" colspan="2"
                                invisible="product_variant_count &lt;= 1">
                             <field name="product_variant_ids" nolabel="1">

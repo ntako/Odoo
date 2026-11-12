@@ -125,7 +125,10 @@ class SyncEngine:
     def _force_texts(self):
         return self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.force_texts') in ('True', '1')
 
-    def _force_category(self):
+    def _force_category(self, tmpl=None):
+        """Sostituire la categoria sul negozio: con l'opzione delle Impostazioni o se è forzata sul prodotto (scelta esplicita)."""
+        if tmpl is not None and tmpl.ps_category_override_id:
+            return True
         return self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.force_category') in ('True', '1')
 
     def _ps_manufacturer_id(self, brand, lines):
@@ -180,6 +183,7 @@ class SyncEngine:
             'meta_description': texts['meta_description'],
             'link_rewrite': texts['slug'],
             'category_id': category_id,
+            'extra_category_ids': tmpl._ke_ps_extra_category_ids(category_id),
             'manufacturer_id': self._ps_manufacturer_id(tmpl.ke_brand_id, lines),
             **self._ps_dimensions(tmpl),
         }
@@ -695,7 +699,7 @@ class SyncEngine:
         result = 'updated'
         if ps_id:
             try:
-                self.client.update_product(ps_id, replace_category=self._force_category(),
+                self.client.update_product(ps_id, replace_category=self._force_category(tmpl),
                                            replace_texts=self._force_texts(), product_type='standard', **vals)
             except PsResourceNotFound:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
@@ -705,7 +709,7 @@ class SyncEngine:
             ps_id = self.client.find_product_by_reference(vals['reference']) or 0
             if ps_id:
                 tmpl.write({'ps_product_id': ps_id})
-                self.client.update_product(ps_id, replace_category=self._force_category(),
+                self.client.update_product(ps_id, replace_category=self._force_category(tmpl),
                                            replace_texts=self._force_texts(), product_type='standard', **vals)
                 lines.append(f'[LINK] {tmpl.name} → ps_id={ps_id}')
         if not ps_id:
@@ -740,7 +744,7 @@ class SyncEngine:
 
         if ps_id:
             try:
-                self.client.update_product(ps_id, replace_category=self._force_category(),
+                self.client.update_product(ps_id, replace_category=self._force_category(tmpl),
                                            replace_texts=self._force_texts(), product_type='combinations', **vals)
             except PsResourceNotFound:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')

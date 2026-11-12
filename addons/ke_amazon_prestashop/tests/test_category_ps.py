@@ -55,13 +55,13 @@ class TestCategoryPs(TransactionCase):
         self.assertIn('Categorie PrestaShop impostate: 2', wizard.result)
         self.assertIn('Categoria che non esiste', wizard.result)
 
-    def _update(self, default, cats, replace=False):
+    def _update(self, default, cats, replace=False, extra=()):
         client = PsApiClient(self.env)
         xml = _PRODUCT_XML.format(default=default, cats=''.join(f'<category><id>{c}</id></category>' for c in cats))
         sent = {}
         with patch.object(PsApiClient, '_get_xml_str', return_value=xml), \
                 patch.object(PsApiClient, '_put_xml', side_effect=lambda r, i, b: sent.update(xml=b)):
-            client.update_product(7, 'Nome', category_id=55, replace_category=replace)
+            client.update_product(7, 'Nome', category_id=55, replace_category=replace, extra_category_ids=extra)
         prod = ET.fromstring(sent['xml']).find('product')
         return prod.findtext('id_category_default'), [c.findtext('id') for c in prod.find('associations/categories')]
 
@@ -107,3 +107,39 @@ class TestCategoryPs(TransactionCase):
                 patch.object(PsSyncEngine, '_ps_lang', return_value='en_US'):
             vals = engine._ps_product_vals(tmpl, [])
         self.assertEqual((vals['name'], vals['meta_title']), ('ZZT Breve', 'ZZT Meta'))
+
+    def test_forced_category_wins_and_source(self):
+        """Categoria forzata sul prodotto (2026-11-12): prima di corrispondenza Amazon e categoria Odoo."""
+        self.env['ke.amazon.category.map'].create({
+            'name': 'ZZT Surf forzato', 'categ_id': self.reels.id, 'ps_category_id': self.ps_surf.id})
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT forzato', 'categ_id': self.reels.id, 'x_amazon_category': 'ZZT Surf forzato'})
+        self.assertEqual(tmpl.ps_category_source, 'Corrispondenza categoria Amazon')
+        offers = self.env['ke.prestashop.category'].create({'ps_id': 91004, 'name': 'ZZT Offerte',
+                                                            'complete_name': 'ZZT Offerte'})
+        wizard = self.env['ke.ps.category.assign'].with_context(
+            active_model='product.template', active_ids=tmpl.ids).create({
+                'main_action': 'set', 'category_id': self.ps_reels.id,
+                'extra_action': 'add', 'extra_category_ids': [(6, 0, (offers | self.ps_reels).ids)]})
+        wizard.action_apply()
+        self.assertEqual(tmpl._ke_ps_category(), self.ps_reels)
+        self.assertEqual(tmpl.ps_category_source, 'Forzata sul prodotto')
+        self.assertEqual(tmpl._ke_ps_extra_category_ids(91001), [91004], 'la principale non si ripete')
+        self.env['ke.ps.category.assign'].with_context(
+            active_model='product.template', active_ids=tmpl.ids).create({
+                'main_action': 'auto', 'extra_action': 'replace'}).action_apply()
+        self.assertEqual(tmpl._ke_ps_category(), self.ps_surf)
+        self.assertFalse(tmpl.ps_extra_category_ids)
+
+    def test_extra_categories_on_update_and_create(self):
+        self.assertEqual(self._update(30, [2, 30], extra=[40]), ('30', ['2', '30', '40']),
+                         'aggiuntive aggiunte, scelta del sito non toccata')
+        self.assertEqual(self._update(2, [2, 40], extra=[40]), ('55', ['55', '40']),
+                         'le aggiuntive non contano come scelta fatta sul sito')
+        self.assertEqual(self._update(30, [30, 40], replace=True, extra=[41]), ('55', ['55', '41']))
+        client = PsApiClient(self.env)
+        sent = {}
+        with patch.object(PsApiClient, '_post_xml', side_effect=lambda r, b: sent.update(xml=b) or 99):
+            client.create_product('ZZT', category_id=55, extra_category_ids=[40, 55])
+        prod = ET.fromstring(sent['xml']).find('product')
+        self.assertEqual([c.findtext('id') for c in prod.find('associations/categories')], ['55', '40'])

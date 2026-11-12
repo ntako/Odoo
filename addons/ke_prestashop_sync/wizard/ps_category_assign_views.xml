@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_ps_category_assign_form" model="ir.ui.view">
+        <field name="name">ke.ps.category.assign.form</field>
+        <field name="model">ke.ps.category.assign</field>
+        <field name="arch" type="xml">
+            <form string="Categoria PrestaShop">
+                <p class="text-muted">
+                    Categoria del negozio per i prodotti selezionati, senza cambiare la loro categoria Odoo.
+                    La categoria forzata vale prima della corrispondenza Amazon e della mappatura delle
+                    categorie Odoo, e sostituisce quella sul negozio al prossimo export.
+                </p>
+                <group>
+                    <field name="product_count"/>
+                    <field name="product_ids" invisible="1"/>
+                    <field name="main_action" widget="radio"/>
+                    <field name="category_id" options="{'no_create': True}"
+                           invisible="main_action != 'set'" required="main_action == 'set'"/>
+                    <field name="extra_action" widget="radio"/>
+                    <field name="extra_category_ids" widget="many2many_tags" options="{'no_create': True}"
+                           invisible="extra_action == 'keep'"/>
+                </group>
+                <footer>
+                    <button name="action_apply" type="object" string="Applica" class="btn-primary"/>
+                    <button special="cancel" string="Annulla"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ps_category_assign" model="ir.actions.act_window">
+        <field name="name">Imposta categoria PrestaShop</field>
+        <field name="res_model">ke.ps.category.assign</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="binding_view_types">list,form</field>
+        <field name="group_ids" eval="[(4, ref('stock.group_stock_manager'))]"/>
+    </record>
+
+</odoo>

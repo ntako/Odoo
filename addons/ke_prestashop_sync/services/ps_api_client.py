@@ -338,6 +338,16 @@ class PsApiClient:
         return out
 
     @staticmethod
+    def _category_list(main_id, extra_ids=()):
+        """Categorie da associare: la principale (se c'è) e le aggiuntive, senza doppioni."""
+        out = []
+        for cid in [main_id, *(extra_ids or ())]:
+            cid = int(cid or 0)
+            if cid and cid not in out:
+                out.append(cid)
+        return out
+
+    @staticmethod
     def _clean_name(name):
         # PS isCatalogName vieta ; < > = { } e in questa installazione anche #
         return re.sub(r'[<>={}#]', '', (name or '')).replace(';', ',').strip()[:128]
@@ -345,11 +355,14 @@ class PsApiClient:
     def create_product(self, name, reference='', ean13='', price=0.0,
                        description_short='', active=1, category_id=0, manufacturer_id=0,
                        description='', meta_title='', meta_description='', link_rewrite='',
-                       width=0.0, height=0.0, depth=0.0, weight=0.0, product_type='standard'):
+                       width=0.0, height=0.0, depth=0.0, weight=0.0, product_type='standard',
+                       extra_category_ids=()):
         """Crea un prodotto su PS e restituisce il nuovo ID (testi del sito: ke_web_* di ke_product_catalog)."""
         ean13, upc = self._split_barcode(ean13)
         name = self._clean_name(name)
         category_id = int(category_id or self._category_id)
+        cats_xml = ''.join(f'\n        <category><id>{int(c)}</id></category>'
+                           for c in self._category_list(category_id, extra_category_ids))
 
         # description_short: tronca a 450 char (limite PS osservato: min ~596, con margine)
         description_short = (description_short or '')[:450]
@@ -393,8 +406,7 @@ class PsApiClient:
     </description_short>{seo}
     <id_category_default>{category_id}</id_category_default>
     <associations>
-      <categories>
-        <category><id>{category_id}</id></category>
+      <categories>{cats_xml}
       </categories>
     </associations>
   </product>
@@ -408,7 +420,7 @@ class PsApiClient:
                        description_short='', active=1, category_id=0, manufacturer_id=0,
                        replace_category=False, description='', meta_title='', meta_description='',
                        link_rewrite='', replace_texts=False, width=0.0, height=0.0, depth=0.0,
-                       weight=0.0, product_type=''):
+                       weight=0.0, product_type='', extra_category_ids=()):
         """
         Aggiorna un prodotto PS esistente (GET → modifica → PUT): nome e
         descrizione breve nella lingua configurata, prezzo, codici, marca.
@@ -416,7 +428,8 @@ class PsApiClient:
         con replace_category o se il prodotto su PS è soltanto nella radice /
         nella categoria predefinita (2026-11-10: l'albero del negozio è più
         dettagliato di quello Odoo, la scelta fatta sul sito resta).
-        L'indirizzo (link_rewrite) non viene cambiato.
+        Le categorie aggiuntive (extra_category_ids) si aggiungono sempre;
+        tolte in Odoo, spariscono dal negozio solo con replace_category.
         """
         ean13, upc = self._split_barcode(ean13)
         category_id = int(category_id or self._category_id)
@@ -436,7 +449,8 @@ class PsApiClient:
         cats = prod.find('associations/categories')
         current = {int(c.findtext('id') or 0) for c in (list(cats) if cats is not None else [])}
         current.add(int(prod.findtext('id_category_default') or 0))
-        set_category = replace_category or not (current - {0, 1, 2, self._category_id})
+        set_category = replace_category or not (
+            current - {0, 1, 2, self._category_id} - {int(c) for c in extra_category_ids or ()})
         if set_category:
             set_text('id_category_default', str(category_id))
         set_text('active', str(int(bool(active))))
@@ -465,11 +479,19 @@ class PsApiClient:
             for lang in (el.findall('language') if el is not None else []):
                 if int(lang.get('id', 0)) == self._lang_id:
                     lang.text = value
-        if set_category and cats is not None:
+        if cats is None and (set_category or extra_category_ids):
+            assoc = prod.find('associations')
+            if assoc is None:
+                assoc = ET.SubElement(prod, 'associations')
+            cats = ET.SubElement(assoc, 'categories')
+        if set_category:
             for child in list(cats):
                 cats.remove(child)
-            cat = ET.SubElement(cats, 'category')
-            ET.SubElement(cat, 'id').text = str(category_id)
+        linked = {int(c.findtext('id') or 0) for c in (list(cats) if cats is not None else [])}
+        for cid in self._category_list(category_id if set_category else 0, extra_category_ids):
+            if cid not in linked:
+                cat = ET.SubElement(cats, 'category')
+                ET.SubElement(cat, 'id').text = str(cid)
         for tag in self._PRODUCT_READONLY:
             el = prod.find(tag)
             if el is not None:
