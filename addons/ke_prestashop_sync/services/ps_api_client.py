@@ -326,16 +326,77 @@ class PsApiClient:
     def _cdata(value):
         return (value or '').replace(']]>', ']]&gt;')
 
-    def _seo_xml(self, description, meta_title, meta_description):
-        """Blocchi XML dei testi del sito presenti (descrizione, meta title, meta description)."""
-        out = ''
-        for tag, value in (('description', description),
-                           ('meta_title', (meta_title or '')[:self._META_TITLE_MAX]),
-                           ('meta_description', (meta_description or '')[:self._META_DESCRIPTION_MAX])):
+    # Campi di testo per lingua del prodotto (export multilingua, 2026-11-13).
+    _TEXT_TAGS = ('name', 'link_rewrite', 'description_short', 'description', 'meta_title', 'meta_description')
+
+    def _text_value(self, tag, value, name=''):
+        """Valore di un campo di testo come lo vuole PS (nome pulito, URL, limiti di lunghezza)."""
+        value = value or ''
+        if tag == 'name':
+            return self._clean_name(value)
+        if tag == 'link_rewrite':
+            return self._make_slug(value or name) if (value or name) else ''
+        if tag == 'description_short':
+            return value[:450]
+        if tag == 'meta_title':
+            return value[:self._META_TITLE_MAX]
+        if tag == 'meta_description':
+            return value[:self._META_DESCRIPTION_MAX]
+        return value
+
+    def _translated_values(self, tag, translations):
+        """[(id lingua PS, valore)] delle altre lingue con un testo per questo campo."""
+        out = []
+        for lang_id, texts in (translations or {}).items():
+            if int(lang_id) == self._lang_id:
+                continue
+            value = self._text_value(tag, texts.get(tag), texts.get('name'))
             if value:
-                out += (f'\n    <{tag}>\n      <language id="{self._lang_id}"><![CDATA[{self._cdata(value)}]]>'
-                        f'</language>\n    </{tag}>')
+                out.append((int(lang_id), value))
         return out
+
+    def _lang_xml(self, tag, main_value, translations=None, keep_empty=False):
+        """Blocco <tag> con la lingua principale e le traduzioni presenti."""
+        values = ([(self._lang_id, main_value)] if (main_value or keep_empty) else []) + \
+            self._translated_values(tag, translations)
+        if not values:
+            return ''
+        if tag in ('name', 'link_rewrite'):
+            # Entità XML, non CDATA: il parser decodifica &amp; → & prima che PS
+            # validi il nome (isCatalogName vieta ';', presente in "&amp;").
+            esc = lambda v: v.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            entries = ''.join(f'\n      <language id="{i}">{esc(v)}</language>' for i, v in values)
+        else:
+            entries = ''.join(f'\n      <language id="{i}"><![CDATA[{self._cdata(v)}]]></language>'
+                              for i, v in values)
+        return f'\n    <{tag}>{entries}\n    </{tag}>'
+
+    def _apply_translations(self, prod, translations, replace=False):
+        """
+        Scrive nel prodotto PS (XML del GET) i testi delle altre lingue. Senza
+        replace solo dove la lingua è vuota o è la copia della lingua principale
+        (come PS riempie le lingue senza testo): una traduzione fatta sul sito resta.
+        """
+        for tag in self._TEXT_TAGS:
+            values = self._translated_values(tag, translations)
+            el = prod.find(tag)
+            if not values or el is None:
+                continue
+            nodes = {int(n.get('id', 0)): n for n in el.findall('language')}
+            main = ((nodes[self._lang_id].text if self._lang_id in nodes else '') or '').strip()
+            for lang_id, value in values:
+                node = nodes.get(lang_id)
+                if node is None:
+                    node = ET.SubElement(el, 'language', id=str(lang_id))
+                current = (node.text or '').strip()
+                if replace or not current or current == main:
+                    node.text = value
+
+    def _seo_xml(self, description, meta_title, meta_description, translations=None):
+        """Blocchi XML dei testi del sito presenti (descrizione, meta title, meta description)."""
+        return ''.join(self._lang_xml(tag, self._text_value(tag, value), translations)
+                       for tag, value in (('description', description), ('meta_title', meta_title),
+                                          ('meta_description', meta_description)))
 
     @staticmethod
     def _category_list(main_id, extra_ids=()):
@@ -356,8 +417,12 @@ class PsApiClient:
                        description_short='', active=1, category_id=0, manufacturer_id=0,
                        description='', meta_title='', meta_description='', link_rewrite='',
                        width=0.0, height=0.0, depth=0.0, weight=0.0, product_type='standard',
-                       extra_category_ids=()):
-        """Crea un prodotto su PS e restituisce il nuovo ID (testi del sito: ke_web_* di ke_product_catalog)."""
+                       extra_category_ids=(), translations=None):
+        """
+        Crea un prodotto su PS e restituisce il nuovo ID (testi del sito: ke_web_*
+        di ke_product_catalog). translations: {id lingua PS: {campo: testo}} per le
+        altre lingue; le lingue o i campi che mancano PS li riempie con la principale.
+        """
         ean13, upc = self._split_barcode(ean13)
         name = self._clean_name(name)
         category_id = int(category_id or self._category_id)
@@ -366,15 +431,13 @@ class PsApiClient:
 
         # description_short: tronca a 450 char (limite PS osservato: min ~596, con margine)
         description_short = (description_short or '')[:450]
-        # name: XML entities (NO CDATA) — così il parser XML decodifica &amp;→& prima che
-        # PS validi con isCatalogName; CDATA è testo letterale, &amp; conterrebbe ';' vietato
-        name_xml = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        # description_short: CDATA senza pre-escaping HTML (solo ]]> va protetto)
-        desc_cdata = description_short.replace(']]>', ']]&gt;')
         # reference: sanificato (PS vieta < > ; = { }, max 64 char)
         ref_cdata = self._clean_reference(reference).replace(']]>', ']]&gt;')
         slug = self._make_slug(link_rewrite or name)
-        seo = self._seo_xml(description, meta_title, meta_description)
+        texts_xml = (self._lang_xml('name', name, translations, keep_empty=True)
+                     + self._lang_xml('link_rewrite', slug, translations, keep_empty=True)
+                     + self._lang_xml('description_short', description_short, translations, keep_empty=True)
+                     + self._seo_xml(description, meta_title, meta_description, translations))
         xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <product>
@@ -394,16 +457,7 @@ class PsApiClient:
     <id_manufacturer>{int(manufacturer_id or 0)}</id_manufacturer>
     <reference><![CDATA[{ref_cdata}]]></reference>
     <ean13>{ean13}</ean13>
-    <upc>{upc}</upc>
-    <name>
-      <language id="{self._lang_id}">{name_xml}</language>
-    </name>
-    <link_rewrite>
-      <language id="{self._lang_id}">{slug}</language>
-    </link_rewrite>
-    <description_short>
-      <language id="{self._lang_id}"><![CDATA[{desc_cdata}]]></language>
-    </description_short>{seo}
+    <upc>{upc}</upc>{texts_xml}
     <id_category_default>{category_id}</id_category_default>
     <associations>
       <categories>{cats_xml}
@@ -420,7 +474,7 @@ class PsApiClient:
                        description_short='', active=1, category_id=0, manufacturer_id=0,
                        replace_category=False, description='', meta_title='', meta_description='',
                        link_rewrite='', replace_texts=False, width=0.0, height=0.0, depth=0.0,
-                       weight=0.0, product_type='', extra_category_ids=()):
+                       weight=0.0, product_type='', extra_category_ids=(), translations=None):
         """
         Aggiorna un prodotto PS esistente (GET → modifica → PUT): nome e
         descrizione breve nella lingua configurata, prezzo, codici, marca.
@@ -428,6 +482,8 @@ class PsApiClient:
         con replace_category o se il prodotto su PS è soltanto nella radice /
         nella categoria predefinita (2026-11-10: l'albero del negozio è più
         dettagliato di quello Odoo, la scelta fatta sul sito resta).
+        Altre lingue (translations): scritte dove su PS sono vuote o sono la
+        copia della lingua principale; con replace_texts sempre.
         Le categorie aggiuntive (extra_category_ids) si aggiungono sempre;
         tolte in Odoo, spariscono dal negozio solo con replace_category.
         """
@@ -465,6 +521,8 @@ class PsApiClient:
         # Testi (nome, descrizioni, meta, URL): solo con replace_texts. Deciso con
         # l'utente il 2026-11-11: i testi si scrivono alla creazione; sui
         # prodotti già sul sito si aggiornano solo con l'opzione "Aggiorna testi".
+        # Prima delle altre lingue: il confronto con la principale usa il testo ancora su PS.
+        self._apply_translations(prod, translations, replace_texts)
         texts = [('name', self._clean_name(name)), ('description_short', (description_short or '')[:450])]
         if description:
             texts.append(('description', description))
@@ -509,6 +567,14 @@ class PsApiClient:
                     return entry.get('value', '')
             return value[0].get('value', '') if value else ''
         return value or ''
+
+    def get_languages(self):
+        """Lingue del negozio: [{'id', 'iso_code', 'language_code' (es. "fr-fr"), 'active'}]."""
+        data = self._get_json('languages')
+        rows = (data.get('languages') or []) if isinstance(data, dict) else []
+        return [{'id': int(r['id']), 'iso_code': r.get('iso_code') or '',
+                 'language_code': r.get('language_code') or '',
+                 'active': str(r.get('active', '1')) in ('1', 'true', 'True')} for r in rows]
 
     def get_categories(self):
         """Tutte le categorie PS: [{'id', 'parent', 'name', 'level', 'active'}]."""

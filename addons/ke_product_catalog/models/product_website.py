@@ -164,6 +164,50 @@ class ProductTemplate(models.Model):
             'description': pick('ke_web_description', True),
         }
 
+    _KE_WEB_FIELDS = ['ke_web_name', 'ke_web_meta_title', 'ke_web_meta_description', 'ke_web_slug',
+                      'ke_web_short_description', 'ke_web_description']
+
+    def _ke_web_texts_lang(self, lang, primary):
+        """
+        Testi del sito in una lingua diversa dalla principale (export
+        multilingua, 2026-11-13): solo quelli che la lingua ha di suo, scritti
+        o proposti dal nome e dalla descrizione di quella lingua. Mai il
+        ripiego di Odoo sulla lingua principale: un campo senza testo proprio
+        manca dal risultato ({} se la lingua non ha niente) e il negozio usa
+        quello della lingua principale.
+        """
+        self.ensure_one()
+        raw = self._ke_raw(['name', 'description_sale'] + self._KE_WEB_FIELDS)
+        own = {f for f, values in raw.items() if self._ke_own(values, lang, primary)}
+        if not own:
+            return {}
+        tmpl = self.with_context(lang=lang)
+        # Si propone solo da una fonte propria della lingua: nome → nome sul
+        # sito, meta title, URL; descrizione → meta description e descrizioni.
+        empty = set()
+        if own & {'name', 'ke_web_name'}:
+            empty |= {'ke_web_name', 'ke_web_meta_title', 'ke_web_slug'} - own
+        if 'description_sale' in own:
+            empty |= {'ke_web_meta_description', 'ke_web_short_description', 'ke_web_description'} - own
+        proposal = tmpl._ke_web_proposal(empty=empty) if empty else {}
+
+        def pick(field):
+            if field in own:
+                return str(tmpl[field] or '')
+            return str(proposal.get(field) or '')
+
+        name = (tmpl.ke_web_name if 'ke_web_name' in own else
+                tmpl.name if 'name' in own else '') or ''
+        texts = {
+            'name': name,
+            'slug': pick('ke_web_slug'),
+            'meta_title': pick('ke_web_meta_title'),
+            'meta_description': pick('ke_web_meta_description'),
+            'short_description': pick('ke_web_short_description'),
+            'description': pick('ke_web_description'),
+        }
+        return {k: v for k, v in texts.items() if _plain(v)}
+
     def _ke_web_langs(self):
         """Lingue attive da proporre: prima quella dell'utente, poi le altre; mai en_US (ripiego tecnico di Odoo)."""
         codes = self.env['res.lang'].search([('active', '=', True)]).mapped('code')

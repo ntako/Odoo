@@ -594,3 +594,91 @@ class TestPsExportTimeBudget(TransactionCase):
         import json
         self.assertEqual(sorted(json.loads(follow.job_kwargs)['product_ids']), sorted(tmpls[1:].ids))
         self.assertIn('[CONTINUA]', log.log_lines)
+
+
+_PS_PRODUCT_XML = """<prestashop><product><id>7</id><id_category_default>30</id_category_default>
+<price>1</price><reference>R</reference><ean13/><upc/><id_manufacturer>0</id_manufacturer><active>1</active>
+<name><language id="1">Mulinello</language><language id="2">Mulinello</language><language id="3">Moulinet maison</language></name>
+<description_short><language id="1">Breve</language><language id="2">Breve</language></description_short>
+<link_rewrite><language id="1">mulinello</language><language id="2">mulinello</language><language id="3">moulinet</language></link_rewrite>
+<associations><categories><category><id>30</id></category></categories></associations></product></prestashop>"""
+
+
+@tagged('post_install', '-at_install')
+class TestPsMultilang(TransactionCase):
+    """Export multilingua (2026-11-13): testi propri di ogni lingua, mai il ripiego sull'italiano."""
+
+    def setUp(self):
+        super().setUp()
+        for code in ('it_IT', 'fr_FR', 'de_DE'):
+            self.env['res.lang']._activate_lang(code)
+        self.tmpl = self.env['product.template'].with_context(lang='it_IT').create({
+            'name': 'ZZT Mulinello Quick, titolo lungo', 'type': 'consu',
+            'description_sale': 'Mulinello robusto.<ul><li>Frizione</li></ul>'})
+
+    def _client(self):
+        client = PsApiClient(self.env)
+        client._lang_id = 1
+        return client
+
+    def test_texts_only_where_language_has_its_own(self):
+        self.assertEqual(self.tmpl._ke_web_texts_lang('fr_FR', 'it_IT'), {}, 'nessun testo francese: niente')
+        self.tmpl.with_context(lang='fr_FR').write({'name': 'ZZT Moulinet Quick, titre long'})
+        fr = self.tmpl._ke_web_texts_lang('fr_FR', 'it_IT')
+        self.assertEqual(fr['name'], 'ZZT Moulinet Quick, titre long')
+        self.assertEqual(fr['slug'], 'zzt-moulinet-quick')
+        self.assertNotIn('description', fr, 'descrizione solo italiana: non mandata in francese')
+        self.tmpl.with_context(lang='fr_FR').write({'description_sale': 'Moulinet solide.<ul><li>Frein</li></ul>'})
+        fr = self.tmpl._ke_web_texts_lang('fr_FR', 'it_IT')
+        self.assertIn('<li>Frein</li>', fr['description'])
+        self.assertEqual(self.tmpl._ke_web_texts_lang('de_DE', 'it_IT'), {})
+
+    def test_engine_maps_languages_and_builds_translations(self):
+        self.tmpl.with_context(lang='fr_FR').write({'name': 'ZZT Moulinet'})
+        client = FakePsClient()
+        client._lang_id = 1
+        client.get_languages = lambda: [
+            {'id': 1, 'iso_code': 'it', 'language_code': 'it-it', 'active': True},
+            {'id': 2, 'iso_code': 'gb', 'language_code': 'en-gb', 'active': True},
+            {'id': 3, 'iso_code': 'fr', 'language_code': 'fr-fr', 'active': True},
+            {'id': 4, 'iso_code': 'de', 'language_code': 'de-de', 'active': False}]
+        engine = SyncEngine(self.env, client)
+        with patch.object(SyncEngine, '_ps_lang', return_value='it_IT'):
+            self.assertEqual(engine._ps_lang_map().get(3), 'fr_FR')
+            self.assertNotIn(4, engine._ps_lang_map(), 'lingua spenta sul negozio')
+            translations = engine._ps_translations(self.tmpl)
+        self.assertEqual(list(translations), [3], 'solo il francese ha testi propri')
+        self.assertEqual(translations[3]['name'], 'ZZT Moulinet')
+
+    def test_create_writes_every_language(self):
+        sent = {}
+        with patch.object(PsApiClient, '_post_xml', side_effect=lambda r, b: sent.update(xml=b) or 99):
+            self._client().create_product('Mulinello', description='<p>Testo</p>', translations={
+                3: {'name': 'Moulinet', 'description': '<p>Texte</p>', 'link_rewrite': ''}})
+        import xml.etree.ElementTree as ET
+        prod = ET.fromstring(sent['xml']).find('product')
+        names = {n.get('id'): n.text for n in prod.find('name')}
+        self.assertEqual(names, {'1': 'Mulinello', '3': 'Moulinet'})
+        self.assertEqual({n.get('id'): n.text for n in prod.find('link_rewrite')}, {'1': 'mulinello', '3': 'moulinet'})
+        self.assertEqual(prod.find('description/language[@id="3"]').text, '<p>Texte</p>')
+
+    def test_update_fills_copies_keeps_site_translations(self):
+        import xml.etree.ElementTree as ET
+        sent = {}
+        with patch.object(PsApiClient, '_get_xml_str', return_value=_PS_PRODUCT_XML), \
+                patch.object(PsApiClient, '_put_xml', side_effect=lambda r, i, b: sent.update(xml=b)):
+            self._client().update_product(7, 'Mulinello', translations={
+                2: {'name': 'Reel', 'description_short': 'Short'},
+                3: {'name': 'Moulinet Odoo', 'description_short': 'Court'}})
+        prod = ET.fromstring(sent['xml']).find('product')
+        names = {n.get('id'): n.text for n in prod.find('name')}
+        self.assertEqual(names['2'], 'Reel', 'copia dell\'italiano: sostituita')
+        self.assertEqual(names['3'], 'Moulinet maison', 'traduzione fatta sul sito: resta')
+        self.assertEqual(prod.find('description_short/language[@id="3"]').text, 'Court', 'lingua mancante: aggiunta')
+        self.assertEqual(names['1'], 'Mulinello')
+        with patch.object(PsApiClient, '_get_xml_str', return_value=_PS_PRODUCT_XML), \
+                patch.object(PsApiClient, '_put_xml', side_effect=lambda r, i, b: sent.update(xml=b)):
+            self._client().update_product(7, 'Mulinello', replace_texts=True, translations={
+                3: {'name': 'Moulinet Odoo'}})
+        prod = ET.fromstring(sent['xml']).find('product')
+        self.assertEqual(prod.find('name/language[@id="3"]').text, 'Moulinet Odoo', 'con "Aggiorna testi": sempre')

@@ -160,6 +160,58 @@ class SyncEngine:
         """Lingua Odoo dei testi per PS (il negozio è in italiano)."""
         return self._param('odoo_lang') or 'it_IT'
 
+    @staticmethod
+    def _odoo_lang_for(ps_lang, odoo_codes):
+        """Lingua Odoo di una lingua PS: stesso codice ("fr-fr" → fr_FR), altrimenti la stessa lingua (fr_BE)."""
+        code = (ps_lang.get('language_code') or '').replace('-', '_')
+        exact = f'{code[:2].lower()}_{code[3:].upper()}' if len(code) == 5 else ''
+        if exact in odoo_codes:
+            return exact
+        prefix = (code[:2] or ps_lang.get('iso_code', '')[:2]).lower()
+        return next((c for c in sorted(odoo_codes) if c.split('_')[0] == prefix), '')
+
+    def _ps_lang_map(self):
+        """
+        {id lingua PS: lingua Odoo} delle lingue attive del negozio oltre alla
+        principale (export multilingua, 2026-11-13). Mai en_US: è il ripiego
+        tecnico di Odoo, spesso con i testi della lingua principale.
+        """
+        if getattr(self, '_lang_map', None) is None:
+            client = getattr(self, 'client', None)
+            try:
+                ps_langs = client.get_languages() if hasattr(client, 'get_languages') else []
+            except Exception as exc:
+                _log.warning('Lingue PrestaShop non lette, export solo nella lingua principale: %s', exc)
+                ps_langs = []
+            odoo_codes = set(self.env['res.lang'].search([('active', '=', True)]).mapped('code')) - {'en_US'}
+            main = self._ps_lang()
+            main_id = getattr(client, '_lang_id', 1)
+            self._lang_map = {}
+            for lang in ps_langs:
+                if not lang.get('active') or lang['id'] == main_id:
+                    continue
+                code = self._odoo_lang_for(lang, odoo_codes)
+                if code and code != main:
+                    self._lang_map[lang['id']] = code
+        return self._lang_map
+
+    def _ps_translations(self, tmpl):
+        """Testi del prodotto nelle altre lingue del negozio, solo quelli propri di ogni lingua in Odoo."""
+        main = self._ps_lang()
+        out = {}
+        for ps_lang_id, code in self._ps_lang_map().items():
+            texts = tmpl._ke_web_texts_lang(code, main)
+            if texts:
+                out[ps_lang_id] = {
+                    'name': texts.get('name', ''),
+                    'link_rewrite': texts.get('slug', ''),
+                    'description_short': texts.get('short_description', ''),
+                    'description': texts.get('description', ''),
+                    'meta_title': texts.get('meta_title', ''),
+                    'meta_description': texts.get('meta_description', ''),
+                }
+        return out
+
     def _ps_product_vals(self, tmpl, lines, reference='', ean13=''):
         """Dati del prodotto (padre) da creare o aggiornare su PS."""
         tmpl = tmpl.with_context(lang=self._ps_lang())
@@ -184,6 +236,7 @@ class SyncEngine:
             'link_rewrite': texts['slug'],
             'category_id': category_id,
             'extra_category_ids': tmpl._ke_ps_extra_category_ids(category_id),
+            'translations': self._ps_translations(tmpl),
             'manufacturer_id': self._ps_manufacturer_id(tmpl.ke_brand_id, lines),
             **self._ps_dimensions(tmpl),
         }
