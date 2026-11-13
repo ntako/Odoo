@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_ke_translate_proposal_list" model="ir.ui.view">
+        <field name="name">ke.translate.proposal.list</field>
+        <field name="model">ke.translate.proposal</field>
+        <field name="arch" type="xml">
+            <list string="Proposte di testo" create="false" decoration-muted="state != 'pending'">
+                <header>
+                    <button name="action_accept" type="object" string="Accetta"/>
+                    <button name="action_reject" type="object" string="Scarta"/>
+                </header>
+                <field name="product_tmpl_id"/>
+                <field name="lang"/>
+                <field name="field_name"/>
+                <field name="new_short"/>
+                <field name="provider_id" optional="hide"/>
+                <field name="create_date" string="Data" optional="hide"/>
+                <field name="state" widget="badge" decoration-info="state == 'pending'"
+                       decoration-success="state == 'accepted'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_translate_proposal_form" model="ir.ui.view">
+        <field name="name">ke.translate.proposal.form</field>
+        <field name="model">ke.translate.proposal</field>
+        <field name="arch" type="xml">
+            <form string="Proposta di testo" create="false">
+                <header>
+                    <button name="action_accept" type="object" string="Accetta" class="btn-primary"
+                            invisible="state != 'pending'"/>
+                    <button name="action_reject" type="object" string="Scarta" invisible="state != 'pending'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="product_tmpl_id" readonly="1"/>
+                            <field name="lang" readonly="1"/>
+                            <field name="field_name" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="operation" readonly="1"/>
+                            <field name="provider_id" readonly="1"/>
+                            <field name="job_id" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Testo proposto (modificabile prima di accettare)">
+                        <field name="new_value" nolabel="1" colspan="2" readonly="state != 'pending'"/>
+                    </group>
+                    <group string="Anteprima">
+                        <field name="new_preview" nolabel="1" colspan="2" readonly="1"/>
+                    </group>
+                    <group string="Testo attuale">
+                        <field name="current_preview" nolabel="1" colspan="2" readonly="1"/>
+                    </group>
+                    <group string="Testo di partenza">
+                        <field name="source_value" nolabel="1" colspan="2" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_ke_translate_proposal_search" model="ir.ui.view">
+        <field name="name">ke.translate.proposal.search</field>
+        <field name="model">ke.translate.proposal</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="product_tmpl_id"/>
+                <field name="lang"/>
+                <field name="field_name"/>
+                <filter name="pending" string="Da valutare" domain="[('state', '=', 'pending')]"/>
+                <filter name="accepted" string="Accettate" domain="[('state', '=', 'accepted')]"/>
+                <filter name="rejected" string="Scartate" domain="[('state', '=', 'rejected')]"/>
+                <group>
+                    <filter name="group_product" string="Prodotto" context="{'group_by': 'product_tmpl_id'}"/>
+                    <filter name="group_lang" string="Lingua" context="{'group_by': 'lang'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_ke_translate_proposal" model="ir.actions.act_window">
+        <field name="name">Proposte di testo</field>
+        <field name="res_model">ke.translate.proposal</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_pending': 1}</field>
+    </record>
+</odoo>

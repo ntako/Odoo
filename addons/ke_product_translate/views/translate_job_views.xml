@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_ke_translate_job_list" model="ir.ui.view">
+        <field name="name">ke.translate.job.list</field>
+        <field name="model">ke.translate.job</field>
+        <field name="arch" type="xml">
+            <list string="Lavori di traduzione" create="false">
+                <field name="create_date" string="Creato"/>
+                <field name="name"/>
+                <field name="provider_id"/>
+                <field name="done_count"/>
+                <field name="total_count"/>
+                <field name="error_count"/>
+                <field name="state" widget="badge" decoration-info="state in ('queued', 'running')"
+                       decoration-success="state == 'done'" decoration-danger="state == 'failed'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_translate_job_form" model="ir.ui.view">
+        <field name="name">ke.translate.job.form</field>
+        <field name="model">ke.translate.job</field>
+        <field name="arch" type="xml">
+            <form string="Lavoro di traduzione" create="false" edit="false">
+                <header>
+                    <button name="action_resume" type="object" string="Riprendi" invisible="state not in ('failed', 'cancelled')"/>
+                    <button name="action_cancel" type="object" string="Annulla" invisible="state not in ('queued', 'running', 'failed')"/>
+                    <field name="state" widget="statusbar" statusbar_visible="queued,running,done"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_proposals" type="object" class="oe_stat_button" icon="fa-list"
+                                invisible="apply != 'proposal'">
+                            <field name="proposal_count" widget="statinfo" string="Proposte"/>
+                        </button>
+                    </div>
+                    <h2><field name="name"/></h2>
+                    <group>
+                        <group>
+                            <field name="provider_id"/>
+                            <field name="source_lang"/>
+                            <field name="target_langs"/>
+                            <field name="scope"/>
+                            <field name="apply"/>
+                        </group>
+                        <group>
+                            <field name="total_count"/>
+                            <field name="done_count"/>
+                            <field name="translated_count"/>
+                            <field name="error_count"/>
+                            <field name="chars_count"/>
+                            <field name="start_date"/>
+                            <field name="end_date"/>
+                        </group>
+                    </group>
+                    <p class="text-muted" invisible="state not in ('queued', 'running')">
+                        Il lavoro prosegue in background a turni: ricarica la pagina per vedere l'avanzamento.
+                    </p>
+                    <field name="log_lines" nolabel="1" widget="text"/>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ke_translate_job" model="ir.actions.act_window">
+        <field name="name">Lavori di traduzione</field>
+        <field name="res_model">ke.translate.job</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

@@ -1,0 +1,6 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_ke_translate_provider_user,ke.translate.provider utente,model_ke_translate_provider,product.group_product_manager,1,0,0,0
+access_ke_translate_provider_admin,ke.translate.provider amministratore,model_ke_translate_provider,base.group_system,1,1,1,1
+access_ke_translate_proposal_manager,ke.translate.proposal gestione,model_ke_translate_proposal,product.group_product_manager,1,1,1,1
+access_ke_translate_job_manager,ke.translate.job gestione,model_ke_translate_job,product.group_product_manager,1,1,1,1
+access_ke_translate_wizard_manager,ke.translate.wizard,model_ke_translate_wizard,product.group_product_manager,1,1,1,1

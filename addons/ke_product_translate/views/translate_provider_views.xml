@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_ke_translate_provider_list" model="ir.ui.view">
+        <field name="name">ke.translate.provider.list</field>
+        <field name="model">ke.translate.provider</field>
+        <field name="arch" type="xml">
+            <list string="Fornitori di traduzione">
+                <field name="sequence" widget="handle"/>
+                <field name="name"/>
+                <field name="kind"/>
+                <field name="url"/>
+                <field name="has_api_key"/>
+                <field name="last_check"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_translate_provider_form" model="ir.ui.view">
+        <field name="name">ke.translate.provider.form</field>
+        <field name="model">ke.translate.provider</field>
+        <field name="arch" type="xml">
+            <form string="Fornitore di traduzione">
+                <header>
+                    <button name="action_check" type="object" string="Prova" class="btn-primary"/>
+                </header>
+                <sheet>
+                    <widget name="web_ribbon" title="Archiviato" bg_color="text-bg-danger" invisible="active"/>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="kind"/>
+                            <field name="url" placeholder="http://libretranslate:5000"/>
+                            <field name="api_key" password="True" groups="base.group_system"/>
+                            <field name="has_api_key"/>
+                            <field name="active" invisible="1"/>
+                        </group>
+                        <group>
+                            <field name="last_check"/>
+                        </group>
+                    </group>
+                    <div class="text-muted" invisible="kind != 'libretranslate'">
+                        LibreTranslate: servizio open source che gira sul nostro server (container Docker),
+                        gratuito e senza limiti. Qualità discreta. La chiave serve solo se il servizio è
+                        configurato per richiederla.
+                    </div>
+                    <div class="text-muted" invisible="kind != 'deepl'">
+                        DeepL: chiave da www.deepl.com (piano API Free: 500.000 caratteri al mese gratis,
+                        la chiave finisce con ":fx"). "Prova" mostra i caratteri già usati nel mese.
+                    </div>
+                    <field name="notes" placeholder="Note"/>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ke_translate_provider" model="ir.actions.act_window">
+        <field name="name">Fornitori di traduzione</field>
+        <field name="res_model">ke.translate.provider</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>
