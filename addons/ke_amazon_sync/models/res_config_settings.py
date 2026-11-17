@@ -530,27 +530,40 @@ class ResConfigSettings(models.TransientModel):
         # Prima l'italiano (lingua principale del catalogo).
         return found.sorted(lambda m: (m.lang_id.code != 'it_IT', m.sequence, m.id))
 
-    def action_run_recover_texts(self):
-        """Recupera nomi e descrizioni nella lingua di ogni marketplace (sola lettura Amazon), in background."""
+    # Lavori "un marketplace alla volta" (2026-11-17): tipo → (sync_type, metodo del motore, nome).
+    _PER_MARKETPLACE_JOBS = {
+        'texts': ('recover_texts', 'recover_marketplace_texts', 'Recupero testi da Amazon'),
+        'specs': ('import_specs', 'import_marketplace_specs', 'Specifiche tecniche da Amazon'),
+    }
+
+    def _start_per_marketplace(self, kind):
         self._validate_credentials()
+        sync_type, _method, label = self._PER_MARKETPLACE_JOBS[kind]
         marketplaces = self._recover_texts_marketplaces()
         if not marketplaces:
             raise UserError('Nessun marketplace con lingua attiva e inserzioni (Amazon → Marketplace, campo Lingua).')
         params = self.env['ir.config_parameter'].sudo()
-        if params.get_param('ke_amazon_sync.recover_texts_state') == 'running':
-            raise UserError('Un recupero testi è già in corso.')
+        if params.get_param(f'ke_amazon_sync.{sync_type}_state') == 'running':
+            raise UserError(f'{label}: un giro è già in corso.')
         log_rec = self.env['ke.amazon.sync.log'].create({
-            'name': f'Recupero testi da Amazon ({", ".join(marketplaces.mapped("code"))}) — '
-                    f'{datetime.now().strftime("%d/%m/%Y %H:%M")}',
-            'sync_type': 'recover_texts',
+            'name': f'{label} ({", ".join(marketplaces.mapped("code"))}) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': sync_type,
             'state': 'running',
             'start_date': datetime.now(),
         })
-        params.set_param('ke_amazon_sync.recover_texts_state', 'running')
-        params.set_param('ke_amazon_sync.recover_texts_marketplace_ids', ','.join(map(str, marketplaces.ids)))
+        params.set_param(f'ke_amazon_sync.{sync_type}_state', 'running')
+        params.set_param(f'ke_amazon_sync.{sync_type}_marketplace_ids', ','.join(map(str, marketplaces.ids)))
         self.env.cr.commit()
-        self._start_thread('_thread_recover_texts', log_rec.id)
+        self.with_context(ke_per_marketplace_kind=kind)._start_thread('_thread_per_marketplace', log_rec.id)
         return self._open_log_action()
+
+    def action_run_recover_texts(self):
+        """Recupera nomi e descrizioni nella lingua di ogni marketplace (sola lettura Amazon), in background."""
+        return self._start_per_marketplace('texts')
+
+    def action_run_import_specs(self):
+        """Specifiche tecniche dal Catalog API di ogni marketplace con lingua (sola lettura Amazon), in background."""
+        return self._start_per_marketplace('specs')
 
     def action_compute_sync_prices(self):
         """Ricalcola il "Prezzo con sync" degli annunci attivi (nessuna chiamata Amazon)."""
@@ -667,13 +680,15 @@ class ResConfigSettings(models.TransientModel):
                 cr.commit()
 
     @api.model
-    def _thread_recover_texts(self, db, uid, ctx, log_id):
+    def _thread_per_marketplace(self, db, uid, ctx, log_id):
         """Un marketplace alla volta, ciascuno col suo log di dettaglio; riepilogo nel log principale."""
         from odoo import api as odoo_api
         from odoo.modules.registry import Registry as odoo_registry
         from ..services.sp_api_client import SpApiClient
         from ..services.sync_engine import SyncEngine
 
+        kind = ctx.get('ke_per_marketplace_kind') or 'texts'
+        sync_type, method, label = self._PER_MARKETPLACE_JOBS[kind]
         with odoo_registry(db).cursor() as cr:
             env = odoo_api.Environment(cr, uid, ctx)
             Log = env['ke.amazon.sync.log']
@@ -681,25 +696,27 @@ class ResConfigSettings(models.TransientModel):
             params = env['ir.config_parameter'].sudo()
             summary, total = [], [0, 0, 0]
             try:
-                ids = [int(i) for i in (params.get_param('ke_amazon_sync.recover_texts_marketplace_ids') or '').split(',') if i]
-                for marketplace in env['ke.amazon.marketplace'].with_context(active_test=False).browse(ids):
+                ids = [int(i) for i in (params.get_param(f'ke_amazon_sync.{sync_type}_marketplace_ids') or '').split(',') if i]
+                marketplaces = env['ke.amazon.marketplace'].with_context(active_test=False).browse(ids)
+                for n, marketplace in enumerate(marketplaces):
                     child = Log.create({
-                        'name': f'Recupero testi {marketplace.code} ({marketplace.lang_id.code})',
-                        'sync_type': 'recover_texts', 'state': 'running',
+                        'name': f'{label} — {marketplace.code} ({marketplace.lang_id.code})',
+                        'sync_type': sync_type, 'state': 'running',
                         'start_date': datetime.now(), 'parent_log_id': log_rec.id,
                     })
                     cr.commit()
                     try:
-                        client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
-                        res = SyncEngine(env, client).recover_marketplace_texts(child, marketplace)
+                        engine = SyncEngine(env, SpApiClient(env, marketplace_id=marketplace.marketplace_id))
+                        kwargs = {'primary': n == 0} if kind == 'specs' else {}
+                        res = getattr(engine, method)(child, marketplace, **kwargs)
                         child.write({'state': 'error' if res[2] else 'done', 'end_date': datetime.now()})
                         last = (child.log_lines or '').splitlines()[-1:]
-                        summary.append(f'[{marketplace.code}] {res[0]} aggiornati, {res[1]} senza testo su Amazon, '
+                        summary.append(f'[{marketplace.code}] {res[0]} aggiornati, {res[1]} senza dati su Amazon, '
                                        f'{res[2]} errori. ' + ' '.join(last))
                         total = [a + b for a, b in zip(total, res)]
                     except Exception as exc:
                         cr.rollback()
-                        _log.error('Recupero testi %s fallito: %s', marketplace.code, exc, exc_info=True)
+                        _log.error('%s %s fallito: %s', label, marketplace.code, exc, exc_info=True)
                         child.write({'state': 'error', 'error_summary': str(exc), 'end_date': datetime.now()})
                         summary.append(f'[{marketplace.code}] ERRORE: {exc}')
                         total[2] += 1
@@ -710,11 +727,11 @@ class ResConfigSettings(models.TransientModel):
                 cr.commit()
             except Exception as exc:
                 cr.rollback()
-                _log.error('Thread recover_texts fallito: %s', exc, exc_info=True)
+                _log.error('Thread %s fallito: %s', sync_type, exc, exc_info=True)
                 log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': datetime.now()})
                 cr.commit()
             finally:
-                params.set_param('ke_amazon_sync.recover_texts_state', 'idle')
+                params.set_param(f'ke_amazon_sync.{sync_type}_state', 'idle')
                 cr.commit()
 
     @api.model

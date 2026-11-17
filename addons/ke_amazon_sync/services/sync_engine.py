@@ -2718,6 +2718,22 @@ class SyncEngine:
         listings = self.env['ke.amazon.listing'].sudo().search([('sku', '=', sku), ('open_date', '!=', False)])
         return max(listings.mapped('open_date'), default=None)
 
+    @staticmethod
+    def _physical_vals(product, weight_kg, length_cm, width_cm, height_cm):
+        """
+        Peso e dimensioni da Amazon, SOLO per i campi vuoti del prodotto
+        (2026-11-17, deciso con l'utente; da documentare). Amazon non
+        sovrascrive mai peso/dimensioni già presenti: possono venire dal
+        catalogo fornitore (ke_inventory_import, arricchimento) o essere
+        scritti a mano, e quelli Amazon sono spesso approssimati.
+        """
+        vals = {}
+        for field, value in (('weight', weight_kg), ('product_length', length_cm),
+                             ('product_width', width_cm), ('product_height', height_cm)):
+            if value is not None and field in product._fields and not product[field]:
+                vals[field] = value
+        return vals
+
     def _update_product(self, product, data):
         new_sku = data['sku']
         # Confrontato con lo SKU legacy (primario): usato SOLO per
@@ -2732,17 +2748,13 @@ class SyncEngine:
         # parte dalla listing stessa. Trovato in revisione, vedi TASK.md
         # "FNSKU".
         sku_changed = new_sku != (product.x_amazon_sku or '')
-        # Attributi fisici del prodotto: sempre aggiornati, indipendentemente
-        # dal marketplace (non sono dati di listing, sono lo stesso prodotto).
-        vals = {}
-        if data.get('weight_kg') is not None:
-            vals['weight'] = data['weight_kg']
-        if data.get('length_cm') is not None:
-            vals['product_length'] = data['length_cm']
-        if data.get('width_cm') is not None:
-            vals['product_width'] = data['width_cm']
-        if data.get('height_cm') is not None:
-            vals['product_height'] = data['height_cm']
+        # Attributi fisici del prodotto (uguali per ogni marketplace): solo se
+        # mancano (2026-11-17, deciso con l'utente). Prima Amazon li riscriveva
+        # a ogni aggiornamento, anche sopra i dati del catalogo fornitore o
+        # quelli scritti a mano; i suoi pesi sono spesso approssimati (libbre
+        # arrotondate, peso della confezione). Vedi _physical_vals.
+        vals = self._physical_vals(product, data.get('weight_kg'), data.get('length_cm'),
+                                   data.get('width_cm'), data.get('height_cm'))
 
         # Campi Amazon "legacy": solo se questa sync è sul marketplace primario
         # (fase 3, transizione — vedi _is_primary_marketplace). Il dato vero,
@@ -4164,14 +4176,8 @@ class SyncEngine:
                     length_cm = _convert_length(item_d.get('length', {}))
                     width_cm = _convert_length(item_d.get('width', {}))
                     height_cm = _convert_length(item_d.get('height', {}))
-                    if weight_kg is not None:
-                        vals['weight'] = weight_kg
-                    if length_cm is not None:
-                        vals['product_length'] = length_cm
-                    if width_cm is not None:
-                        vals['product_width'] = width_cm
-                    if height_cm is not None:
-                        vals['product_height'] = height_cm
+                    # Solo i campi vuoti (vedi _physical_vals).
+                    vals.update(self._physical_vals(product, weight_kg, length_cm, width_cm, height_cm))
                     # Solo se vuoti: non sovrascrivere una descrizione/brand
                     # impostati a mano in Odoo con quanto trovato su Amazon.
                     if brand and not product.x_amazon_brand:
@@ -4403,6 +4409,98 @@ class SyncEngine:
         })
         self.env.cr.commit()
         return updated, skipped, call_errors
+
+    # ------------------------------------------------------------------
+    # Specifiche tecniche dal Catalog API
+    # ------------------------------------------------------------------
+
+    _SPECS_COMMIT_EVERY = 20   # gruppi da 10 ASIN tra un salvataggio e l'altro
+
+    def import_marketplace_specs(self, log_rec, marketplace, primary=False):
+        """
+        Specifiche tecniche (ke.product.spec, vedi services/specs.py) dagli
+        attributi del Catalog API del marketplace, per ogni variante con
+        un'inserzione lì (sola lettura Amazon, gruppi da _CAT_MAP_BATCH_SIZE).
+        Nella lingua del marketplace tutti i valori; nelle altre lingue del
+        sito solo numeri e valori fissi (uguali ovunque). primary: il giro
+        della lingua principale toglie anche i valori Amazon che Amazon non
+        ha più. I valori scritti a mano non si toccano. Prodotti con una sola
+        variante: specifiche del prodotto; famiglie: di ogni variante.
+        Ritorna (varianti aggiornate, senza specifiche, errori).
+        """
+        from . import specs as spec_rules
+        lang = marketplace.lang_id.code
+        Key = self.env['ke.product.spec.key'].sudo()
+        keys = {code: Key._ensure(code, labels, seq) for code, (seq, labels) in spec_rules.SPEC_KEYS.items()}
+        # en_US per ultima: se non è attiva, Odoo la riscrive a ogni lingua.
+        site_langs = sorted((l for l in self.env['res.lang'].search([('active', '=', True)]).mapped('code')
+                             if l != lang), key=lambda l: (l == 'en_US', l))
+
+        self.env.cr.execute(
+            """SELECT DISTINCT ON (l.product_id) l.product_id, TRIM(l.asin)
+                 FROM ke_amazon_listing l
+                 JOIN product_product pp ON pp.id = l.product_id
+                 JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                WHERE l.marketplace_id = %s AND COALESCE(TRIM(l.asin), '') <> '' AND pt.active
+                ORDER BY l.product_id, l.id""", (marketplace.id,))
+        variant_asin = self.env.cr.fetchall()
+        by_asin = {}
+        for variant_id, asin in variant_asin:
+            by_asin.setdefault(asin, []).append(variant_id)
+        asins = list(by_asin)
+        Variant = self.env['product.product'].with_context(active_test=False)
+        lines = [f'[{marketplace.code}] {len(variant_asin)} varianti, {len(asins)} ASIN da leggere.']
+        updated = empty = errors = 0
+        found = {}
+
+        for n, start in enumerate(range(0, len(asins), self._CAT_MAP_BATCH_SIZE), 1):
+            batch = asins[start:start + self._CAT_MAP_BATCH_SIZE]
+            try:
+                items = self.client.get_catalog_items_batch(batch) or {}
+            except Exception as exc:
+                errors += len(batch)
+                lines.append(f'[ERR] lettura Catalog API di {len(batch)} ASIN fallita ({exc}): da ritentare')
+                continue
+            for asin in batch:
+                item = items.get(asin)
+                if not item:
+                    continue
+                attrs = item.get('attributes') or {}
+                types = item.get('productTypes') or [{}]
+                for variant in Variant.browse(by_asin[asin]):
+                    tmpl = variant.product_tmpl_id
+                    ptype = types[0].get('productType') or tmpl.x_amazon_product_type
+                    values = spec_rules.extract(ptype, attrs, tmpl.with_context(lang=lang).name or '')
+                    target = variant if len(tmpl.product_variant_ids) > 1 else None
+                    own = {keys[c]: spec_rules.render(v, lang) or spec_rules.render_own(v) for c, v in values.items()}
+                    if primary:
+                        own.update({k: '' for c, k in keys.items() if c not in values})
+                    changed = tmpl._ke_set_specs(own, 'amazon', lang, variant=target)
+                    for other in site_langs:
+                        neutral = {keys[c]: spec_rules.render(v, other) for c, v in values.items()}
+                        changed += tmpl._ke_set_specs({k: v for k, v in neutral.items() if v}, 'amazon',
+                                                      other, variant=target)
+                    for code in values:
+                        found[code] = found.get(code, 0) + 1
+                    if changed:
+                        updated += 1
+                    elif not values:
+                        empty += 1
+            if n % self._SPECS_COMMIT_EVERY == 0:
+                log_rec.write({'products_total': len(variant_asin), 'products_updated': updated,
+                               'products_skipped': empty, 'products_error': errors,
+                               'log_lines': '\n'.join(lines + [f'… letti {start + len(batch)}/{len(asins)} ASIN'])})
+                self.env.cr.commit()
+
+        labels = {code: labels['it_IT'] for code, (_s, labels) in spec_rules.SPEC_KEYS.items()}
+        lines.append('Valori trovati: ' + ', '.join(
+            f'{labels[c]} {n}' for c, n in sorted(found.items(), key=lambda kv: -kv[1])))
+        lines.append(f'Varianti aggiornate: {updated}; senza specifiche utili su Amazon: {empty}; '
+                     f'ASIN non letti: {errors}.')
+        log_rec.write({'products_total': len(variant_asin), 'products_updated': updated,
+                       'products_skipped': empty, 'products_error': errors, 'log_lines': '\n'.join(lines)})
+        self.env.cr.commit()
+        return updated, empty, errors
 
     # ------------------------------------------------------------------
     # Magazzini FBA / FBM

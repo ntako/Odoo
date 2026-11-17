@@ -32,6 +32,7 @@ class AmazonSyncLog(models.Model):
         ('recover_renamed_families', 'Ripara Famiglie Rinominate su Amazon'),
         ('listing_fees', 'Commissioni Amazon'),
         ('recover_texts', 'Recupero Testi da Amazon'),
+        ('import_specs', 'Specifiche Tecniche da Amazon'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),

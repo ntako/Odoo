@@ -57,6 +57,12 @@
                                 string="Recupera testi da Amazon" type="object" class="btn btn-secondary"
                                 confirm="Avvio il recupero dei testi da Amazon per ogni lingua dei marketplace, in background (solo lettura su Amazon). Continuare?"/>
                     </setting>
+                    <setting string="Specifiche tecniche da Amazon"
+                             help="Rapporto di recupero, cuscinetti, diametro, carico di rottura, tecnica… dal Catalog API di ogni marketplace con lingua (solo lettura). Unità uniformate; i valori scritti a mano non si toccano. Circa 15 minuti per marketplace.">
+                        <button name="action_run_import_specs"
+                                string="Importa specifiche da Amazon" type="object" class="btn btn-secondary"
+                                confirm="Avvio l'import delle specifiche tecniche da Amazon per ogni marketplace con lingua, in background (solo lettura su Amazon, circa 15 minuti per marketplace). Continuare?"/>
+                    </setting>
                 </block>
             </xpath>
             <xpath expr="//block[@name='amazon_warehouses']" position="inside">

@@ -30,7 +30,7 @@ Arricchisce i prodotti già importati con dati non disponibili nel report TSV.
 
 - **Tipo prodotto Amazon** (`x_amazon_product_type`): necessario per pubblicare e aggiornare listing
 - **Categoria Amazon** e **Browse Node ID**: per la categorizzazione corretta su Amazon
-- **Dimensioni** (lunghezza, larghezza, altezza in cm): lette dal Catalog API v2022
+- **Dimensioni** (lunghezza, larghezza, altezza in cm) e peso: lette dal Catalog API v2022, scritte **solo se il prodotto non le ha** (vedi "Chi scrive cosa")
 - Elaborazione a chunk via cron, avviabile da **Magazzino → Amazon Sync → Aggiorna da Catalog API**
 
 ### 3. Controllo Nuovi Prodotti (automatico o manuale)
@@ -361,6 +361,33 @@ Tutti gli eventi sono tracciati in **Magazzino → Amazon Sync → Log Sincroniz
 - Log riga per riga di ogni prodotto/ordine elaborato
 
 ---
+
+## Chi scrive cosa: Amazon, catalogo fornitore, valori manuali
+
+Regole decise con l'utente (2026-11-17). Valgono anche con la sync verso Amazon abilitata.
+
+### Da Odoo verso Amazon (solo con la modalità sicura spenta)
+
+| Cosa | Quando | Testi e specifiche |
+|---|---|---|
+| Prezzi, quantità FBM | sync periodica | no |
+| "Pubblica su Amazon" su un ASIN esistente | a mano | no: solo condizione, prezzo, spedizione |
+| "Pubblica su Amazon" senza ASIN (prodotto nuovo) | a mano | nome e descrizione di vendita, marca, immagine, EAN; **mai** i testi del fornitore né le specifiche tecniche |
+
+Sugli ASIN esistenti la scheda la governa il titolare del marchio: un rivenditore non la sovrascrive.
+
+### Da Amazon verso Odoo (import, aggiornamenti, Catalog API)
+
+| Dato | Regola |
+|---|---|
+| Nome e descrizione di vendita | solo nella lingua del marketplace e **solo se quella lingua non ha un testo proprio** (vuoto o copia di un'altra lingua) |
+| Testi del catalogo fornitore (`ke_supplier_copy`, `ke_supplier_bullets`) | mai toccati |
+| Specifiche tecniche (`ke.product.spec`) | priorità **manuale > fornitore > Amazon**: Amazon aggiorna solo i valori suoi |
+| **Peso e dimensioni** | **solo se il prodotto non li ha** (prima venivano riscritti a ogni aggiornamento) |
+| Marca Amazon | solo se manca |
+| Categoria Odoo | spostata solo dalla categoria predefinita o verso una sottocategoria della stessa ("Corrispondenze categorie") |
+
+Il catalogo fornitore (`ke_inventory_import`, modalità "Solo arricchimento") scrive testi e specifiche con fonte "Fornitore"; peso e dimensioni anche lui solo se mancano. Sul sito (`ke_prestashop_sync`) i testi del fornitore hanno la precedenza sulla descrizione di vendita, nelle lingue dove ci sono.
 
 ## Relazione con gli altri moduli
 
