@@ -82,6 +82,23 @@ class ResConfigSettings(models.TransientModel):
              'quando il prodotto viene creato su PS; quelli dei prodotti già sul sito non si toccano. '
              'Acceso: a ogni aggiornamento i testi vengono da Odoo (scheda Sito web del prodotto).',
     )
+    ps_family_mode = fields.Selection([
+        ('combinations', 'Un prodotto per famiglia, con le combinazioni'),
+        ('separate', 'Un prodotto separato per ogni variante (come il negozio oggi)'),
+    ], string='Famiglie di varianti su PrestaShop', default='combinations',
+        config_parameter='ke_prestashop_sync.family_mode',
+        help='Come pubblicare un prodotto Odoo con varianti. Combinazioni: un prodotto PS con una '
+             'combinazione per variante (i vecchi prodotti separati delle varianti si disattivano con '
+             'redirect 301, salvo l\'opzione qui sotto). Prodotti separati: ogni variante è un prodotto '
+             'semplice ("nome della famiglia – valori della variante"), abbinato a quello già sul '
+             'negozio per riferimento o EAN.')
+    ps_keep_legacy_products = fields.Boolean(
+        string='Non sostituire i prodotti separati delle varianti',
+        config_parameter='ke_prestashop_sync.keep_legacy_products',
+        help='Spento (default): quando una famiglia viene pubblicata con le combinazioni, i prodotti PS '
+             'che corrispondevano alle singole varianti (stesso riferimento o EAN) vengono disattivati '
+             'con redirect 301 alla famiglia. Acceso: restano come sono (rischio di doppioni sul sito).',
+    )
     ps_pricelist_id = fields.Many2one(
         'product.pricelist', string='Listino PrestaShop',
         config_parameter='ke_prestashop_sync.pricelist_id',
@@ -268,6 +285,12 @@ class ResConfigSettings(models.TransientModel):
                  f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}')
         return self._run('sync_images', 'sync_images_to_prestashop',
                          label=label, force=True)
+
+    def action_run_check_images(self):
+        """Ripara immagini mancanti: foto registrate su PS ma senza file."""
+        label = (f'Ripara immagini mancanti su PS — '
+                 f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}')
+        return self._run('sync_images', 'sync_images_to_prestashop', label=label, check=True)
 
     def action_diagnose_ps_links(self):
         self.env.cr.execute("""

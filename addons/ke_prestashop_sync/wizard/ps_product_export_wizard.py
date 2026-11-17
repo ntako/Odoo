@@ -33,6 +33,16 @@ class PsProductExportWizard(models.TransientModel):
              'questo magazzino.',
     )
 
+    family_mode = fields.Selection([
+        ('combinations', 'Un prodotto per famiglia, con le combinazioni'),
+        ('separate', 'Un prodotto separato per ogni variante'),
+    ], string='Famiglie di varianti', required=True,
+        default=lambda self: self.env['ir.config_parameter'].sudo().get_param(
+            'ke_prestashop_sync.family_mode') or 'combinations',
+        help='Per questo export. Predefinita: quella delle Impostazioni. Cambiarla su un negozio che ha '
+             'già prodotti pubblicati nell\'altra modalità crea doppioni: va fatto su un negozio vuoto '
+             '(o dopo "Azzera collegamenti").')
+    family_mode_changed = fields.Boolean(compute='_compute_family_mode_changed')
     preview_count = fields.Integer(
         string='Prodotti da esportare', compute='_compute_preview')
     preview_info = fields.Char(compute='_compute_preview')
@@ -41,6 +51,12 @@ class PsProductExportWizard(models.TransientModel):
     def _default_warehouse_id(self):
         from ..services.sync_engine import SyncEngine
         return SyncEngine(self.env, None)._warehouse()
+
+    @api.depends('family_mode')
+    def _compute_family_mode_changed(self):
+        current = self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.family_mode') or 'combinations'
+        for wiz in self:
+            wiz.family_mode_changed = wiz.family_mode != current
 
     @api.depends('export_mode', 'product_ids', 'only_in_stock', 'warehouse_id')
     def _compute_preview(self):
@@ -77,6 +93,7 @@ class PsProductExportWizard(models.TransientModel):
             product_ids=product_ids, full_resync=full_resync,
             only_in_stock=self.only_in_stock,
             warehouse_id=self.warehouse_id.id or None,
+            family_mode=self.family_mode,
         )
         return {
             'type': 'ir.actions.act_window',

@@ -39,6 +39,14 @@
                                  help="Spento: nome, descrizioni, meta e URL si scrivono solo alla creazione del prodotto su PS">
                             <field name="ps_force_texts"/>
                         </setting>
+                        <setting string="Famiglie di varianti"
+                                 help="Come pubblicare un prodotto con varianti: un prodotto con le combinazioni oppure un prodotto separato per variante">
+                            <field name="ps_family_mode" widget="radio"/>
+                        </setting>
+                        <setting string="Prodotti separati delle varianti" invisible="ps_family_mode == 'separate'"
+                                 help="Spento: pubblicando una famiglia con le combinazioni, i vecchi prodotti PS delle singole varianti si disattivano con redirect 301 alla famiglia">
+                            <field name="ps_keep_legacy_products"/>
+                        </setting>
                         <setting string="Listino PrestaShop"
                                  help="Prezzo per il sito, IVA esclusa. Vuoto: prezzo di vendita Odoo (e della variante)">
                             <field name="ps_pricelist_id" options="{'no_create': True}"/>
@@ -136,6 +144,10 @@
                                 <button name="action_run_sync_images_force" type="object"
                                         string="Re-upload tutte le immagini"
                                         class="btn btn-sm btn-warning ms-2"/>
+                                <button name="action_run_check_images" type="object"
+                                        string="Ripara immagini mancanti"
+                                        help="Controlla che le foto dei prodotti collegati abbiano il file su PrestaShop: dove sono tutte rotte carica quelle di Odoo; le foto buone non si toccano."
+                                        class="btn btn-sm btn-secondary ms-2"/>
                             </div>
                         </setting>
                     </block>

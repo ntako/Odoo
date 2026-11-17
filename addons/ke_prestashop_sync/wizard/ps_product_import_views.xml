@@ -43,7 +43,14 @@
                     <field name="warehouse_id"
                            invisible="not only_in_stock"
                            required="only_in_stock"/>
+                    <field name="family_mode" widget="radio"/>
+                    <field name="family_mode_changed" invisible="1"/>
                 </group>
+                <div class="alert alert-warning" role="alert" invisible="not family_mode_changed">
+                    Modalità diversa da quella delle Impostazioni. Da usare su un negozio vuoto (o dopo
+                    "Azzera collegamenti"): le famiglie già pubblicate nell'altra modalità resterebbero sul
+                    sito e si creerebbero doppioni. Giacenze e prezzi seguono i collegamenti creati qui.
+                </div>
                 <div class="alert alert-info" role="status">
                     <field name="preview_info" readonly="1" nolabel="1"/>
                     <field name="preview_count" invisible="1"/>

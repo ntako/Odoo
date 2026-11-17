@@ -26,6 +26,13 @@ class ProductTemplate(models.Model):
         copy=False,
         help='True se l\'immagine principale è stata caricata su PrestaShop.',
     )
+    ps_image_incomplete = fields.Boolean(
+        string='Immagini PS da completare',
+        default=False,
+        copy=False,
+        help='Caricamento delle immagini interrotto a fine turno: il turno successivo '
+             'carica solo quelle mancanti.',
+    )
 
     # Categoria PS scelta sul prodotto (2026-11-12, chiesto dall'utente): per i
     # gruppi di prodotti che nell'albero del negozio vanno altrove rispetto a

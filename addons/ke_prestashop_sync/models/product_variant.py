@@ -11,3 +11,18 @@ class ProductProduct(models.Model):
         default=0,
         help='ID della combinazione (variante) in PrestaShop. 0 = non ancora sincronizzata.',
     )
+    ps_variant_product_id = fields.Integer(
+        string='ID Prodotto PS della variante',
+        index=True,
+        copy=False,
+        default=0,
+        help='Modalità "varianti come prodotti separati": il prodotto semplice PrestaShop di questa '
+             'variante. 0 = non collegata.',
+    )
+    ps_legacy_product_id = fields.Integer(
+        string='Prodotto PS sostituito',
+        copy=False,
+        default=0,
+        help='Prodotto PrestaShop separato che corrispondeva a questa variante prima che la famiglia '
+             'fosse pubblicata con le combinazioni: disattivato dall\'export con redirect 301 alla famiglia.',
+    )

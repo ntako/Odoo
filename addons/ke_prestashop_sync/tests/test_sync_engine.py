@@ -12,6 +12,19 @@ from odoo.addons.ke_prestashop_sync.services.sync_engine import SyncEngine
 @tagged('post_install', '-at_install')
 class TestPsApiClient(TransactionCase):
 
+    def test_php_warnings_only_response_is_success(self):
+        class Resp:
+            def __init__(self, status, payload):
+                self.status_code, self._payload, self.ok, self.text = status, payload, status < 400, str(payload)
+            def json(self):
+                return self._payload
+        warn = {'product': {'id': '34436'}, 'errors': [{'code': 3, 'message': '[PHP Warning #2] Undefined array key 2'}]}
+        PsApiClient._check(PsApiClient.__new__(PsApiClient), Resp(500, warn), 'POST products')
+        real = {'errors': [{'code': 84, 'message': 'La proprietà Product->meta_description non è valida'}]}
+        with self.assertRaises(Exception):
+            PsApiClient._check(PsApiClient.__new__(PsApiClient), Resp(500, real), 'POST products')
+        self.assertEqual(PsApiClient._clean_meta('Mulinello <b>{top}</b> = 5'), 'Mulinello b top /b 5')
+
     def test_clean_reference(self):
         self.assertEqual(PsApiClient._clean_reference('ART#12=3;{x}'), 'ART123x')
         self.assertEqual(len(PsApiClient._clean_reference('R' * 100)), 64)
@@ -83,6 +96,9 @@ class FakePsClient:
     def delete_product_image(self, ps_id, image_id):
         self.deleted_images = getattr(self, 'deleted_images', []) + [image_id]
 
+    def image_missing_on_disk(self, ps_id, image_id):
+        return image_id in getattr(self, 'missing_files', set())
+
     def set_combination_images(self, combo_id, image_ids):
         self.combo_images = getattr(self, 'combo_images', {})
         self.combo_images[combo_id] = list(image_ids)
@@ -142,6 +158,13 @@ class FakePsClient:
 
     def update_stock_available(self, **kwargs):
         self.stock_updates.append(kwargs)
+
+    def get_default_combination(self, ps_id):
+        return getattr(self, 'default_combo', {}).get(ps_id, 0)
+
+    def set_default_combination(self, ps_id, combo_id):
+        self.default_combo = getattr(self, 'default_combo', {})
+        self.default_combo[ps_id] = combo_id
 
     # --- ordini ---
     def get_order_ids(self, date_from=None, states=None):
@@ -495,6 +518,43 @@ class TestPsCatalogExport(TransactionCase):
         pushed = [u for u in self.client.stock_updates if u['ps_product_id'] == 321]
         self.assertEqual(pushed[-1]['quantity'], 0, 'giacenza solo in un altro magazzino: su PS va a zero')
 
+    def _family_on_ps(self):
+        attr = self.env['product.attribute'].create({
+            'name': 'ZZT Misura def', 'value_ids': [(0, 0, {'name': n}) for n in ('A', 'B', 'C')]})
+        tmpl = self.env['product.template'].create({
+            'name': 'ZZT predefinita', 'type': 'consu', 'is_storable': True, 'ps_product_id': 654,
+            'attribute_line_ids': [(0, 0, {'attribute_id': attr.id, 'value_ids': [(6, 0, attr.value_ids.ids)]})]})
+        variants = tmpl.product_variant_ids.sorted(lambda v: v.product_template_attribute_value_ids.name)
+        for combo_id, v in enumerate(variants, 11):
+            v.ps_combination_id = combo_id
+        self.client.stock_by_product[654] = [
+            {'id': 80 + i, 'id_product_attribute': str(i), 'quantity': '0'} for i in (11, 12, 13)]
+        return tmpl, variants
+
+    def test_default_combination_moves_to_available(self):
+        """Predefinita a zero e un'altra disponibile: diventa predefinita la prima disponibile."""
+        tmpl, (a, b, c) = self._family_on_ps()
+        self.client.default_combo = {654: 11}
+        self._stock(c, 2)
+        lines = []
+        self.engine._push_stock(tmpl, lines)
+        self.assertEqual(self.client.default_combo[654], 13)
+        self.assertTrue(any(l.startswith('[PREDEFINITA]') for l in lines))
+
+    def test_default_combination_kept_when_available_or_all_zero(self):
+        tmpl, (a, b, c) = self._family_on_ps()
+        self._stock(b, 1)
+        self._stock(c, 3)
+        self.client.default_combo = {654: 12}
+        self.engine._push_stock(tmpl, [])
+        self.assertEqual(self.client.default_combo[654], 12, 'predefinita disponibile: non si tocca')
+        tmpl2, _v = self._family_on_ps()
+        tmpl2.ps_product_id = 655
+        self.client.stock_by_product[655] = self.client.stock_by_product[654]
+        self.client.default_combo[655] = 11
+        self.engine._push_stock(tmpl2, [])
+        self.assertEqual(self.client.default_combo[655], 11, 'tutte a zero: non si tocca')
+
 
 @tagged('post_install', '-at_install')
 class TestPsProductPage(TransactionCase):
@@ -531,6 +591,15 @@ class TestPsProductPage(TransactionCase):
         self.assertEqual(vals['link_rewrite'], 'zzt-dimensioni')
         self.assertIn('<li>Uno</li><li>Due</li>', vals['description'])
 
+    def test_images_not_duplicated_when_already_on_ps(self):
+        tmpl = self.env['product.template'].create({'name': 'ZZT foto già su PS', 'type': 'consu', 'ps_product_id': 56})
+        self.Media.create({'product_tmpl_id': tmpl.id, 'product_id': tmpl.product_variant_id.id,
+                           'url': 'https://x/a.jpg', 'role': 'MAIN'})
+        self.client.get_product_image_ids = lambda ps_id: [901, 902]
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()):
+            self.assertEqual(self.engine._push_images(tmpl, []), 0)
+        self.assertTrue(tmpl.ps_image_synced)
+
     def test_images_simple_product_gallery(self):
         tmpl = self.env['product.template'].create({'name': 'ZZT immagini', 'type': 'consu', 'ps_product_id': 55})
         variant = tmpl.product_variant_id
@@ -557,6 +626,93 @@ class TestPsProductPage(TransactionCase):
             self.engine._push_images(tmpl, [])
         self.assertEqual(len(self.client.images), 2, 'immagine in comune caricata una volta')
         self.assertEqual(self.client.combo_images, {11: [901], 12: [902, 901]})
+
+    def test_images_cut_at_turn_end_resume_without_duplicates(self):
+        """Tempo del turno finito a metà (2026-11-13): il turno dopo carica solo le mancanti."""
+        tmpl = self._family()
+        tmpl.ps_product_id = 57
+        red, blue = tmpl.product_variant_ids
+        red.ps_combination_id, blue.ps_combination_id = 11, 12
+        self.Media.create([
+            {'product_tmpl_id': tmpl.id, 'product_id': red.id, 'url': 'https://x/rosso.jpg', 'role': 'MAIN'},
+            {'product_tmpl_id': tmpl.id, 'product_id': blue.id, 'url': 'https://x/blu.jpg', 'role': 'MAIN'},
+            {'product_tmpl_id': tmpl.id, 'product_id': blue.id, 'url': 'https://x/rosso.jpg', 'role': 'PT01'},
+        ])
+        lines = []
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()), \
+                patch.object(SyncEngine, '_out_of_time', side_effect=[False, True]):
+            self.engine._push_images(tmpl, lines)
+        self.assertEqual(len(self.client.images), 1)
+        self.assertTrue(self.engine._images_cut)
+        self.assertTrue(tmpl.ps_image_incomplete)
+        self.assertFalse(tmpl.ps_image_synced)
+        self.assertFalse(getattr(self.client, 'combo_images', {}), 'combinazioni associate solo a caricamento finito')
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()), \
+                patch.object(SyncEngine, '_out_of_time', return_value=False):
+            self.engine._push_images(tmpl, [])
+        self.assertEqual([b for _pid, b in self.client.images], [b'https://x/rosso.jpg', b'https://x/blu.jpg'])
+        self.assertEqual(self.client.combo_images, {11: [901], 12: [902, 901]})
+        self.assertTrue(tmpl.ps_image_synced)
+        self.assertFalse(tmpl.ps_image_incomplete)
+
+    def _with_ps_images(self, ps_id, image_ids):
+        tmpl = self.env['product.template'].create({'name': 'ZZT foto rotte', 'type': 'consu', 'ps_product_id': ps_id})
+        self.Media.create({'product_tmpl_id': tmpl.id, 'product_id': tmpl.product_variant_id.id,
+                           'url': 'https://x/odoo.jpg', 'role': 'MAIN'})
+        self.client.get_product_image_ids = lambda pid: list(image_ids) if pid == ps_id else []
+        return tmpl
+
+    def test_existing_images_all_without_file_are_replaced(self):
+        """Foto registrate su PS senza file (2026-11-13): si tolgono e si carica la galleria Odoo."""
+        tmpl = self._with_ps_images(60, [700, 701])
+        self.client.missing_files = {700, 701}
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()):
+            n = self.engine._push_images(tmpl, [])
+        self.assertEqual(n, 1)
+        self.assertEqual(sorted(self.client.deleted_images), [700, 701])
+        self.assertTrue(tmpl.ps_image_synced)
+
+    def test_existing_images_partly_without_file_are_left_alone(self):
+        tmpl = self._with_ps_images(61, [710, 711])
+        self.client.missing_files = {711}
+        lines = []
+        n = self.engine._push_images(tmpl, lines)
+        self.assertEqual(n, 0)
+        self.assertFalse(getattr(self.client, 'deleted_images', []), 'le foto buone non si toccano')
+        self.assertFalse(getattr(self.client, 'images', []))
+        self.assertTrue(tmpl.ps_image_synced)
+        self.assertIn('senza file', lines[-1])
+
+    def test_check_images_includes_synced_products(self):
+        tmpl = self._with_ps_images(62, [720])
+        tmpl.ps_image_synced = True
+        self.client.missing_files = {720}
+        log = self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'sync_images', 'state': 'running'})
+        with patch.object(SyncEngine, '_image_bytes', side_effect=lambda kind, value: value.encode()):
+            self.engine.sync_images_to_prestashop(log, product_ids=tmpl.ids)
+            self.assertFalse(getattr(self.client, 'images', []), 'senza controllo i sincronizzati si saltano')
+            ok, skip, err = self.engine.sync_images_to_prestashop(log, product_ids=tmpl.ids, check=True)
+        self.assertEqual((ok, err), (1, 0))
+        self.assertEqual(self.client.deleted_images, [720])
+        self.assertEqual(len(self.client.images), 1)
+
+    def test_export_requeues_product_whose_images_were_cut(self):
+        tmpls = self.env['product.template'].create(
+            [{'name': f'ZZT foto {i}', 'type': 'consu', 'list_price': 10.0} for i in range(2)])
+        log = self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'export_products', 'state': 'running'})
+
+        def cut_images(engine, tmpl, lines, force=False):
+            engine._images_cut = True
+            return 1
+        with patch.object(SyncEngine, '_push_images', cut_images), \
+                patch.object(SyncEngine, '_ps_price', return_value=10.0), \
+                patch.object(SyncEngine, '_ps_manufacturer_id', return_value=0):
+            self.engine.export_products_to_ps(log, product_ids=tmpls.ids)
+        self.assertEqual(len(self.client.created_products), 1)
+        follow = self.env['ke.prestashop.sync.log'].search([('state', '=', 'queued')], order='id desc', limit=1)
+        import json
+        self.assertEqual(sorted(json.loads(follow.job_kwargs)['product_ids']), sorted(tmpls.ids),
+                         'il prodotto interrotto si riprende nel turno dopo')
 
     def test_order_row_goes_to_bought_combination(self):
         tmpl = self._family()
@@ -682,3 +838,88 @@ class TestPsMultilang(TransactionCase):
                 3: {'name': 'Moulinet Odoo'}})
         prod = ET.fromstring(sent['xml']).find('product')
         self.assertEqual(prod.find('name/language[@id="3"]').text, 'Moulinet Odoo', 'con "Aggiorna testi": sempre')
+
+
+@tagged('post_install', '-at_install')
+class TestPsFamilyModes(TransactionCase):
+    """Famiglie (2026-11-13): combinazioni con sostituzione dei vecchi prodotti, oppure prodotti separati."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(self.env.cr, 'commit', lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = FakePsClient()
+        self.client.existing = {'ZZT-R': 700}
+        self.client.find_product_by_reference = lambda ref: self.client.existing.get(ref)
+        self.client.find_product_by_barcode = lambda code: None
+        self.client.retired = []
+        self.client.retire_product = lambda ps_id, redirect_to: self.client.retired.append((ps_id, redirect_to))
+        self.engine = SyncEngine(self.env, self.client)
+        self.params = self.env['ir.config_parameter'].sudo()
+        attr = self.env['product.attribute'].create({'name': 'ZZT Colore fam', 'create_variant': 'always'})
+        vals = self.env['product.attribute.value'].create(
+            [{'name': n, 'attribute_id': attr.id} for n in ('Rosso', 'Blu')])
+        self.tmpl = self.env['product.template'].create({
+            'name': 'ZZT Famiglia', 'type': 'consu', 'list_price': 10.0,
+            'attribute_line_ids': [(0, 0, {'attribute_id': attr.id, 'value_ids': [(6, 0, vals.ids)]})]})
+        red, blue = self.tmpl.product_variant_ids.sorted(
+            lambda v: v.product_template_attribute_value_ids.name)[::-1][:2]
+        red.default_code, blue.default_code = 'ZZT-R', 'ZZT-B'
+        self.red, self.blue = red, blue
+
+    def _export(self):
+        with patch.object(SyncEngine, '_ps_price', return_value=10.0), \
+                patch.object(SyncEngine, '_ps_manufacturer_id', return_value=0):
+            return self.engine._export_variants_separately(self.tmpl, []) if self.engine._separate_variants() \
+                else self.engine._export_configurable(self.tmpl, [])
+
+    def test_combinations_retire_old_variant_products(self):
+        self.params.set_param('ke_prestashop_sync.family_mode', 'combinations')
+        self.assertEqual(self._export(), 'created')
+        family_id = self.tmpl.ps_product_id
+        self.assertEqual(self.client.retired, [(700, family_id)], 'vecchio prodotto del rosso: 301 alla famiglia')
+        self.assertEqual(self.red.ps_legacy_product_id, 700)
+        self.assertFalse(self.blue.ps_legacy_product_id)
+        self._export()
+        self.assertEqual(len(self.client.retired), 1, 'già sostituito: non si ripete')
+
+    def test_combinations_keep_old_products_if_asked(self):
+        self.params.set_param('ke_prestashop_sync.family_mode', 'combinations')
+        self.params.set_param('ke_prestashop_sync.keep_legacy_products', 'True')
+        self._export()
+        self.assertEqual(self.client.retired, [])
+
+    def test_separate_products_link_existing_and_create_missing(self):
+        self.params.set_param('ke_prestashop_sync.family_mode', 'separate')
+        self.assertEqual(self._export(), 'created')
+        self.assertEqual(self.red.ps_variant_product_id, 700, 'rosso: già sul negozio, collegato')
+        self.assertTrue(self.blue.ps_variant_product_id and self.blue.ps_variant_product_id != 700)
+        self.assertFalse(self.tmpl.ps_product_id, 'nessun prodotto famiglia')
+        self.assertEqual(self.client.created_combinations, [])
+        updated = dict(self.client.product_updates)
+        self.assertIn('Rosso', updated[700]['name'])
+        created = self.client.created_products[-1]
+        self.assertIn('Blu', created['name'])
+        self.assertEqual(created['reference'], 'ZZT-B')
+        self.assertTrue(created['link_rewrite'].endswith('-Blu'))
+
+    def test_order_row_goes_to_variant_of_separate_or_retired_product(self):
+        self.red.ps_variant_product_id = 701
+        self.blue.ps_legacy_product_id = 702
+        Variant = self.env['product.product']
+        for ps_id, expected in ((701, self.red), (702, self.blue)):
+            hit = Variant.search(['|', ('ps_variant_product_id', '=', ps_id), ('ps_legacy_product_id', '=', ps_id)])
+            self.assertEqual(hit, expected)
+
+    def test_wizard_mode_overrides_settings(self):
+        self.params.set_param('ke_prestashop_sync.family_mode', 'combinations')
+        wiz = self.env['ke.ps.product.export'].create({'export_mode': 'selected', 'product_ids': [(6, 0, self.tmpl.ids)],
+                                                       'only_in_stock': False, 'family_mode': 'separate'})
+        self.assertTrue(wiz.family_mode_changed)
+        log = self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'export_products', 'state': 'running'})
+        with patch.object(SyncEngine, '_ps_price', return_value=10.0), \
+                patch.object(SyncEngine, '_ps_manufacturer_id', return_value=0):
+            self.engine.export_products_to_ps(log, product_ids=self.tmpl.ids, family_mode='separate')
+        self.assertEqual(self.red.ps_variant_product_id, 700)
+        self.assertFalse(self.tmpl.ps_product_id)

@@ -71,9 +71,31 @@ class PsApiClient:
             pass
         return (text or '').strip().replace('\n', ' ')[:500]
 
+    @staticmethod
+    def _only_php_warnings(resp):
+        """
+        True se la risposta di errore contiene solo avvisi PHP (code 3, "[PHP
+        Warning…"): PrestaShop ha eseguito l'operazione e risponde 500 solo per
+        gli avvisi nati scrivendo la risposta (2026-11-13: "Undefined array
+        key 2…5" in WebserviceOutputJSON per le lingue senza testo, a
+        prodotto già creato: Odoo lo credeva fallito e lo ricreava).
+        """
+        if resp.status_code != 500:
+            return False
+        try:
+            data = resp.json()
+        except ValueError:
+            return False
+        errors = data.get('errors') if isinstance(data, dict) else None
+        return bool(errors) and len(data) > 1 and all(
+            str(e.get('code')) == '3' and str(e.get('message', '')).startswith('[PHP ') for e in errors)
+
     def _check(self, resp, what):
         """Solleva un'eccezione leggibile (con il messaggio PS) se la risposta non è OK."""
         if resp.ok:
+            return
+        if self._only_php_warnings(resp):
+            _log.warning('PS %s → HTTP 500 con soli avvisi PHP: operazione eseguita, avvisi ignorati.', what)
             return
         detail = self._ps_error_detail(resp.text)
         _log.error('PS %s → HTTP %s: %s', what, resp.status_code, resp.text[:1000])
@@ -210,6 +232,27 @@ class PsApiClient:
         self._check(resp, f'GET images/products/{ps_id}')
         return [int(x) for x in re.findall(r'<declination[^>]*\bid="(\d+)"', resp.text or '')]
 
+    def image_missing_on_disk(self, ps_id, image_id):
+        """True solo se PS conferma che il file dell'immagine non c'è (code 61).
+
+        Immagine registrata nel DB ma senza file (es. DB copiato senza la
+        cartella img/): sul sito appare rotta. HEAD basta per quelle buone
+        (200, nessun download); su un errore si legge il codice con una GET.
+        Ogni altro esito (rete, timeout, altri errori) → False: nel dubbio
+        l'immagine si considera buona e non si tocca.
+        """
+        url = f'{self._url}/api/images/products/{ps_id}/{image_id}'
+        params = self._ps_key_param() or None
+        try:
+            if requests.head(url, params=params, timeout=30).status_code == 200:
+                return False
+            resp = requests.get(url, params=params, timeout=30)
+        except requests.RequestException:
+            return False
+        return (resp.status_code == 500
+                and re.search(r'<code><!\[CDATA\[61\]\]></code>', resp.text or '') is not None
+                and 'does not exist on disk' in (resp.text or ''))
+
     def delete_product_image(self, ps_id, image_id):
         url = f'{self._url}/api/images/products/{ps_id}/{image_id}'
         resp = requests.delete(url, params=self._ps_key_param() or None, timeout=30)
@@ -253,6 +296,13 @@ class PsApiClient:
             el = root.find(xpath)
             if el is not None:
                 el.text = value
+        if resource == 'products':
+            # Campi di sola lettura: rimandati indietro danno HTTP 400 (code 93/135).
+            prod = root.find('product')
+            for tag in self._PRODUCT_READONLY:
+                el = prod.find(tag) if prod is not None else None
+                if el is not None:
+                    prod.remove(el)
         xml_bytes = ET.tostring(root, encoding='utf-8', xml_declaration=True)
         self._put_xml(resource, resource_id, xml_bytes)
 
@@ -260,6 +310,18 @@ class PsApiClient:
         """Aggiorna il prezzo di un prodotto su PS (GET → modifica → PUT)."""
         self._update_resource_fields('products', ps_id, {
             './/product/price': f'{float(new_price):.6f}',
+        })
+
+    def get_default_combination(self, ps_id):
+        """ID della combinazione predefinita del prodotto (0 se non ne ha)."""
+        # Campo virtuale: c'è nell'XML, non nella risposta JSON.
+        root = ET.fromstring(self._get_xml_str('products', ps_id))
+        return int((root.findtext('.//product/id_default_combination') or '0').strip() or 0)
+
+    def set_default_combination(self, ps_id, combo_id):
+        """Rende predefinita una combinazione (campo id_default_combination del prodotto)."""
+        self._update_resource_fields('products', ps_id, {
+            './/product/id_default_combination': str(int(combo_id)),
         })
 
     def update_product_active(self, ps_id, active):
@@ -306,6 +368,37 @@ class PsApiClient:
             return None
         return int(products[0]['id']) if products else None
 
+    def find_product_by_barcode(self, barcode):
+        """Prodotto PS con questo EAN-13 (o UPC a 12 cifre); l'ID o None."""
+        ean13, upc = self._split_barcode(barcode)
+        if not (ean13 or upc):
+            return None
+        field, value = ('ean13', ean13) if ean13 else ('upc', upc)
+        data = self._get_json('products', {'display': '[id]', f'filter[{field}]': f'[{value}]'})
+        products = (data.get('products') or []) if isinstance(data, dict) else []
+        return int(products[0]['id']) if products and isinstance(products, list) else None
+
+    def retire_product(self, ps_id, redirect_to):
+        """
+        Disattiva un prodotto PS con redirect 301 a un altro (2026-11-13: le
+        varianti che in produzione erano prodotti separati, sostituite dalla
+        famiglia con combinazioni): chi apre il vecchio indirizzo arriva alla
+        famiglia, il posizionamento passa al prodotto nuovo.
+        """
+        root = ET.fromstring(self._get_xml_str('products', ps_id))
+        prod = root.find('product')
+        for tag, value in (('active', '0'), ('redirect_type', '301-product'),
+                           ('id_type_redirected', str(int(redirect_to)))):
+            el = prod.find(tag)
+            if el is None:
+                el = ET.SubElement(prod, tag)
+            el.text = value
+        for tag in self._PRODUCT_READONLY:
+            el = prod.find(tag)
+            if el is not None:
+                prod.remove(el)
+        self._put_xml('products', ps_id, ET.tostring(root, encoding='utf-8', xml_declaration=True))
+
     @staticmethod
     def _split_barcode(code):
         """(ean13, upc): PS accetta EAN-13 (13 cifre) e UPC (12 cifre) in campi distinti."""
@@ -339,9 +432,9 @@ class PsApiClient:
         if tag == 'description_short':
             return value[:450]
         if tag == 'meta_title':
-            return value[:self._META_TITLE_MAX]
+            return self._clean_meta(value)[:self._META_TITLE_MAX]
         if tag == 'meta_description':
-            return value[:self._META_DESCRIPTION_MAX]
+            return self._clean_meta(value)[:self._META_DESCRIPTION_MAX]
         return value
 
     def _translated_values(self, tag, translations):
@@ -407,6 +500,11 @@ class PsApiClient:
             if cid and cid not in out:
                 out.append(cid)
         return out
+
+    @staticmethod
+    def _clean_meta(value):
+        """Meta title/description: PS (isGenericName) rifiuta < > = { } (2026-11-13: "meta_description non è valida")."""
+        return re.sub(r'\s+', ' ', re.sub(r'[<>={}]', ' ', value or '')).strip()
 
     @staticmethod
     def _clean_name(name):
@@ -527,9 +625,9 @@ class PsApiClient:
         if description:
             texts.append(('description', description))
         if meta_title:
-            texts.append(('meta_title', meta_title[:self._META_TITLE_MAX]))
+            texts.append(('meta_title', self._clean_meta(meta_title)[:self._META_TITLE_MAX]))
         if meta_description:
-            texts.append(('meta_description', meta_description[:self._META_DESCRIPTION_MAX]))
+            texts.append(('meta_description', self._clean_meta(meta_description)[:self._META_DESCRIPTION_MAX]))
         if link_rewrite:
             texts.append(('link_rewrite', self._make_slug(link_rewrite)))
         for tag, value in (texts if replace_texts else []):

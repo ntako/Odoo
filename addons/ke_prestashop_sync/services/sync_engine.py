@@ -42,6 +42,10 @@ class SyncEngine:
     # (limit_time_real): 2026-11-11 un export di 334 prodotti si è fermato a
     # 25, ucciso a metà. Si lavora a turni e si riaccoda il resto.
     _EXPORT_TIME_BUDGET_S = 75
+    # Oltre questo tempo dall'inizio del turno non si carica più nessuna
+    # immagine (2026-11-13): un prodotto con molte foto (3-4 s l'una) iniziato
+    # a fine turno superava i 120 s e Odoo uccideva il cron, perdendo il job.
+    _TURN_HARD_LIMIT_S = 100
 
     def __init__(self, env, client):
         self.env = env
@@ -124,6 +128,45 @@ class SyncEngine:
 
     def _force_texts(self):
         return self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.force_texts') in ('True', '1')
+
+    def _find_existing(self, reference, barcode, exclude=()):
+        """Prodotto già su PS con questo riferimento o, in mancanza, questo EAN; 0 se nessuno."""
+        ps_id = self.client.find_product_by_reference(reference) if reference else None
+        if not ps_id and barcode and hasattr(self.client, 'find_product_by_barcode'):
+            ps_id = self.client.find_product_by_barcode(barcode)
+        return 0 if not ps_id or ps_id in exclude else int(ps_id)
+
+    def _separate_variants(self):
+        """Modalità "varianti come prodotti separati" (impostazione, 2026-11-13)."""
+        return (getattr(self, '_family_mode', None) or self._param('family_mode')) == 'separate'
+
+    def _keep_legacy(self):
+        return self.env['ir.config_parameter'].sudo().get_param('ke_prestashop_sync.keep_legacy_products') in ('True', '1')
+
+    def _retire_legacy_variants(self, tmpl, ps_id, lines):
+        """
+        Varianti di una famiglia che sul negozio erano prodotti separati
+        (catalogo di produzione, 2026-11-13: 3.058 prodotti semplici, nessuna
+        combinazione): disattivati con redirect 301 alla famiglia appena
+        pubblicata. Solo varianti con la combinazione già creata.
+        """
+        if self._keep_legacy():
+            return 0
+        retired = 0
+        for variant in tmpl.product_variant_ids.filtered(lambda v: v.ps_combination_id and not v.ps_legacy_product_id):
+            legacy = (variant.ps_variant_product_id if variant.ps_variant_product_id != ps_id else 0) or \
+                self._find_existing(self._ps_reference(variant.default_code), variant.barcode or '', exclude=(ps_id,))
+            if not legacy:
+                continue
+            try:
+                self.client.retire_product(legacy, ps_id)
+            except Exception as exc:
+                lines.append(f'[ERR] {variant.display_name}: prodotto PS {legacy} non disattivato: {exc}')
+                continue
+            variant.write({'ps_legacy_product_id': legacy})
+            lines.append(f'[SOSTITUITO] {variant.display_name}: prodotto PS {legacy} disattivato, redirect 301 → {ps_id}')
+            retired += 1
+        return retired
 
     def _force_category(self, tmpl=None):
         """Sostituire la categoria sul negozio: con l'opzione delle Impostazioni o se è forzata sul prodotto (scelta esplicita)."""
@@ -283,7 +326,31 @@ class SyncEngine:
             )
             lines.append(f'[STOCK] {label}: {ps_qty} → {int(qty)}')
             ok += 1
+        if self._is_configurable(tmpl):
+            self._ensure_default_in_stock(
+                tmpl, [(combo_id, int(qty), label) for stock_rec, combo_id, qty, label in targets if stock_rec],
+                lines)
         return ok, skip
+
+    def _ensure_default_in_stock(self, tmpl, combos, lines):
+        """Combinazione predefinita sempre disponibile, se ce n'è una.
+
+        PS apre la pagina sulla predefinita e, quando è a zero mentre altre
+        hanno giacenza, nelle liste mostra "Prodotto disponibile con diverse
+        opzioni". Si cambia solo se la predefinita attuale è a zero: con
+        giacenza resta quella scelta (anche a mano dal back office).
+        combos: [(combo_id, quantità, etichetta)] nell'ordine delle varianti Odoo.
+        """
+        available = [c for c in combos if c[1] > 0]
+        if not available or len(available) == len(combos):
+            return
+        qty_by_combo = {c[0]: c[1] for c in combos}
+        current = self.client.get_default_combination(tmpl.ps_product_id)
+        if qty_by_combo.get(current, 0) > 0:
+            return
+        combo_id, _qty, label = available[0]
+        self.client.set_default_combination(tmpl.ps_product_id, combo_id)
+        lines.append(f'[PREDEFINITA] {tmpl.name}: combinazione predefinita → {label} (disponibile)')
 
     def _tick(self, log_rec, done, total, lines, counters):
         """Aggiorna il log con l'avanzamento (ogni _PROGRESS_EVERY elementi),
@@ -352,6 +419,21 @@ class SyncEngine:
             if self._tick(log_rec, i, total, lines, counters):
                 self._finalize_cancelled(log_rec, lines, counters)
                 return ok, skip, err
+
+        # Modalità prodotti separati: le varianti col loro prodotto PS.
+        variants = self.env['product.product'].search([
+            ('ps_variant_product_id', '>', 0), ('product_tmpl_id.ps_sync_enabled', '=', True)])
+        if variants:
+            qty_v = self._free_qty_by_variant(variants)
+            for variant in variants:
+                try:
+                    if self._push_variant_stock(variant, lines, qty_v.get(variant.id, 0)):
+                        ok += 1
+                    else:
+                        skip += 1
+                except Exception as exc:
+                    lines.append(f'[ERR] {variant.display_name} (ps_id={variant.ps_variant_product_id}): {exc}')
+                    err += 1
 
         log_rec.write({
             'state': 'done' if err == 0 else 'error',
@@ -441,6 +523,25 @@ class SyncEngine:
             if self._tick(log_rec, i, total, lines, counters):
                 self._finalize_cancelled(log_rec, lines, counters)
                 return ok, skip, err
+
+        for variant in self.env['product.product'].search([
+                ('ps_variant_product_id', '>', 0), ('product_tmpl_id.ps_sync_enabled', '=', True)]):
+            try:
+                ps_price = float(self.client.get_product(variant.ps_variant_product_id).get('price', 0) or 0)
+                odoo_price = self._ps_price(variant)
+                if abs(ps_price - odoo_price) < 0.001:
+                    skip += 1
+                    continue
+                self.client.update_product_price(variant.ps_variant_product_id, odoo_price)
+                lines.append(f'[OK] {variant.display_name}: {ps_price:.4f} → {odoo_price:.4f}')
+                ok += 1
+            except PsResourceNotFound:
+                variant.write({'ps_variant_product_id': 0})
+                lines.append(f'[ORPHAN] {variant.display_name}: prodotto PS inesistente, link azzerato')
+                skip += 1
+            except Exception as exc:
+                lines.append(f'[ERR] {variant.display_name}: {exc}')
+                err += 1
 
         log_rec.write({
             'state': 'done' if err == 0 else 'error',
@@ -621,9 +722,30 @@ class SyncEngine:
         qty = self._free_qty_by_variant(variants, warehouse)
         return variants.filtered(lambda v: qty.get(v.id, 0) > 0).product_tmpl_id.ids
 
+    def _start_turn(self):
+        """Inizio di un turno del cron: azzera il limite rigido per le immagini."""
+        started = time.monotonic()
+        self._deadline = started + self._TURN_HARD_LIMIT_S
+        self._images_cut = False
+        return started
+
+    def _out_of_time(self):
+        deadline = getattr(self, '_deadline', None)
+        return deadline is not None and time.monotonic() > deadline
+
+    def _requeue_export(self, rest, lines, **kwargs):
+        lines.append(f'[CONTINUA] turno finito: restano {len(rest)} prodotti, accodato il turno successivo')
+        self.env['ke.prestashop.sync.log'].enqueue(
+            'export_products', 'export_products_to_ps',
+            label=f'Export prodotti → PS (segue, {len(rest)} prodotti) — '
+                  f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            product_ids=rest.ids, **kwargs)
+
     def export_products_to_ps(self, log_rec, product_ids=None, full_resync=False,
-                              only_in_stock=False, warehouse_id=None):
+                              only_in_stock=False, warehouse_id=None, family_mode=None):
         """
+        family_mode: 'combinations' | 'separate' scelto nel wizard per questo
+        export (2026-11-13); vuoto = quello delle Impostazioni.
         Esporta i prodotti Odoo su PrestaShop.
         - Template con 1 variante → prodotto semplice PS.
         - Template con N varianti (attributi Odoo) → prodotto PS con combinazioni.
@@ -634,6 +756,7 @@ class SyncEngine:
         only_in_stock=True limita ai prodotti con disponibilità libera > 0 nel
         magazzino warehouse_id.
         """
+        self._family_mode = family_mode or None
         all_candidates = self.export_candidates(
             product_ids, full_resync, only_in_stock, warehouse_id)
 
@@ -647,26 +770,19 @@ class SyncEngine:
         total = len(products)
         created = updated = skipped = err = 0
         lines = []
-        started = time.monotonic()
+        started = self._start_turn()
         time_cut = False
+        requeue = dict(full_resync=full_resync, only_in_stock=only_in_stock,
+                       warehouse_id=warehouse_id, family_mode=family_mode)
 
         for i, tmpl in enumerate(products, 1):
             if i > 1 and time.monotonic() - started > self._EXPORT_TIME_BUDGET_S:
-                rest = all_candidates[i - 1:]
-                lines.append(f'[CONTINUA] turno di {self._EXPORT_TIME_BUDGET_S} s finito: restano {len(rest)} '
-                             f'prodotti, accodato il turno successivo')
-                self.env['ke.prestashop.sync.log'].enqueue(
-                    'export_products', 'export_products_to_ps',
-                    label=f'Export prodotti → PS (segue, {len(rest)} prodotti) — '
-                          f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
-                    product_ids=rest.ids, full_resync=full_resync,
-                    only_in_stock=only_in_stock, warehouse_id=warehouse_id,
-                )
+                self._requeue_export(all_candidates[i - 1:], lines, **requeue)
                 time_cut = True
                 break
             try:
                 if self._is_configurable(tmpl):
-                    res = self._export_configurable(tmpl, lines)
+                    res = (self._export_variants_separately(tmpl, lines) if self._separate_variants() else self._export_configurable(tmpl, lines))
                     if res == 'created':
                         created += 1
                     elif res == 'updated':
@@ -692,9 +808,16 @@ class SyncEngine:
             counters = {'products_total': created + updated + skipped + err,
                         'products_created': created, 'products_updated': updated,
                         'products_skipped': skipped, 'products_error': err}
-            if self._tick(log_rec, i, total, lines, counters):
+            if self._images_cut:
+                # Immagini interrotte a fine turno: il prodotto si riprende
+                # (con le immagini mancanti) nel turno successivo.
+                self._requeue_export(all_candidates[i - 1:], lines, **requeue)
+                time_cut = True
+            if self._tick(log_rec, total if time_cut else i, total, lines, counters):
                 self._finalize_cancelled(log_rec, lines, counters)
                 return created, updated, err
+            if time_cut:
+                break
 
         # --- Lotto successivo: riaccoda un export per i prodotti rimanenti ---
         if not time_cut and auto_continue and remaining > 0 and (created + updated) > 0:
@@ -705,7 +828,7 @@ class SyncEngine:
                 'export_products', 'export_products_to_ps',
                 label=f'Export prodotti → PS (segue) — '
                       f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
-                only_in_stock=only_in_stock, warehouse_id=warehouse_id,
+                only_in_stock=only_in_stock, warehouse_id=warehouse_id, family_mode=family_mode,
             )
 
         # --- Prodotti archiviati in Odoo → disattiva su PS (solo ultimo lotto) ---
@@ -758,8 +881,8 @@ class SyncEngine:
                 lines.append(f'[RELINK] {tmpl.name}: ps_id={ps_id} inesistente su PS, ricreo')
                 tmpl.write({'ps_product_id': 0, 'ps_image_synced': False})
                 ps_id = 0
-        if not ps_id and vals['reference']:
-            ps_id = self.client.find_product_by_reference(vals['reference']) or 0
+        if not ps_id and (vals['reference'] or vals['ean13']):
+            ps_id = self._find_existing(vals['reference'], vals['ean13'])
             if ps_id:
                 tmpl.write({'ps_product_id': ps_id})
                 self.client.update_product(ps_id, replace_category=self._force_category(tmpl),
@@ -780,6 +903,113 @@ class SyncEngine:
         if not tmpl.ps_image_synced:
             self._push_images(tmpl, lines)
         return result
+
+    def _variant_suffix(self, variant, lang=None):
+        """Valori della variante per il nome ("Rosso, XL"), nella lingua indicata."""
+        v = variant.with_context(lang=lang) if lang else variant
+        return ', '.join(v.product_template_attribute_value_ids.mapped('name'))
+
+    def _variant_product_vals(self, tmpl, variant, lines):
+        """Dati del prodotto semplice PS di una variante (modalità prodotti separati)."""
+        vals = self._ps_product_vals(tmpl, lines, reference=variant.default_code or '', ean13=variant.barcode or '')
+        suffix = self._variant_suffix(variant, self._ps_lang())
+        if suffix:
+            vals['name'] = f"{vals['name']} - {suffix}"
+            vals['link_rewrite'] = f"{vals['link_rewrite']}-{suffix}"
+        vals['price'] = self._ps_price(variant)
+        lang_by_ps = self._ps_lang_map()
+        for ps_lang_id, texts in vals.get('translations', {}).items():
+            loc_suffix = self._variant_suffix(variant, lang_by_ps.get(ps_lang_id))
+            if loc_suffix and texts.get('name'):
+                texts['name'] = f"{texts['name']} - {loc_suffix}"
+                texts['link_rewrite'] = f"{texts.get('link_rewrite') or texts['name']}-{loc_suffix}"
+        return vals
+
+    def _export_variants_separately(self, tmpl, lines):
+        """
+        Modalità "varianti come prodotti separati" (2026-11-13, com'è il
+        negozio di produzione: 3.058 prodotti semplici, nessuna combinazione):
+        ogni variante è un prodotto semplice PS, collegato in
+        ps_variant_product_id; quello già sul negozio si trova per
+        riferimento o EAN e si aggiorna. Giacenza e immagini per variante.
+        Restituisce: 'created' | 'updated' | 'err'
+        """
+        created = updated = errors = 0
+        for variant in tmpl.product_variant_ids:
+            try:
+                vals = self._variant_product_vals(tmpl, variant, lines)
+                ps_id = variant.ps_variant_product_id
+                if ps_id:
+                    try:
+                        self.client.update_product(ps_id, replace_category=self._force_category(tmpl),
+                                                   replace_texts=self._force_texts(), product_type='standard', **vals)
+                    except PsResourceNotFound:
+                        lines.append(f'[RELINK] {variant.display_name}: ps_id={ps_id} inesistente su PS, ricreo')
+                        ps_id = 0
+                if not ps_id:
+                    ps_id = self._find_existing(vals['reference'], vals['ean13'])
+                    if ps_id:
+                        self.client.update_product(ps_id, replace_category=self._force_category(tmpl),
+                                                   replace_texts=self._force_texts(), product_type='standard', **vals)
+                        lines.append(f'[LINK] {variant.display_name} → ps_id={ps_id}')
+                if not ps_id:
+                    ps_id = self.client.create_product(**vals)
+                    if not ps_id:
+                        lines.append(f'[ERR] {variant.display_name}: nessun ID restituito da PS')
+                        errors += 1
+                        continue
+                    lines.append(f'[NEW→PS] {variant.display_name} → ps_id={ps_id}')
+                    created += 1
+                else:
+                    updated += 1
+                variant.write({'ps_variant_product_id': ps_id})
+                self._push_variant_stock(variant, lines)
+                self._push_variant_images(variant, ps_id, lines)
+            except Exception as exc:
+                _log.warning('export variante separata %s: %s', variant.display_name, exc, exc_info=True)
+                lines.append(f'[ERR] {variant.display_name}: {exc}')
+                errors += 1
+        tmpl.write({'ps_sync_enabled': True, 'ps_last_sync_date': fields.Datetime.now()})
+        if errors and not (created or updated):
+            return 'err'
+        return 'created' if created else 'updated'
+
+    def _push_variant_stock(self, variant, lines, qty=None):
+        """Giacenza del prodotto semplice PS di una variante (modalità prodotti separati)."""
+        ps_id = variant.ps_variant_product_id
+        if qty is None:
+            qty = self._free_qty_by_variant(variant).get(variant.id, 0)
+        recs = self.client.get_stock_availables(ps_id)
+        rec = next((r for r in recs if int(r.get('id_product_attribute', 0)) == 0), recs[0] if recs else None)
+        if not rec:
+            lines.append(f'[SKIP] {variant.display_name}: nessuna giacenza PS')
+            return 0
+        if int(rec.get('quantity', 0) or 0) == int(qty):
+            return 0
+        self.client.update_stock_available(stock_id=int(rec['id']), ps_product_id=ps_id,
+                                           ps_attribute_id=0, quantity=qty)
+        lines.append(f'[STOCK] {variant.display_name}: {int(rec.get("quantity", 0) or 0)} → {int(qty)}')
+        return 1
+
+    def _push_variant_images(self, variant, ps_id, lines):
+        """Immagini della variante sul suo prodotto PS, solo se non ne ha già."""
+        if self.client.get_product_image_ids(ps_id):
+            return 0
+        if self._out_of_time():
+            # Senza immagini su PS: le carica il turno successivo.
+            self._images_cut = True
+            lines.append(f'[IMG] {variant.display_name}: immagini al prossimo turno (tempo del turno finito)')
+            return 0
+        uploaded = 0
+        for kind, value in self._image_sources(variant)[:self._MAX_IMAGES]:
+            try:
+                if self.client.upload_product_image(ps_id, self._image_bytes(kind, value)):
+                    uploaded += 1
+            except Exception as exc:
+                _log.warning('Immagine %s per %s non caricata: %s', str(value)[:80], variant.display_name, exc)
+        if uploaded:
+            lines.append(f'[IMG] {variant.display_name}: {uploaded} immagini')
+        return uploaded
 
     def _export_configurable(self, tmpl, lines):
         """
@@ -853,6 +1083,8 @@ class SyncEngine:
                 lines.append(f'[ERR] {variant.display_name}: {exc}')
                 err_combos += 1
 
+        if ok_combos:
+            self._retire_legacy_variants(tmpl, ps_id, lines)
         n_tot = len(tmpl.product_variant_ids)
         tag = '[NEW-CONFIG]' if created_parent else '[UPD-CONFIG]'
         lines.append(f'{tag} {tmpl.name} → ps_id={ps_id} | combinazioni: {ok_combos}/{n_tot}')
@@ -904,38 +1136,81 @@ class SyncEngine:
         resp.raise_for_status()
         return resp.content
 
-    def _push_images(self, tmpl, lines, force=False):
+    def _push_images(self, tmpl, lines, force=False, quiet=False):
         """
         Immagini del prodotto su PS (2026-11-11, prima solo l'immagine
         principale e solo dalla sync immagini): tutta la galleria
         (ke.product.media, principale per prima = copertina); nelle famiglie
         quella di ogni variante, associata alla sua combinazione (immagini in
         comune caricate una volta sola). force: cancella prima le immagini già
-        su PS. Ritorna il numero di immagini caricate.
+        su PS. quiet: niente riga di log per i prodotti con le foto già a
+        posto (controllo immagini). Ritorna il numero di immagini caricate.
         """
         ps_id = tmpl.ps_product_id
         if not ps_id:
             return 0
-        if force:
-            for image_id in self.client.get_product_image_ids(ps_id):
+        existing = self.client.get_product_image_ids(ps_id)
+        resume = []
+        if existing and tmpl.ps_image_incomplete:
+            # Caricamento interrotto a fine turno (anche di una sync forzata):
+            # le prime immagini ci sono già (PS le numera in ordine di
+            # caricamento), si prosegue da lì.
+            resume = sorted(existing)
+        elif force:
+            for image_id in existing:
                 self.client.delete_product_image(ps_id, image_id)
+        elif existing:
+            # Prodotto che sul negozio ha già le sue foto (es. trovato per
+            # riferimento nel catalogo di produzione, 2026-11-13): non si
+            # aggiungono doppioni; per sostituirle, sync immagini forzata.
+            # Solo se le foto ci sono davvero: registrate senza file (DB
+            # copiato senza img/) sul sito appaiono rotte. Tutte rotte → si
+            # tolgono e si carica la galleria Odoo; alcune rotte → solo
+            # segnalate, le buone non si toccano mai.
+            broken = [i for i in existing if self.client.image_missing_on_disk(ps_id, i)]
+            if len(broken) < len(existing):
+                tmpl.write({'ps_image_synced': True})
+                if broken:
+                    lines.append(f'[IMG] {tmpl.name}: {len(broken)} immagini su {len(existing)} senza file su PS '
+                                 f'(id {", ".join(map(str, broken))}), lasciate: le altre sono buone')
+                elif not quiet:
+                    lines.append(f'[IMG] {tmpl.name}: {len(existing)} immagini già su PS, non caricate')
+                return 0
+            for image_id in broken:
+                self.client.delete_product_image(ps_id, image_id)
+            lines.append(f'[IMG] {tmpl.name}: {len(broken)} immagini registrate su PS senza file, '
+                         f'tolte; carico quelle di Odoo')
         configurable = self._is_configurable(tmpl)
         variants = tmpl.product_variant_ids.filtered(lambda v: not configurable or v.ps_combination_id)
-        uploaded, by_combo, errors = {}, {}, 0
+        uploaded, by_combo, errors, cut = {}, {}, 0, False
         for variant in variants:
             for kind, value in self._image_sources(variant):
                 key = value if kind == 'url' else f'b64:{variant.id}'
                 if key not in uploaded and len(uploaded) < self._MAX_IMAGES:
-                    try:
-                        uploaded[key] = self.client.upload_product_image(ps_id, self._image_bytes(kind, value))
-                    except PsResourceNotFound:
-                        raise
-                    except Exception as exc:
-                        errors += 1
-                        _log.warning('Immagine %s per %s non caricata: %s', key[:80], tmpl.name, exc)
-                        continue
+                    if resume:
+                        uploaded[key] = resume.pop(0)
+                    elif self._out_of_time():
+                        cut = True
+                        break
+                    else:
+                        try:
+                            uploaded[key] = self.client.upload_product_image(ps_id, self._image_bytes(kind, value))
+                        except PsResourceNotFound:
+                            raise
+                        except Exception as exc:
+                            errors += 1
+                            _log.warning('Immagine %s per %s non caricata: %s', key[:80], tmpl.name, exc)
+                            continue
                 if configurable and uploaded.get(key):
                     by_combo.setdefault(variant.ps_combination_id, []).append(uploaded[key])
+            if cut:
+                break
+        if cut:
+            self._images_cut = True
+            tmpl.write({'ps_image_synced': False, 'ps_image_incomplete': True})
+            lines.append(f'[IMG] {tmpl.name}: {len(uploaded)} immagini caricate, '
+                         f'le altre al prossimo turno (tempo del turno finito)')
+            return len(uploaded)
         for combo_id, image_ids in by_combo.items():
             try:
                 self.client.set_combination_images(combo_id, image_ids)
@@ -943,35 +1218,45 @@ class SyncEngine:
                 errors += 1
                 _log.warning('Immagini della combinazione %s non associate: %s', combo_id, exc)
         if uploaded:
-            tmpl.write({'ps_image_synced': True})
+            tmpl.write({'ps_image_synced': True, 'ps_image_incomplete': False})
         lines.append(f'[IMG] {tmpl.name}: {len(uploaded)} immagini' + (f', {errors} errori' if errors else ''))
         return len(uploaded)
 
-    def sync_images_to_prestashop(self, log_rec, force=False):
+    def sync_images_to_prestashop(self, log_rec, force=False, product_ids=None, check=False):
         """
         Carica le immagini (galleria, vedi _push_images) di ogni prodotto collegato su PS.
         Se force=False, salta i prodotti con ps_image_synced=True; con force
-        sostituisce quelle già su PS.
+        sostituisce quelle già su PS. A turni come l'export (2026-11-13): finito
+        il tempo, il resto (product_ids) va in un nuovo job.
+        check=True ("Ripara immagini mancanti", 2026-11-13): anche i prodotti
+        già sincronizzati; si controlla che le foto su PS abbiano il file e a
+        quelli con tutte le foto rotte si carica la galleria Odoo.
         """
         domain = [('ps_product_id', '>', 0), ('ps_sync_enabled', '=', True)]
-        if not force:
+        if product_ids:
+            domain.append(('id', 'in', product_ids))
+        if not force and not check:
             domain.append(('ps_image_synced', '=', False))
 
         products = self._product_templates(domain)
         total = len(products)
         ok = skip = err = 0
         lines = []
+        started = self._start_turn()
 
         for i, tmpl in enumerate(products, 1):
             ps_id = tmpl.ps_product_id
             if not any(self._image_sources(v) for v in tmpl.product_variant_ids):
-                lines.append(f'[SKIP] {tmpl.name}: nessuna immagine in Odoo')
+                if not check:
+                    lines.append(f'[SKIP] {tmpl.name}: nessuna immagine in Odoo')
                 skip += 1
             else:
                 try:
-                    if self._push_images(tmpl, lines, force=force):
+                    if self._push_images(tmpl, lines, force=force, quiet=check):
                         tmpl.write({'ps_last_sync_date': fields.Datetime.now()})
                         ok += 1
+                    elif tmpl.ps_image_synced:
+                        skip += 1   # foto già su PS e buone
                     else:
                         err += 1
                 except PsResourceNotFound:
@@ -990,6 +1275,18 @@ class SyncEngine:
             if self._tick(log_rec, i, total, lines, counters):
                 self._finalize_cancelled(log_rec, lines, counters)
                 return ok, skip, err
+            # Finito il turno (o immagini interrotte): il resto in un nuovo job;
+            # il prodotto interrotto riparte dalle immagini mancanti.
+            cut = self._images_cut
+            if cut or (i < total and time.monotonic() - started > self._EXPORT_TIME_BUDGET_S):
+                rest = products[i - 1 if cut else i:]
+                lines.append(f'[CONTINUA] turno finito: restano {len(rest)} prodotti, accodato il turno successivo')
+                self.env['ke.prestashop.sync.log'].enqueue(
+                    'sync_images', 'sync_images_to_prestashop',
+                    label=f'Sync immagini → PS (segue, {len(rest)} prodotti) — '
+                          f'{fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}',
+                    force=force, product_ids=rest.ids, check=check)
+                break
 
         log_rec.write({
             'state': 'done' if err == 0 else 'error',
@@ -1034,12 +1331,13 @@ class SyncEngine:
         templates = self.env['product.template'].search([
             '|', ('ps_product_id', '!=', 0), ('ps_image_synced', '=', True),
         ])
-        variants = self.env['product.product'].search([('ps_combination_id', '!=', 0)])
+        variants = self.env['product.product'].with_context(active_test=False).search(
+            ['|', '|', ('ps_combination_id', '!=', 0), ('ps_variant_product_id', '!=', 0), ('ps_legacy_product_id', '!=', 0)])
         n_t, n_v = len(templates), len(variants)
         if templates:
             templates.write({'ps_product_id': 0, 'ps_image_synced': False})
         if variants:
-            variants.write({'ps_combination_id': 0})
+            variants.write({'ps_combination_id': 0, 'ps_variant_product_id': 0, 'ps_legacy_product_id': 0})
         self.env.cr.commit()
         return n_t, n_v
 
@@ -1132,7 +1430,12 @@ class SyncEngine:
             unit_price = float(row.get('unit_price_tax_excl', row.get('product_price', 0)))
             product_name = row.get('product_name', '')
 
-            product = self.env['product.template'].search(
+            # Prodotto PS di una variante (modalità prodotti separati) o
+            # sostituito dalla famiglia con combinazioni: la variante è quella.
+            own_variant = self.env['product.product'].search(
+                ['|', ('ps_variant_product_id', '=', ps_product_id),
+                 ('ps_legacy_product_id', '=', ps_product_id)], limit=1) if ps_product_id else None
+            product = own_variant.product_tmpl_id if own_variant else self.env['product.template'].search(
                 [('ps_product_id', '=', ps_product_id)], limit=1)
             if not product:
                 # Fallback: cerca per reference usando il nome
@@ -1140,7 +1443,7 @@ class SyncEngine:
                     [('name', '=ilike', product_name)], limit=1)
 
             if product:
-                variant = self._order_row_variant(product, row)
+                variant = own_variant or self._order_row_variant(product, row)
                 order_lines.append((0, 0, {
                     'product_id': variant.id,
                     'product_uom_qty': qty,
