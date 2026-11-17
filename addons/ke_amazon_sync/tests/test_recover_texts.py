@@ -100,3 +100,16 @@ class TestRecoverTexts(TransactionCase):
         self.assertFalse(client.calls)
         self.assertEqual((updated, skipped), (0, 0))
         self.assertIn('Restano senza testo proprio in it_IT: 0 nomi', self.log.log_lines)
+
+    def test_marketplaces_with_language_and_listings_even_if_inactive(self):
+        en = self.env['res.lang'].with_context(active_test=False).search([('code', '=', 'en_GB')])
+        en.active = True
+        uk = self.env['ke.amazon.marketplace'].create({
+            'name': 'ZZT UK testi', 'code': 'ZZTU', 'marketplace_id': 'ZZ_TXT_UK', 'lang_id': en.id, 'active': False})
+        tmpl = self._product('Caña UK Test', 'ZZT-RT-4', 'B0ZZRT0004', it_title='Canna UK Test')
+        self.env['ke.amazon.listing'].create({'product_id': tmpl.product_variant_id.id, 'marketplace_id': uk.id,
+                                              'asin': 'B0ZZRT0004', 'sku': 'ZZT-RT-4', 'item_name': 'Rod UK Test'})
+        found = self.env['res.config.settings']._recover_texts_marketplaces()
+        self.assertIn(uk, found, 'disattivato ma con lingua e inserzioni')
+        self.assertIn(self.it, found)
+        self.assertEqual(found[:1].lang_id.code, 'it_IT', 'prima l\'italiano')

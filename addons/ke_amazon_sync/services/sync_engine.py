@@ -2441,7 +2441,7 @@ class SyncEngine:
         Brand.search([('amazon_name', '=', False)])._propose_amazon_name()
         return updated
 
-    def recompute_family_names(self, templates=None):
+    def recompute_family_names(self, templates=None, extra_marketplaces=None):
         """
         Nome delle famiglie in ogni lingua dei marketplace attivi: la parte
         comune ai titoli Amazon delle varianti su quel marketplace
@@ -2461,6 +2461,10 @@ class SyncEngine:
         marketplaces = self.env['ke.amazon.marketplace'].search([
             ('active', '=', True), ('lang_id', '!=', False), ('lang_id.active', '=', True),
         ], order='sequence, id')
+        # Anche un marketplace disattivato con lingua (es. UK, recupero testi 2026-11-17).
+        for extra in (extra_marketplaces or self.env['ke.amazon.marketplace']):
+            if extra.lang_id.active and extra not in marketplaces:
+                marketplaces |= extra
         lang_by_marketplace = {}
         for marketplace in marketplaces:
             if marketplace.lang_id.code not in lang_by_marketplace.values():
@@ -4378,7 +4382,7 @@ class SyncEngine:
                 skipped += 1
 
         if families:
-            n = self.recompute_family_names(families)
+            n = self.recompute_family_names(families, extra_marketplaces=marketplace)
             lines.append(f'[FAMIGLIE] {len(families)} famiglie con nome da sistemare: '
                          f'{n} nomi ricalcolati dai titoli delle varianti (tutte le lingue dei marketplace)')
             updated += n

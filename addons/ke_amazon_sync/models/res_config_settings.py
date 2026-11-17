@@ -518,24 +518,36 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_download_images', log_rec.id)
         return self._open_log_action()
 
+    def _recover_texts_marketplaces(self):
+        """Marketplace con lingua attiva e inserzioni (anche se disattivati, es. UK: i testi servono al sito)."""
+        Marketplace = self.env['ke.amazon.marketplace'].with_context(active_test=False)
+        found = Marketplace.browse()
+        for mp in Marketplace.search([('lang_id', '!=', False), ('lang_id.active', '=', True)], order='sequence, id'):
+            if mp.lang_id in found.lang_id:
+                continue
+            if self.env['ke.amazon.listing'].search_count([('marketplace_id', '=', mp.id)], limit=1):
+                found |= mp
+        # Prima l'italiano (lingua principale del catalogo).
+        return found.sorted(lambda m: (m.lang_id.code != 'it_IT', m.sequence, m.id))
+
     def action_run_recover_texts(self):
-        """Recupera nome e descrizione italiani da Amazon IT (sola lettura Amazon), in background."""
+        """Recupera nomi e descrizioni nella lingua di ogni marketplace (sola lettura Amazon), in background."""
         self._validate_credentials()
-        marketplace = self.env['ke.amazon.marketplace'].search([
-            ('active', '=', True), ('lang_id.code', '=', 'it_IT'), ('lang_id.active', '=', True)], limit=1)
-        if not marketplace:
-            raise UserError('Nessun marketplace attivo con lingua italiana (Amazon → Marketplace, campo Lingua).')
+        marketplaces = self._recover_texts_marketplaces()
+        if not marketplaces:
+            raise UserError('Nessun marketplace con lingua attiva e inserzioni (Amazon → Marketplace, campo Lingua).')
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param('ke_amazon_sync.recover_texts_state') == 'running':
             raise UserError('Un recupero testi è già in corso.')
         log_rec = self.env['ke.amazon.sync.log'].create({
-            'name': f'Recupero testi italiani da Amazon {marketplace.code} — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'name': f'Recupero testi da Amazon ({", ".join(marketplaces.mapped("code"))}) — '
+                    f'{datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': 'recover_texts',
             'state': 'running',
             'start_date': datetime.now(),
         })
         params.set_param('ke_amazon_sync.recover_texts_state', 'running')
-        params.set_param('ke_amazon_sync.recover_texts_marketplace_id', str(marketplace.id))
+        params.set_param('ke_amazon_sync.recover_texts_marketplace_ids', ','.join(map(str, marketplaces.ids)))
         self.env.cr.commit()
         self._start_thread('_thread_recover_texts', log_rec.id)
         return self._open_log_action()
@@ -656,6 +668,7 @@ class ResConfigSettings(models.TransientModel):
 
     @api.model
     def _thread_recover_texts(self, db, uid, ctx, log_id):
+        """Un marketplace alla volta, ciascuno col suo log di dettaglio; riepilogo nel log principale."""
         from odoo import api as odoo_api
         from odoo.modules.registry import Registry as odoo_registry
         from ..services.sp_api_client import SpApiClient
@@ -663,17 +676,38 @@ class ResConfigSettings(models.TransientModel):
 
         with odoo_registry(db).cursor() as cr:
             env = odoo_api.Environment(cr, uid, ctx)
-            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            Log = env['ke.amazon.sync.log']
+            log_rec = Log.browse(log_id)
             params = env['ir.config_parameter'].sudo()
+            summary, total = [], [0, 0, 0]
             try:
-                marketplace = env['ke.amazon.marketplace'].browse(
-                    int(params.get_param('ke_amazon_sync.recover_texts_marketplace_id') or 0))
-                client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
-                ok, skipped, errors = SyncEngine(env, client).recover_marketplace_texts(log_rec, marketplace)
-                log_rec.write({'state': 'error' if errors else 'done', 'end_date': datetime.now()})
+                ids = [int(i) for i in (params.get_param('ke_amazon_sync.recover_texts_marketplace_ids') or '').split(',') if i]
+                for marketplace in env['ke.amazon.marketplace'].with_context(active_test=False).browse(ids):
+                    child = Log.create({
+                        'name': f'Recupero testi {marketplace.code} ({marketplace.lang_id.code})',
+                        'sync_type': 'recover_texts', 'state': 'running',
+                        'start_date': datetime.now(), 'parent_log_id': log_rec.id,
+                    })
+                    cr.commit()
+                    try:
+                        client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                        res = SyncEngine(env, client).recover_marketplace_texts(child, marketplace)
+                        child.write({'state': 'error' if res[2] else 'done', 'end_date': datetime.now()})
+                        last = (child.log_lines or '').splitlines()[-1:]
+                        summary.append(f'[{marketplace.code}] {res[0]} aggiornati, {res[1]} senza testo su Amazon, '
+                                       f'{res[2]} errori. ' + ' '.join(last))
+                        total = [a + b for a, b in zip(total, res)]
+                    except Exception as exc:
+                        cr.rollback()
+                        _log.error('Recupero testi %s fallito: %s', marketplace.code, exc, exc_info=True)
+                        child.write({'state': 'error', 'error_summary': str(exc), 'end_date': datetime.now()})
+                        summary.append(f'[{marketplace.code}] ERRORE: {exc}')
+                        total[2] += 1
+                    log_rec.write({'log_lines': '\n'.join(summary), 'products_updated': total[0],
+                                   'products_skipped': total[1], 'products_error': total[2]})
+                    cr.commit()
+                log_rec.write({'state': 'error' if total[2] else 'done', 'end_date': datetime.now()})
                 cr.commit()
-                _log.info('Recupero testi %s: %d aggiornati, %d senza testo, %d errori',
-                          marketplace.code, ok, skipped, errors)
             except Exception as exc:
                 cr.rollback()
                 _log.error('Thread recover_texts fallito: %s', exc, exc_info=True)
