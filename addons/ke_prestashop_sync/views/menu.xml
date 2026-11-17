@@ -38,10 +38,20 @@
               action="action_ke_prestashop_category"
               sequence="45"/>
 
+    <!-- Apre le Impostazioni direttamente sulla sezione PrestaShop
+         (l'azione generale apriva la prima sezione, Impostazioni generali). -->
+    <record id="action_ps_config_settings" model="ir.actions.act_window">
+        <field name="name">Impostazioni PrestaShop</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">current</field>
+        <field name="context">{'module': 'ke_prestashop_sync', 'bin_size': False}</field>
+    </record>
+
     <menuitem id="menu_ps_settings"
               name="Impostazioni"
               parent="menu_prestashop_root"
-              action="base_setup.action_general_configuration"
+              action="action_ps_config_settings"
               sequence="100"/>
 
 </odoo>
