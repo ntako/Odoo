@@ -38,6 +38,10 @@
                         </group>
                         <group>
                             <field name="csv_columns" string="Colonne rilevate" readonly="1"/>
+                            <field name="enrich_only"/>
+                            <field name="code_prefix" invisible="not enrich_only"/>
+                            <field name="match_ean" invisible="not enrich_only"/>
+                            <field name="spec_text_lang" invisible="not enrich_only"/>
                             <field name="weight_unit" string="Unità peso"/>
                             <field name="volume_unit" string="Unità dimensioni (volume)"/>
                         </group>
@@ -54,6 +58,11 @@
                         <list editable="bottom" string="Mapping colonne">
                             <field name="sequence" widget="handle"/>
                             <field name="target" string="Campo destinazione"/>
+                            <field name="spec_key_id" options="{'no_create': True}"
+                                   invisible="target != '_spec'" required="target == '_spec'"/>
+                            <field name="lang_code"
+                                   invisible="target not in ('_supplier_copy', '_supplier_bullets')"
+                                   required="target in ('_supplier_copy', '_supplier_bullets')"/>
                             <field name="csv_column" string="Colonna CSV"/>
                             <field name="default_value" string="Valore di default"/>
                         </list>
@@ -181,7 +190,14 @@
                             <field name="file_name" invisible="1"/>
                             <field name="delimiter"/>
                         </group>
-                        <group string="Opzioni">
+                        <group string="Arricchimento prodotti esistenti">
+                            <field name="enrich_only"/>
+                            <field name="code_prefix" invisible="not enrich_only"/>
+                            <field name="match_ean" invisible="not enrich_only"/>
+                            <field name="spec_text_lang" invisible="not enrich_only"/>
+                            <field name="dry_run" invisible="not enrich_only"/>
+                        </group>
+                        <group string="Opzioni" invisible="enrich_only">
                             <field name="update_existing"      invisible="images_only"/>
                             <field name="import_attributes"    invisible="images_only"/>
                             <field name="import_descriptions"  invisible="images_only"/>
@@ -233,6 +249,11 @@
                         <list editable="bottom" string="Mapping colonne">
                             <field name="sequence" widget="handle"/>
                             <field name="target" string="Campo destinazione"/>
+                            <field name="spec_key_id" options="{'no_create': True}"
+                                   invisible="target != '_spec'" required="target == '_spec'"/>
+                            <field name="lang_code"
+                                   invisible="target not in ('_supplier_copy', '_supplier_bullets')"
+                                   required="target in ('_supplier_copy', '_supplier_bullets')"/>
                             <field name="csv_column" string="Colonna CSV"/>
                             <field name="default_value" string="Valore di default"/>
                         </list>

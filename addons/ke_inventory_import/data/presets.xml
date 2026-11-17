@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Preset di arricchimento Pure Fishing (2026-11-17): creato una volta, poi modificabile. -->
+    <function model="inventory.mapping.preset" name="_ke_create_purefishing_enrich_preset"/>
+</odoo>

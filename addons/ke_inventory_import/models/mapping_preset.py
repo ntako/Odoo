@@ -42,6 +42,13 @@ class InventoryMappingPreset(models.Model):
         'inventory.mapping.preset.line', 'preset_id',
         string='Mapping colonne',
     )
+    # Arricchimento dei prodotti esistenti (2026-11-17): vedi inventory.import.job.
+    enrich_only = fields.Boolean('Solo arricchimento prodotti esistenti')
+    code_prefix = fields.Char('Prefisso codice in Odoo')
+    match_ean = fields.Boolean('Abbina anche per EAN', default=True)
+    spec_text_lang = fields.Selection(
+        lambda self: self.env['inventory.import.job']._spec_lang_selection(),
+        string='Lingua dei testi delle specifiche', default='en_GB')
 
     @api.onchange('csv_file_id')
     def _onchange_csv_file_id(self):
@@ -82,8 +89,77 @@ class InventoryMappingPreset(models.Model):
         }
 
 
+    # ------------------------------------------------------------------
+    # Preset predefiniti
+    # ------------------------------------------------------------------
+
+    _PUREFISHING_ENRICH = {
+        'name': 'Pure Fishing EMEA (arricchimento)',
+        'fields': [('SAP', 'default_code'), ('EAN/UPC', 'barcode'), ('Master Description', '_supplier_name'),
+                   ('Category', '_supplier_category'), ('SubCategory', '_supplier_category'),
+                   ('Each Dimension - Length', '_volume_l'), ('Each Dimension - Width', '_volume_w'),
+                   ('Each Dimension - Height', '_volume_h'),
+                   ('Each Dimension - Unit of Dimension', '_dim_unit'),
+                   ('Each Dimension - Gross Weight', 'weight'),
+                   ('Each Dimension - Unit of Weight', '_weight_unit')],
+        # lingua Odoo → (colonna testo, colonna punti elenco)
+        'texts': [('en_GB', 'UK\nCopy', 'UKBullets'), ('it_IT', 'IT\nCopy', 'IT\nBullets'),
+                  ('de_DE', 'DE\nCopy', 'DE\nBullets'), ('fr_FR', 'FR\nCopy', 'FR\nBullets'),
+                  ('es_ES', 'ES\nCopy', 'ES\nBullets'), ('en_US', 'UK\nCopy', 'UKBullets')],
+        # specifica → colonne in ordine di preferenza
+        'specs': [
+            ('technique', ['Category', 'SubCategory', 'Product Type']), ('water', ['Water Type']),
+            ('species', ['Primary Species']), ('line_type', ['SubCategory', 'Product Type']),
+            ('diameter', ['Advertised Diameter']), ('breaking_strength', ['Break Strength']),
+            ('length', ['Rod Length', 'Advertised Length', 'Bait Length (cm)']),
+            ('gear_ratio', ['Gear Ratio']), ('bearings', ['Bearing Count']), ('max_drag', ['Max Drag']),
+            ('mono_capacity', ['Mono Capacity m/mm']), ('braid_capacity', ['Braid Capacity m/mm']),
+            ('recovery', ['Recovery Rate']), ('hand', ['Reel Handle Position']), ('drag_type', ['Drag Type']),
+            ('rod_power', ['Rod Power']), ('rod_action', ['Rod Action']), ('sections', ['Number of Pieces']),
+            ('casting_weight', ['Lure Rating']), ('line_rating', ['Line Rating']),
+            ('transport_length', ['Transport Length']), ('guides', ['Number of guides With Tip']),
+            ('buoyancy', ['Bait Buoyancy']), ('depth', ['Swimming Depth - Meters']),
+            ('hook_size', ['Hook Size']), ('hooks', ['Number of Hooks']), ('scent', ['Bait Scent/Flavor']),
+            ('color', ['Color']), ('material', ['Rod Blank Material', 'Reel Spool Material']),
+            ('weight', ['Bait Weight - Grams', 'Reel Weight (g)', 'Rod Weight (g)', 'Net Weight']),
+        ],
+    }
+
+    @api.model
+    def _ke_create_purefishing_enrich_preset(self):
+        """Preset di arricchimento del catalogo Pure Fishing EMEA (2026-11-17), se non c'è già."""
+        conf = self._PUREFISHING_ENRICH
+        if self.search_count([('name', '=', conf['name'])]):
+            return
+        from odoo.addons.ke_product_catalog.spec_rules import SPEC_KEYS
+        Key = self.env['ke.product.spec.key'].sudo()
+        installed = dict(self.env['res.lang'].get_installed())
+        lines, seq = [], 0
+        for column, target in conf['fields']:
+            seq += 10
+            lines.append({'csv_column': column, 'target': target, 'sequence': seq})
+        for lang, copy_col, bullets_col in conf['texts']:
+            if lang not in installed and lang != 'en_US':
+                continue
+            for column, target in ((copy_col, '_supplier_copy'), (bullets_col, '_supplier_bullets')):
+                seq += 10
+                lines.append({'csv_column': column, 'target': target, 'lang_code': lang, 'sequence': seq})
+        for code, columns in conf['specs']:
+            seq_key, labels = SPEC_KEYS[code]
+            key = Key._ensure(code, labels, seq_key)
+            for column in columns:
+                seq += 10
+                lines.append({'csv_column': column, 'target': '_spec', 'spec_key_id': key.id, 'sequence': seq})
+        self.create({
+            'name': conf['name'], 'delimiter': ';', 'enrich_only': True, 'code_prefix': 'PFS-',
+            'match_ean': True, 'spec_text_lang': 'en_GB', 'weight_unit': 'kg', 'volume_unit': 'cm',
+            'line_ids': [(0, 0, l) for l in lines],
+        })
+
+
 class InventoryMappingPresetLine(models.Model):
     _name = 'inventory.mapping.preset.line'
+    _inherit = ['inventory.mapping.line.extras']
     _description = 'Mapping Preset Line'
     _order = 'sequence, id'
 
@@ -136,6 +212,8 @@ class InventoryMappingPresetSaveWizard(models.TransientModel):
                 'target': line.target,
                 'csv_column': line.csv_column or '',
                 'default_value': line.default_value or '',
+                'spec_key_id': line.spec_key_id.id,
+                'lang_code': line.lang_code,
             }
             for line in job.mapping_line_ids
         ]
@@ -143,13 +221,15 @@ class InventoryMappingPresetSaveWizard(models.TransientModel):
         if self.preset_id:
             preset = self.preset_id
             preset.line_ids.unlink()
-            preset.write({'name': self.name or preset.name, 'line_ids': [(0, 0, v) for v in line_vals]})
+            preset.write({'name': self.name or preset.name, 'line_ids': [(0, 0, v) for v in line_vals],
+                          **job._enrich_options_vals()})
         else:
             if not self.name:
                 raise UserError('Inserisci un nome per il preset.')
             preset = self.env['inventory.mapping.preset'].create({
                 'name': self.name,
                 'line_ids': [(0, 0, v) for v in line_vals],
+                **job._enrich_options_vals(),
             })
 
         job.preset_id = preset

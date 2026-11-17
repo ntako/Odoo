@@ -878,6 +878,9 @@ def _download_images_parallel(image_tasks, existing_products, image_delay, max_w
 
 def _do_import(job, env, file_string, options, cr, cancel_event=None):
     """Run the full CSV import. Called from background thread."""
+    if options.get('enrich_only'):
+        from .enrich import do_enrich
+        return do_enrich(job, env, file_string, options, cr, cancel_event)
     reader = csv.DictReader(io.StringIO(file_string), delimiter=options['delimiter'])
     csv_headers = set(reader.fieldnames or [])
     rows = list(reader)
@@ -1498,6 +1501,25 @@ class InventoryImportJob(models.Model):
         'inventory.field.mapping.line', 'job_id',
         string='Mapping colonne',
     )
+    # Arricchimento (2026-11-17): aggiorna solo prodotti già in Odoo con testi,
+    # specifiche, categoria e dimensioni del catalogo fornitore, senza crearne.
+    enrich_only = fields.Boolean(
+        'Solo arricchimento prodotti esistenti',
+        help='Non crea prodotti: abbina le righe ai prodotti già in Odoo (codice con il prefisso, poi EAN) '
+             'e scrive testi e punti elenco del fornitore, specifiche tecniche (fonte "Fornitore": mai sopra '
+             'quelle scritte a mano, prima di quelle Amazon), categoria e codice del fornitore, dimensioni e '
+             'peso solo se mancano.')
+    code_prefix = fields.Char(
+        'Prefisso codice in Odoo',
+        help='Il codice del fornitore nel codice articolo di Odoo ha questo prefisso (es. "PFS-": '
+             'SAP 1636736 = PFS-1636736, anche con "+" finale).')
+    match_ean = fields.Boolean('Abbina anche per EAN', default=True)
+    dry_run = fields.Boolean('Solo verifica', default=True,
+                             help='Arricchimento: conta cosa cambierebbe senza scrivere niente.')
+    spec_text_lang = fields.Selection(
+        lambda self: self._spec_lang_selection(), string='Lingua dei testi delle specifiche', default='en_GB',
+        help='Lingua dei valori di testo delle specifiche (es. colore, specie) nel file.')
+
     preset_id = fields.Many2one(
         'inventory.mapping.preset',
         string='Carica preset',
@@ -1540,6 +1562,16 @@ class InventoryImportJob(models.Model):
             return self.csv_file_id.file_data
         return None
 
+    @api.model
+    def _spec_lang_selection(self):
+        langs = self.env['res.lang'].get_installed()
+        return langs + ([('en_US', 'English (US)')] if 'en_US' not in dict(langs) else [])
+
+    def _enrich_options_vals(self):
+        self.ensure_one()
+        return {'enrich_only': self.enrich_only, 'code_prefix': self.code_prefix,
+                'match_ean': self.match_ean, 'spec_text_lang': self.spec_text_lang}
+
     @api.onchange('preset_id')
     def _onchange_preset_id(self):
         if not self.preset_id:
@@ -1552,8 +1584,18 @@ class InventoryImportJob(models.Model):
                 'csv_column': pline.csv_column or '',
                 'default_value': pline.default_value or '',
                 'sequence': pline.sequence or (i * 10),
+                'spec_key_id': pline.spec_key_id.id,
+                'lang_code': pline.lang_code,
             }))
         self.mapping_line_ids = lines
+        preset = self.preset_id
+        self.enrich_only = preset.enrich_only
+        self.code_prefix = preset.code_prefix
+        self.match_ean = preset.match_ean
+        if preset.spec_text_lang:
+            self.spec_text_lang = preset.spec_text_lang
+        if preset.delimiter:
+            self.delimiter = preset.delimiter
         self.use_custom_mapping = True
         if self.preset_id.volume_unit:
             self.volume_unit = self.preset_id.volume_unit
@@ -1651,6 +1693,9 @@ class InventoryImportJob(models.Model):
         except UnicodeDecodeError:
             file_string = file_content.decode('latin-1')
 
+        if self.enrich_only:
+            return self._run_enrich(file_string)
+
         custom_mapping = []
         if self.use_custom_mapping:
             custom_mapping = [
@@ -1715,6 +1760,39 @@ class InventoryImportJob(models.Model):
             'view_mode': 'form',
             'target': 'current',
         }
+
+    def _run_enrich(self, file_string):
+        """Avvia l'arricchimento (ke_inventory_import/models/enrich.py) nello stesso thread di sempre."""
+        lines = self.mapping_line_ids
+        if not lines.filtered(lambda l: l.target in ('default_code', 'barcode') and l.csv_column):
+            raise UserError('Arricchimento: serve almeno una colonna mappata a "Codice interno" o "Barcode" '
+                            'per riconoscere i prodotti.')
+        options = dict(
+            delimiter=self.delimiter,
+            enrich_only=True,
+            dry_run=self.dry_run,
+            code_prefix=(self.code_prefix or '').strip(),
+            match_ean=self.match_ean,
+            spec_text_lang=self.spec_text_lang or 'en_GB',
+            enrich_mapping=[{
+                'column': l.csv_column or '', 'target': l.target, 'default': l.default_value or '',
+                'spec': l.spec_key_id.code or '', 'lang': l.lang_code or '',
+            } for l in lines.sorted('sequence')],
+            weight_unit=self.weight_unit or 'g',
+            volume_unit=self.volume_unit or 'cm',
+        )
+        self.write({'state': 'running', 'started_at': fields.Datetime.now()})
+        self.env.cr.commit()
+        cancel_event = threading.Event()
+        with _CANCEL_LOCK:
+            _CANCEL_EVENTS[self.id] = cancel_event
+        threading.Thread(
+            target=_run_in_background,
+            args=(self.env.cr.dbname, self.env.uid, self.id, file_string, options, cancel_event),
+            daemon=True,
+        ).start()
+        return {'type': 'ir.actions.act_window', 'res_model': self._name, 'res_id': self.id,
+                'view_mode': 'form', 'target': 'current'}
 
     def action_cancel(self):
         """Request graceful cancellation of the running import job.

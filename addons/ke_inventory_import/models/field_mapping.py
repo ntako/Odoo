@@ -8,6 +8,13 @@ from odoo import fields, models
 MAPPING_TARGETS = [
     # --- Speciali ---
     ('_skip',         '— Ignora colonna —'),
+    # --- Catalogo fornitore (2026-11-17, usati dall'arricchimento) ---
+    ('_spec',              'Specifica tecnica (scegli quale)'),
+    ('_supplier_copy',     'Testo fornitore (scegli la lingua)'),
+    ('_supplier_bullets',  'Punti elenco fornitore (scegli la lingua)'),
+    ('_supplier_category', 'Categoria fornitore (più colonne unite con " / ")'),
+    ('_supplier_ref',      'Codice fornitore'),
+    ('_supplier_name',     'Nome commerciale fornitore (nome sul sito)'),
     ('_image_url',    'URL immagine prodotto (scarica e salva)'),
     ('_attribute',    'Attributo prodotto'),
     ('_category',     'Categoria (trova/crea)'),
@@ -78,8 +85,29 @@ WEIGHT_UNIT_SELECTION = [
 ]
 
 
+
+def _lang_selection(self):
+    langs = self.env['res.lang'].get_installed()
+    return langs + ([('en_US', 'English (US)')] if 'en_US' not in dict(langs) else [])
+
+
+class MappingLineExtras(models.AbstractModel):
+    """Campi delle righe di mapping per le destinazioni del catalogo fornitore (2026-11-17)."""
+    _name = 'inventory.mapping.line.extras'
+    _description = 'Campi aggiuntivi delle righe di mapping'
+
+    spec_key_id = fields.Many2one(
+        'ke.product.spec.key', string='Specifica',
+        help='Per "Specifica tecnica": quale. Unità, conversioni e valori fissi li decide la specifica. '
+             'Più colonne sulla stessa specifica: vale la prima con un valore (per i valori fissi, '
+             'es. la tecnica, si leggono tutte insieme).')
+    lang_code = fields.Selection(_lang_selection, string='Lingua',
+                                 help='Per testo e punti elenco del fornitore: la lingua della colonna.')
+
+
 class InventoryFieldMappingLine(models.Model):
     _name = 'inventory.field.mapping.line'
+    _inherit = ['inventory.mapping.line.extras']
     _description = 'CSV Column Mapping Line'
     _order = 'sequence, id'
 
@@ -98,3 +126,4 @@ class InventoryFieldMappingLine(models.Model):
         required=True,
     )
     default_value = fields.Char('Valore di default')
+
