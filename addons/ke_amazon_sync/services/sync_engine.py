@@ -4214,6 +4214,193 @@ class SyncEngine:
         return (next_offset if next_offset < total else None), total
 
     # ------------------------------------------------------------------
+    # Testi italiani da Amazon IT
+    # ------------------------------------------------------------------
+
+    def _bad_text_template_ids(self, field, lang, copy_langs, marketplace_id):
+        """
+        Template attivi con inserzione sul marketplace il cui testo in 'lang'
+        manca o è la copia esatta di un'altra lingua dei marketplace
+        (es. il nome spagnolo finito in italiano dal Full Import, 2026-11-13).
+        """
+        self.env.flush_all()
+        copies = ' OR '.join([f"pt.{field}->>%s = pt.{field}->>%s"] * len(copy_langs)) or 'FALSE'
+        params = [marketplace_id, lang]
+        for other in copy_langs:
+            params += [lang, other]
+        self.env.cr.execute(
+            f"""SELECT DISTINCT pt.id FROM product_template pt
+                  JOIN product_product pp ON pp.product_tmpl_id = pt.id
+                  JOIN ke_amazon_listing l ON l.product_id = pp.id AND l.marketplace_id = %s
+                 WHERE pt.active AND (COALESCE(pt.{field}->>%s, '') = '' OR {copies})""",
+            params,
+        )
+        return {r[0] for r in self.env.cr.fetchall()}
+
+    @staticmethod
+    def _strict_lang_entries(attrs, key, lang):
+        """Voci di un attributo SOLO nella lingua chiesta: niente ripiego su altre lingue."""
+        wanted = _norm_lang(lang)
+        return [e for e in (attrs.get(key) or []) if isinstance(e, dict)
+                and _norm_lang(e.get('language_tag')) == wanted and e.get('value')]
+
+    def _catalog_title(self, item, marketplace_id):
+        summaries = item.get('summaries') or []
+        own = [s for s in summaries if s.get('marketplaceId') == marketplace_id]
+        for s in own or summaries:
+            if s.get('itemName'):
+                return s['itemName'].strip()
+        return ''
+
+    def _names_matching_titles(self, tmpl_ids, by_tmpl, lang):
+        """Template il cui nome visto in 'lang' (o il ripiego en_US) è un titolo delle inserzioni o il suo inizio."""
+        if not tmpl_ids:
+            return set()
+        self.env.flush_all()
+        self.env.cr.execute("SELECT id, COALESCE(NULLIF(name->>%s, ''), name->>'en_US') FROM product_template "
+                            "WHERE id = ANY(%s)", (lang, list(tmpl_ids)))
+        ok = set()
+        for tid, shown in self.env.cr.fetchall():
+            titles = [(l.item_name or '').strip().casefold() for l in by_tmpl.get(tid, []) if (l.item_name or '').strip()]
+            shown = (shown or '').strip().casefold()
+            # Uguale a un titolo o, per le famiglie, la sua parte iniziale comune.
+            if shown and any(t.startswith(shown) for t in titles):
+                ok.add(tid)
+        return ok
+
+    def recover_marketplace_texts(self, log_rec, marketplace):
+        """
+        Nome e descrizione nella lingua del marketplace (2026-11-17, per IT):
+        per i prodotti con inserzione su quel marketplace il cui testo manca o
+        è la copia di un'altra lingua, li prende dal titolo dell'inserzione
+        già salvato o, se manca, dal Catalog API del marketplace (sola
+        lettura, gruppi da _CAT_MAP_BATCH_SIZE ASIN). I testi del Catalog
+        API si usano solo se sono davvero in quella lingua. Le famiglie
+        prendono il nome comune ai titoli delle varianti (recompute_family_names,
+        che non tocca i nomi scelti a mano). Ritorna (aggiornati, saltati, errori).
+        """
+        lang = marketplace.lang_id.code
+        copy_langs = sorted({c for c in self._marketplace_langs() if c != lang})
+        bad_name = self._bad_text_template_ids('name', lang, copy_langs, marketplace.id)
+        bad_desc = self._bad_text_template_ids('description_sale', lang, copy_langs, marketplace.id)
+        Tmpl = self.env['product.template'].with_context(active_test=False)
+        templates = Tmpl.browse(sorted(bad_name | bad_desc))
+        Listing = self.env['ke.amazon.listing']
+        listings = Listing.search([('marketplace_id', '=', marketplace.id),
+                                   ('product_id.product_tmpl_id', 'in', templates.ids)])
+        by_tmpl = {}
+        for listing in listings.sorted(lambda l: l.product_id.id):
+            by_tmpl.setdefault(listing.product_id.product_tmpl_id.id, []).append(listing)
+        # Nome già uguale al titolo dell'inserzione su quel marketplace: è
+        # giusto anche se coincide con lo spagnolo ("Abu Garcia® Atom") o se
+        # la chiave della lingua manca perché Odoo non salva una traduzione
+        # identica al testo en_US (che allora è quello che si vede).
+        already = self._names_matching_titles(bad_name, by_tmpl, lang)
+        bad_name -= already
+        templates = Tmpl.browse(sorted(bad_name | bad_desc))
+
+        # ASIN da chiedere ad Amazon: titoli mancanti delle inserzioni (per i
+        # nomi) e un ASIN per prodotto per le descrizioni.
+        need = {}
+        for tmpl in templates:
+            tmpl_listings = by_tmpl.get(tmpl.id, [])
+            if tmpl.id in bad_name:
+                for listing in tmpl_listings:
+                    if not (listing.item_name or '').strip() and (listing.asin or '').strip():
+                        need.setdefault(listing.asin.strip(), None)
+            if tmpl.id in bad_desc:
+                first = next((l for l in tmpl_listings if (l.asin or '').strip()), None)
+                if first:
+                    need.setdefault(first.asin.strip(), None)
+        lines = [f'[{marketplace.code}] {len(templates)} prodotti: {len(bad_name)} nomi e '
+                 f'{len(bad_desc)} descrizioni da sistemare ({len(already)} nomi già uguali al titolo '
+                 f'Amazon {marketplace.code}); {len(need)} ASIN da leggere dal Catalog API.']
+        log_rec.write({'products_total': len(templates), 'log_lines': '\n'.join(lines)})
+        self.env.cr.commit()
+
+        catalog, call_errors = {}, 0
+        asins = list(need)
+        for i in range(0, len(asins), self._CAT_MAP_BATCH_SIZE):
+            batch = asins[i:i + self._CAT_MAP_BATCH_SIZE]
+            try:
+                catalog.update(self.client.get_catalog_items_batch(batch) or {})
+            except Exception as exc:
+                call_errors += len(batch)
+                lines.append(f'[ERR] lettura Catalog API di {len(batch)} ASIN fallita ({exc}): da ritentare')
+            if (i // self._CAT_MAP_BATCH_SIZE) % 10 == 9:
+                log_rec.write({'log_lines': '\n'.join(lines[-2000:]) + f'\n… letti {i + len(batch)}/{len(asins)} ASIN'})
+                self.env.cr.commit()
+
+        # Titoli mancanti delle inserzioni: salvati, servono anche ai nomi delle famiglie.
+        for listing in listings:
+            asin = (listing.asin or '').strip()
+            if not (listing.item_name or '').strip() and asin in catalog:
+                title = self._catalog_title(catalog[asin], marketplace.marketplace_id)
+                if title:
+                    listing.item_name = title
+
+        self.env.flush_all()
+        self.env.cr.execute('SELECT id, name->>%s, description_sale->>%s FROM product_template WHERE id = ANY(%s)',
+                            (lang, lang, list(templates.ids)))
+        current = {r[0]: {'name': r[1] or '', 'description_sale': r[2] or ''} for r in self.env.cr.fetchall()}
+        updated = skipped = 0
+        families = Tmpl.browse()
+        for tmpl in templates:
+            ref = tmpl.default_code or f'#{tmpl.id}'
+            tmpl_listings = by_tmpl.get(tmpl.id, [])
+            vals, done = {}, []
+            if tmpl.id in bad_name:
+                if tmpl.x_amazon_parent_asin:
+                    families |= tmpl
+                else:
+                    title = next(((l.item_name or '').strip() for l in tmpl_listings
+                                  if (l.item_name or '').strip()), '')
+                    if title:
+                        vals['name'] = title
+            if tmpl.id in bad_desc:
+                first = next((l for l in tmpl_listings if (l.asin or '').strip()), None)
+                item = catalog.get(first.asin.strip(), {}) if first else {}
+                attrs = item.get('attributes') or {}
+                desc = self._strict_lang_entries(attrs, 'product_description', lang)
+                bullets = [str(e['value']) for e in self._strict_lang_entries(attrs, 'bullet_point', lang)]
+                formatted = self._format_description({
+                    'description': str(desc[0]['value']) if desc else '', 'bullet_points': bullets})
+                if formatted:
+                    vals['description_sale'] = formatted
+            vals = {k: v for k, v in vals.items() if v != current.get(tmpl.id, {}).get(k)}
+            if vals:
+                tmpl.with_context(lang=lang).write(vals)
+                done += [{'name': 'nome', 'description_sale': 'descrizione'}[k] for k in vals]
+                lines.append(f'[OK] {ref}: {" e ".join(done)} in {lang}')
+                updated += 1
+            elif tmpl not in families:
+                lines.append(f'[SKIP] {ref}: su Amazon {marketplace.code} non c\'è un testo in {lang}')
+                skipped += 1
+
+        if families:
+            n = self.recompute_family_names(families)
+            lines.append(f'[FAMIGLIE] {len(families)} famiglie con nome da sistemare: '
+                         f'{n} nomi ricalcolati dai titoli delle varianti (tutte le lingue dei marketplace)')
+            updated += n
+        self.env.flush_all()
+        still_ids = self._bad_text_template_ids('name', lang, copy_langs, marketplace.id)
+        all_listings = self.env['ke.amazon.listing'].search([
+            ('marketplace_id', '=', marketplace.id), ('product_id.product_tmpl_id', 'in', list(still_ids))])
+        still_by_tmpl = {}
+        for listing in all_listings:
+            still_by_tmpl.setdefault(listing.product_id.product_tmpl_id.id, []).append(listing)
+        still = len(still_ids - self._names_matching_titles(still_ids, still_by_tmpl, lang))
+        still_desc = len(self._bad_text_template_ids('description_sale', lang, copy_langs, marketplace.id))
+        lines.append(f'Restano senza testo proprio in {lang}: {still} nomi, {still_desc} descrizioni '
+                     f'(su Amazon {marketplace.code} non c\'è, vanno tradotti o scritti).')
+        log_rec.write({
+            'products_updated': updated, 'products_skipped': skipped,
+            'products_error': call_errors, 'log_lines': '\n'.join(lines),
+        })
+        self.env.cr.commit()
+        return updated, skipped, call_errors
+
+    # ------------------------------------------------------------------
     # Magazzini FBA / FBM
     # ------------------------------------------------------------------
 

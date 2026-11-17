@@ -51,6 +51,12 @@
                                 string="Aggiorna da Catalog API" type="action" class="btn btn-secondary"
                                 confirm="Avvio l'aggiornamento dei prodotti da Catalog API in background. Continuare?"/>
                     </setting>
+                    <setting string="Testi italiani da Amazon IT"
+                             help="Per i prodotti in vendita su Amazon IT con nome o descrizione italiani mancanti o copiati da un'altra lingua: li prende dal titolo dell'inserzione IT o dal Catalog API di Amazon IT (solo lettura). I testi scritti a mano non si toccano.">
+                        <button name="action_run_recover_texts"
+                                string="Recupera testi italiani" type="object" class="btn btn-secondary"
+                                confirm="Avvio il recupero dei testi italiani da Amazon IT in background (solo lettura su Amazon). Continuare?"/>
+                    </setting>
                 </block>
             </xpath>
             <xpath expr="//block[@name='amazon_warehouses']" position="inside">

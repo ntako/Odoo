@@ -518,6 +518,28 @@ class ResConfigSettings(models.TransientModel):
         self._start_thread('_thread_download_images', log_rec.id)
         return self._open_log_action()
 
+    def action_run_recover_texts(self):
+        """Recupera nome e descrizione italiani da Amazon IT (sola lettura Amazon), in background."""
+        self._validate_credentials()
+        marketplace = self.env['ke.amazon.marketplace'].search([
+            ('active', '=', True), ('lang_id.code', '=', 'it_IT'), ('lang_id.active', '=', True)], limit=1)
+        if not marketplace:
+            raise UserError('Nessun marketplace attivo con lingua italiana (Amazon → Marketplace, campo Lingua).')
+        params = self.env['ir.config_parameter'].sudo()
+        if params.get_param('ke_amazon_sync.recover_texts_state') == 'running':
+            raise UserError('Un recupero testi è già in corso.')
+        log_rec = self.env['ke.amazon.sync.log'].create({
+            'name': f'Recupero testi italiani da Amazon {marketplace.code} — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'recover_texts',
+            'state': 'running',
+            'start_date': datetime.now(),
+        })
+        params.set_param('ke_amazon_sync.recover_texts_state', 'running')
+        params.set_param('ke_amazon_sync.recover_texts_marketplace_id', str(marketplace.id))
+        self.env.cr.commit()
+        self._start_thread('_thread_recover_texts', log_rec.id)
+        return self._open_log_action()
+
     def action_compute_sync_prices(self):
         """Ricalcola il "Prezzo con sync" degli annunci attivi (nessuna chiamata Amazon)."""
         done, errors = self.env['ke.amazon.listing'].sudo()._compute_sync_prices()
@@ -630,6 +652,35 @@ class ResConfigSettings(models.TransientModel):
                 cr.commit()
             finally:
                 params.set_param('ke_amazon_sync.download_images_state', 'idle')
+                cr.commit()
+
+    @api.model
+    def _thread_recover_texts(self, db, uid, ctx, log_id):
+        from odoo import api as odoo_api
+        from odoo.modules.registry import Registry as odoo_registry
+        from ..services.sp_api_client import SpApiClient
+        from ..services.sync_engine import SyncEngine
+
+        with odoo_registry(db).cursor() as cr:
+            env = odoo_api.Environment(cr, uid, ctx)
+            log_rec = env['ke.amazon.sync.log'].browse(log_id)
+            params = env['ir.config_parameter'].sudo()
+            try:
+                marketplace = env['ke.amazon.marketplace'].browse(
+                    int(params.get_param('ke_amazon_sync.recover_texts_marketplace_id') or 0))
+                client = SpApiClient(env, marketplace_id=marketplace.marketplace_id)
+                ok, skipped, errors = SyncEngine(env, client).recover_marketplace_texts(log_rec, marketplace)
+                log_rec.write({'state': 'error' if errors else 'done', 'end_date': datetime.now()})
+                cr.commit()
+                _log.info('Recupero testi %s: %d aggiornati, %d senza testo, %d errori',
+                          marketplace.code, ok, skipped, errors)
+            except Exception as exc:
+                cr.rollback()
+                _log.error('Thread recover_texts fallito: %s', exc, exc_info=True)
+                log_rec.write({'state': 'error', 'error_summary': str(exc), 'end_date': datetime.now()})
+                cr.commit()
+            finally:
+                params.set_param('ke_amazon_sync.recover_texts_state', 'idle')
                 cr.commit()
 
     @api.model
