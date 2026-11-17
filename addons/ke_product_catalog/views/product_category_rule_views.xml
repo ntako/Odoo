@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Classificazione prodotti in Odoo (2026-11-17): regole modificabili e proposte da applicare. -->
+    <record id="view_ke_category_rule_list" model="ir.ui.view">
+        <field name="name">ke.product.category.rule.list</field>
+        <field name="model">ke.product.category.rule</field>
+        <field name="arch" type="xml">
+            <list editable="bottom" decoration-muted="weak">
+                <header>
+                    <button name="action_load_default_rules" type="object" string="Carica regole predefinite"
+                            display="always"/>
+                </header>
+                <field name="sequence" widget="handle"/>
+                <field name="sequence" string="Priorità" optional="show"/>
+                <field name="kind"/>
+                <field name="pattern"/>
+                <field name="exclude_pattern" optional="show"/>
+                <field name="source_categ_ids" widget="many2many_tags" options="{'no_create': True}"/>
+                <field name="target_categ_id" options="{'no_create': True}"/>
+                <field name="weak"/>
+                <field name="note" optional="hide"/>
+                <field name="active" widget="boolean_toggle"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_category_rule_search" model="ir.ui.view">
+        <field name="name">ke.product.category.rule.search</field>
+        <field name="model">ke.product.category.rule</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="pattern"/>
+                <field name="target_categ_id"/>
+                <field name="source_categ_ids"/>
+                <filter name="inactive" string="Disattivate" domain="[('active', '=', False)]"/>
+                <group>
+                    <filter name="group_kind" string="Guarda" context="{'group_by': 'kind'}"/>
+                    <filter name="group_target" string="Categoria proposta" context="{'group_by': 'target_categ_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_ke_category_rule" model="ir.actions.act_window">
+        <field name="name">Regole di classificazione</field>
+        <field name="res_model">ke.product.category.rule</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Nessuna regola</p>
+            <p>Le regole portano i prodotti nella categoria giusta guardando la categoria del fornitore, la
+               tecnica (specifiche), la categoria Amazon o le parole del nome. "Carica regole predefinite"
+               crea quelle messe a punto per mulinelli e canne.</p>
+        </field>
+    </record>
+
+    <record id="view_ke_category_proposal_list" model="ir.ui.view">
+        <field name="name">ke.product.category.proposal.list</field>
+        <field name="model">ke.product.category.proposal</field>
+        <field name="arch" type="xml">
+            <list editable="bottom" create="false" decoration-warning="state == 'pending' and not certain"
+                  decoration-muted="state != 'pending'">
+                <header>
+                    <button name="action_apply" type="object" string="Applica"/>
+                    <button name="action_discard" type="object" string="Scarta"/>
+                </header>
+                <field name="product_tmpl_id" readonly="1"/>
+                <field name="current_categ_id"/>
+                <field name="proposed_categ_id" options="{'no_create': True}" readonly="state != 'pending'"/>
+                <field name="reason"/>
+                <field name="certain"/>
+                <field name="on_site" optional="show"/>
+                <field name="amazon_clash" optional="show"/>
+                <field name="state" optional="show"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_category_proposal_search" model="ir.ui.view">
+        <field name="name">ke.product.category.proposal.search</field>
+        <field name="model">ke.product.category.proposal</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="product_tmpl_id"/>
+                <field name="proposed_categ_id"/>
+                <field name="current_categ_id"/>
+                <field name="reason"/>
+                <filter name="pending" string="Da valutare" domain="[('state', '=', 'pending')]"/>
+                <filter name="to_check" string="Da verificare" domain="[('state', '=', 'pending'), ('certain', '=', False)]"/>
+                <filter name="sure" string="Sicure" domain="[('state', '=', 'pending'), ('certain', '=', True)]"/>
+                <filter name="on_site" string="Sul sito" domain="[('on_site', '=', True)]"/>
+                <filter name="applied" string="Applicate" domain="[('state', '=', 'applied')]"/>
+                <group>
+                    <filter name="group_proposed" string="Categoria proposta" context="{'group_by': 'proposed_categ_id'}"/>
+                    <filter name="group_current" string="Categoria attuale" context="{'group_by': 'current_categ_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_ke_category_proposal" model="ir.actions.act_window">
+        <field name="name">Proposte di categoria</field>
+        <field name="res_model">ke.product.category.proposal</field>
+        <field name="view_mode">list</field>
+        <field name="context">{'search_default_pending': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Nessuna proposta</p>
+            <p>Dalla lista prodotti (Azioni → "Proponi categorie") o dal menu "Proponi categorie": le proposte
+               si correggono qui e si applicano selezionandole.</p>
+        </field>
+    </record>
+
+    <record id="view_ke_category_propose_wizard_form" model="ir.ui.view">
+        <field name="name">ke.product.category.propose.wizard.form</field>
+        <field name="model">ke.product.category.propose.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Proponi categorie">
+                <p class="text-muted">Applica le regole di classificazione ai prodotti e mostra le proposte
+                    (la categoria cambia solo quando le applichi).</p>
+                <group>
+                    <field name="product_count" invisible="not product_count"/>
+                    <field name="categ_ids" widget="many2many_tags" options="{'no_create': True}"/>
+                </group>
+                <footer>
+                    <button name="action_propose" type="object" string="Proponi" class="btn-primary"/>
+                    <button special="cancel" string="Annulla"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ke_category_propose_wizard" model="ir.actions.act_window">
+        <field name="name">Proponi categorie</field>
+        <field name="res_model">ke.product.category.propose.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="binding_view_types">list</field>
+        <field name="group_ids" eval="[(4, ref('product.group_product_manager'))]"/>
+    </record>
+
+    <menuitem id="menu_ke_category_proposal" name="Proposte di categoria" parent="stock.menu_stock_inventory_control"
+              action="action_ke_category_proposal" groups="product.group_product_manager" sequence="30"/>
+    <menuitem id="menu_ke_category_propose" name="Proponi categorie" parent="stock.menu_stock_inventory_control"
+              action="action_ke_category_propose_wizard" groups="product.group_product_manager" sequence="31"/>
+    <menuitem id="menu_ke_category_rule" name="Regole di classificazione" parent="stock.menu_product_in_config_stock"
+              action="action_ke_category_rule" groups="product.group_product_manager" sequence="38"/>
+</odoo>

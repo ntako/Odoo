@@ -42,7 +42,7 @@ def _value(row, line):
 
 
 def _variant_index(env, prefix):
-    """Codice del fornitore → varianti; EAN → varianti."""
+    """Codice del fornitore → varianti; EAN → varianti. Solo prodotti attivi: gli archiviati non si toccano."""
     by_code, by_ean = {}, {}
     prefix = (prefix or '').upper()
     for v in env['product.product'].search_read([], ['default_code', 'barcode']):

@@ -5,3 +5,4 @@ from . import test_product_website
 from . import test_supplier_texts
 from . import test_classification
 from . import test_product_spec
+from . import test_category_rule

@@ -13,3 +13,7 @@ access_ke_product_spec_key_user,ke.product.spec.key utente,model_ke_product_spec
 access_ke_product_spec_key_manager,ke.product.spec.key gestione,model_ke_product_spec_key,product.group_product_manager,1,1,1,1
 access_ke_product_spec_user,ke.product.spec utente,model_ke_product_spec,base.group_user,1,0,0,0
 access_ke_product_spec_manager,ke.product.spec gestione,model_ke_product_spec,product.group_product_manager,1,1,1,1
+access_ke_category_rule_user,ke.product.category.rule utente,model_ke_product_category_rule,base.group_user,1,0,0,0
+access_ke_category_rule_manager,ke.product.category.rule gestione,model_ke_product_category_rule,product.group_product_manager,1,1,1,1
+access_ke_category_proposal_manager,ke.product.category.proposal,model_ke_product_category_proposal,product.group_product_manager,1,1,1,1
+access_ke_category_propose_wizard,ke.product.category.propose.wizard,model_ke_product_category_propose_wizard,product.group_product_manager,1,1,1,1

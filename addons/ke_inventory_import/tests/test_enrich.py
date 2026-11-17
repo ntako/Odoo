@@ -147,3 +147,12 @@ class TestSupplierCatalog(TransactionCase):
         self.assertEqual(_common_name(['Flex Pike Deadbait', 'Flex Zander', 'Flex Zander']), 'Flex')
         self.assertEqual(_common_name(['Sick Braid', 'Sick Braid']), 'Sick Braid')
         self.assertEqual(_common_name(['Gulp! Crabby', 'Pulse Goby', 'Pulse Goby']), 'Pulse Goby')
+
+    def test_archived_products_are_left_alone(self):
+        """Prodotti archiviati: non abbinati, non arricchiti, non riattivati (2026-11-17)."""
+        self.line.active = False
+        result = self._run()
+        self.assertFalse(self.line.active)
+        self.assertFalse(self.line.ke_supplier_name)
+        self.assertFalse(self.line.with_context(active_test=False).ke_spec_ids)
+        self.assertIn('abbinate a prodotti Odoo: 1', result)

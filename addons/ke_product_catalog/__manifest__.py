@@ -1,6 +1,6 @@
 {
     'name': 'KE Product Catalog',
-    'version': '19.0.1.5.0',
+    'version': '19.0.1.6.0',
     'category': 'Sales/Sales',
     'summary': 'Catalogo prodotti comune: marca con nomi alternativi, galleria immagini come indirizzi',
     'description': """
@@ -36,6 +36,7 @@ In futuro: codice famiglia del fornitore.
         'views/product_classification_views.xml',
         'views/product_spec_views.xml',
         'views/product_supplier_views.xml',
+        'views/product_category_rule_views.xml',
     ],
     'installable': True,
     'application': False,
