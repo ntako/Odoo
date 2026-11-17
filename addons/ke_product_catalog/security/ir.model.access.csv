@@ -7,3 +7,5 @@ access_ke_product_brand_alias_user,ke.product.brand.alias utente,model_ke_produc
 access_ke_product_brand_alias_manager,ke.product.brand.alias gestione,model_ke_product_brand_alias,product.group_product_manager,1,1,1,1
 access_ke_product_brand_merge,ke.product.brand.merge,model_ke_product_brand_merge,product.group_product_manager,1,1,1,1
 access_ke_product_brand_alias_import,ke.product.brand.alias.import,model_ke_product_brand_alias_import,product.group_product_manager,1,1,1,1
+access_ke_product_classification_export,ke.product.classification.export,model_ke_product_classification_export,product.group_product_manager,1,1,1,1
+access_ke_product_classification_import,ke.product.classification.import,model_ke_product_classification_import,product.group_product_manager,1,1,1,1

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Classificazione portabile (2026-11-17): categoria dei prodotti per
+         codice/EAN, da riportare da un database all'altro. -->
+    <record id="view_ke_product_classification_export_form" model="ir.ui.view">
+        <field name="name">ke.product.classification.export.form</field>
+        <field name="model">ke.product.classification.export</field>
+        <field name="arch" type="xml">
+            <form string="Esporta classificazione">
+                <p class="text-muted">
+                    Un file CSV con codice, EAN, nome e categoria (percorso completo) di ogni
+                    prodotto. In un altro database "Importa classificazione" lo riapplica
+                    riconoscendo i prodotti per codice o EAN.
+                </p>
+                <group invisible="file_data">
+                    <field name="scope" widget="radio"/>
+                    <field name="selected_count" invisible="scope != 'selected'" string="Selezionati"/>
+                </group>
+                <group invisible="not file_data">
+                    <field name="exported_count"/>
+                    <field name="skipped_count"/>
+                    <field name="file_name" invisible="1"/>
+                    <field name="file_data" filename="file_name" string="Scarica"/>
+                </group>
+                <footer>
+                    <button name="action_export" type="object" string="Esporta" class="btn-primary"
+                            invisible="file_data"/>
+                    <button special="cancel" string="Chiudi"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ke_product_classification_export" model="ir.actions.act_window">
+        <field name="name">Esporta classificazione</field>
+        <field name="res_model">ke.product.classification.export</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="binding_view_types">list</field>
+        <field name="group_ids" eval="[(4, ref('product.group_product_manager'))]"/>
+    </record>
+
+    <record id="view_ke_product_classification_import_form" model="ir.ui.view">
+        <field name="name">ke.product.classification.import.form</field>
+        <field name="model">ke.product.classification.import</field>
+        <field name="arch" type="xml">
+            <form string="Importa classificazione">
+                <p class="text-muted">
+                    File di "Esporta classificazione" (colonne Codice, EAN, Prodotto, Categoria).
+                    Ogni prodotto si riconosce per codice (del prodotto o di una variante, senza il
+                    "+" finale) o, in mancanza, per EAN; si cambia solo la categoria. Le categorie
+                    mancanti si creano. Prima una verifica, poi togli "Solo verifica" e importa.
+                </p>
+                <group>
+                    <field name="file_name" invisible="1"/>
+                    <field name="file_data" filename="file_name"/>
+                    <field name="dry_run"/>
+                </group>
+                <field name="result" invisible="not result" nolabel="1"
+                       class="font-monospace" style="white-space: pre-wrap;"/>
+                <footer>
+                    <button name="action_import" type="object" string="Verifica" class="btn-primary"
+                            invisible="not dry_run"/>
+                    <button name="action_import" type="object" string="Importa" class="btn-primary"
+                            invisible="dry_run"/>
+                    <button special="cancel" string="Chiudi"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ke_product_classification_import" model="ir.actions.act_window">
+        <field name="name">Importa classificazione</field>
+        <field name="res_model">ke.product.classification.import</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <menuitem id="menu_ke_product_classification_export" name="Esporta classificazione prodotti"
+              parent="stock.menu_product_in_config_stock" action="action_ke_product_classification_export"
+              groups="product.group_product_manager" sequence="40"/>
+    <menuitem id="menu_ke_product_classification_import" name="Importa classificazione prodotti"
+              parent="stock.menu_product_in_config_stock" action="action_ke_product_classification_import"
+              groups="product.group_product_manager" sequence="41"/>
+</odoo>
