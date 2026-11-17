@@ -9,3 +9,7 @@ access_ke_product_brand_merge,ke.product.brand.merge,model_ke_product_brand_merg
 access_ke_product_brand_alias_import,ke.product.brand.alias.import,model_ke_product_brand_alias_import,product.group_product_manager,1,1,1,1
 access_ke_product_classification_export,ke.product.classification.export,model_ke_product_classification_export,product.group_product_manager,1,1,1,1
 access_ke_product_classification_import,ke.product.classification.import,model_ke_product_classification_import,product.group_product_manager,1,1,1,1
+access_ke_product_spec_key_user,ke.product.spec.key utente,model_ke_product_spec_key,base.group_user,1,0,0,0
+access_ke_product_spec_key_manager,ke.product.spec.key gestione,model_ke_product_spec_key,product.group_product_manager,1,1,1,1
+access_ke_product_spec_user,ke.product.spec utente,model_ke_product_spec,base.group_user,1,0,0,0
+access_ke_product_spec_manager,ke.product.spec gestione,model_ke_product_spec,product.group_product_manager,1,1,1,1

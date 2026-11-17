@@ -15,7 +15,7 @@ a mano non si toccano.
 """
 import re
 
-from odoo import models
+from odoo import fields, models
 
 from .product_website import _esc, _plain
 
@@ -51,6 +51,30 @@ def _same_text(a, b):
 
 class ProductTemplate(models.Model):
     _inherit = 'product.template'
+
+    # Testi del catalogo fornitore per lingua (2026-11-17, import "Catalogo
+    # fornitore"): separati dalla descrizione di vendita (Amazon o scritta a
+    # mano), che resta com'è. Il sito li preferisce, dove la lingua li ha.
+    ke_supplier_copy = fields.Text('Testo fornitore', translate=True)
+    ke_supplier_bullets = fields.Text('Punti elenco fornitore', translate=True,
+                                      help='Un punto per riga.')
+    ke_supplier_category = fields.Char(
+        'Categoria fornitore', help='Categoria e sottocategoria nel catalogo del fornitore.')
+    ke_supplier_ref = fields.Char('Codice fornitore', help='Codice articolo nel catalogo del fornitore.')
+    ke_supplier_name = fields.Char(
+        'Nome fornitore',
+        help='Nome commerciale nel catalogo del fornitore (es. "Sick Braid"). Il nome sul sito diventa '
+             'marca + questo nome + tipo di prodotto nella lingua (es. "Berkley Sick Braid – Filo trecciato"), '
+             'salvo un "Nome sul sito" scritto a mano.')
+
+    def _ke_supplier_site_name(self, lang):
+        """Nome sul sito composto dai dati del fornitore nella lingua, o '' se manca il nome commerciale."""
+        self.ensure_one()
+        if not self.ke_supplier_name:
+            return ''
+        from ..spec_rules import product_kind, site_name
+        brand = self.ke_brand_id.name if 'ke_brand_id' in self._fields and self.ke_brand_id else ''
+        return site_name(brand, self.ke_supplier_name, product_kind(self.ke_supplier_category), lang)
 
     def _ke_supplier_texts(self):
         """{prefisso lingua: {'copy': testo, 'bullets': testo}} dagli attributi informativi del prodotto."""

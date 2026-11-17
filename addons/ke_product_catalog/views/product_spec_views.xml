@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Specifiche tecniche (2026-11-17): valori per prodotto/variante, tradotti, con fonte. -->
+    <record id="view_ke_product_spec_key_list" model="ir.ui.view">
+        <field name="name">ke.product.spec.key.list</field>
+        <field name="model">ke.product.spec.key</field>
+        <field name="arch" type="xml">
+            <list editable="bottom">
+                <field name="sequence" widget="handle"/>
+                <field name="name"/>
+                <field name="code"/>
+                <field name="website_visible"/>
+                <field name="value_count"/>
+                <field name="active" column_invisible="True"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_ke_product_spec_key" model="ir.actions.act_window">
+        <field name="name">Specifiche tecniche</field>
+        <field name="res_model">ke.product.spec.key</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Nessuna specifica</p>
+            <p>Le specifiche si creano da sole quando un import (es. Amazon) porta dei valori.
+               "Mostra sul sito" decide quali vanno nelle schede dei canali di vendita.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_ke_product_spec_key" name="Specifiche tecniche" parent="stock.menu_product_in_config_stock"
+              action="action_ke_product_spec_key" groups="product.group_product_manager" sequence="35"/>
+
+    <record id="product_template_form_view_ke_specs" model="ir.ui.view">
+        <field name="name">product.template.form.ke.specs</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Specifiche" name="ke_specs">
+                    <field name="ke_spec_ids" context="{'default_product_tmpl_id': id, 'default_source': 'manual'}">
+                        <list editable="bottom" decoration-muted="not website_visible">
+                            <field name="sequence" column_invisible="True"/>
+                            <field name="key_id" options="{'no_create': True}"/>
+                            <field name="product_id" optional="show"
+                                   column_invisible="parent.product_variant_count &lt;= 1"/>
+                            <field name="value"/>
+                            <field name="source" readonly="1" optional="show"/>
+                            <field name="website_visible" string="Sul sito" optional="hide"/>
+                        </list>
+                    </field>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

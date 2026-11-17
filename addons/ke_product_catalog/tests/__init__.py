@@ -4,3 +4,4 @@ from . import test_product_price
 from . import test_product_website
 from . import test_supplier_texts
 from . import test_classification
+from . import test_product_spec

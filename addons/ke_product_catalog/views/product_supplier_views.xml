@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Dati del catalogo fornitore sul prodotto (2026-11-17, scritti dall'arricchimento di
+         ke_inventory_import): testi per lingua, categoria e codice del fornitore. -->
+    <record id="product_template_form_view_ke_supplier" model="ir.ui.view">
+        <field name="name">product.template.form.ke.supplier</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Catalogo fornitore" name="ke_supplier"
+                      invisible="not ke_supplier_ref and not ke_supplier_name and not ke_supplier_copy and not ke_supplier_bullets">
+                    <group>
+                        <field name="ke_supplier_name"/>
+                        <field name="ke_supplier_ref"/>
+                        <field name="ke_supplier_category"/>
+                    </group>
+                    <label for="ke_supplier_copy"/>
+                    <field name="ke_supplier_copy" nolabel="1"/>
+                    <label for="ke_supplier_bullets"/>
+                    <field name="ke_supplier_bullets" nolabel="1"/>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

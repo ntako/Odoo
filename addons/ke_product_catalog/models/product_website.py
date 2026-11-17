@@ -105,20 +105,44 @@ class ProductTemplate(models.Model):
         if self.ke_web_name and not self.ke_web_slug:
             self.ke_web_slug = slugify(self.ke_web_name)
 
+    def _ke_supplier_web_source(self):
+        """(testo, punti) del catalogo fornitore nella lingua del contesto, se la lingua li ha; altrimenti None."""
+        if 'ke_supplier_copy' not in self._fields:
+            return None
+        lang = self.env.lang or 'en_US'
+        raw = self._ke_raw(['ke_supplier_copy', 'ke_supplier_bullets'])
+        copy = (raw['ke_supplier_copy'] or {}).get(lang) or ''
+        bullets = (raw['ke_supplier_bullets'] or {}).get(lang) or ''
+        if not (copy.strip() or bullets.strip()):
+            return None
+        items = [b.strip(' -•·') for b in bullets.split('\n') if b.strip(' -•·')]
+        return copy.strip(), [b[:1].upper() + b[1:] for b in items]
+
     def _ke_web_proposal(self, empty=None):
-        """Valori proposti per i campi vuoti (nella lingua del contesto)."""
+        """
+        Valori proposti per i campi vuoti (nella lingua del contesto): dal
+        testo del catalogo fornitore se la lingua ce l'ha (2026-11-17, più
+        accurato), altrimenti dalla descrizione di vendita.
+        """
         self.ensure_one()
-        source = self.description_sale or ''
-        plain = _plain(source)
-        # Un punto elenco Amazon può contenere più righe: una voce per riga.
-        bullets = [line.strip(' -•·') for b in re.findall(r'<li[^>]*>(.*?)</li>', source, flags=re.S | re.I)
-                   for line in re.split(r'\n|\s*•\s*', _plain(b))]
-        bullets = [b[:1].upper() + b[1:] for b in bullets if b]
-        body = _plain(re.sub(r'<ul.*?</ul>', '', source, flags=re.S | re.I))
+        supplier = self._ke_supplier_web_source()
+        if supplier:
+            body, bullets = supplier
+            plain = (body + ' ' + ' '.join(bullets)).strip()
+        else:
+            source = self.description_sale or ''
+            plain = _plain(source)
+            # Un punto elenco Amazon può contenere più righe: una voce per riga.
+            bullets = [line.strip(' -•·') for b in re.findall(r'<li[^>]*>(.*?)</li>', source, flags=re.S | re.I)
+                       for line in re.split(r'\n|\s*•\s*', _plain(b))]
+            bullets = [b[:1].upper() + b[1:] for b in bullets if b]
+            body = _plain(re.sub(r'<ul.*?</ul>', '', source, flags=re.S | re.I))
         # 'empty': campi da proporre (scelti per lingua da action_ke_web_propose);
         # None = quelli vuoti nella lingua del contesto.
         need = (lambda f: f in empty) if empty is not None else (lambda f: not _plain(str(self[f] or '')))
-        name = (not need('ke_web_name') and self.ke_web_name) or short_name(self.name)
+        supplier_name = (self._ke_supplier_site_name(self.env.lang or 'en_US')
+                         if 'ke_supplier_name' in self._fields else '')
+        name = (not need('ke_web_name') and self.ke_web_name) or supplier_name or short_name(self.name)
         brand = self.ke_brand_id.name if 'ke_brand_id' in self._fields and self.ke_brand_id else ''
         vals = {}
         if need('ke_web_name'):
@@ -155,9 +179,11 @@ class ProductTemplate(models.Model):
                 value = False
             return str(value or proposal.get(field) or '')
 
+        supplier_name = (self._ke_supplier_site_name(self.env.lang or 'en_US')
+                         if 'ke_supplier_name' in self._fields else '')
         return {
-            'name': self.ke_web_name or self.name or '',
-            'slug': pick('ke_web_slug') or slugify(self.ke_web_name or short_name(self.name)),
+            'name': self.ke_web_name or supplier_name or self.name or '',
+            'slug': pick('ke_web_slug') or slugify(self.ke_web_name or supplier_name or short_name(self.name)),
             'meta_title': pick('ke_web_meta_title'),
             'meta_description': pick('ke_web_meta_description'),
             'short_description': pick('ke_web_short_description', True),
@@ -177,17 +203,24 @@ class ProductTemplate(models.Model):
         quello della lingua principale.
         """
         self.ensure_one()
-        raw = self._ke_raw(['name', 'description_sale'] + self._KE_WEB_FIELDS)
+        sources = ['name', 'description_sale'] + (
+            ['ke_supplier_copy', 'ke_supplier_bullets'] if 'ke_supplier_copy' in self._fields else [])
+        raw = self._ke_raw(sources + self._KE_WEB_FIELDS)
         own = {f for f, values in raw.items() if self._ke_own(values, lang, primary)}
+        # Nome composto dal fornitore: valido in ogni lingua (tipo tradotto).
+        supplier_name = (self._ke_supplier_site_name(lang)
+                         if 'ke_supplier_name' in self._fields and 'ke_web_name' not in own else '')
+        if supplier_name:
+            own.add('ke_supplier_name')
         if not own:
             return {}
         tmpl = self.with_context(lang=lang)
         # Si propone solo da una fonte propria della lingua: nome → nome sul
         # sito, meta title, URL; descrizione → meta description e descrizioni.
         empty = set()
-        if own & {'name', 'ke_web_name'}:
+        if own & {'name', 'ke_web_name', 'ke_supplier_name'}:
             empty |= {'ke_web_name', 'ke_web_meta_title', 'ke_web_slug'} - own
-        if 'description_sale' in own:
+        if own & {'description_sale', 'ke_supplier_copy', 'ke_supplier_bullets'}:
             empty |= {'ke_web_meta_description', 'ke_web_short_description', 'ke_web_description'} - own
         proposal = tmpl._ke_web_proposal(empty=empty) if empty else {}
 
@@ -197,7 +230,7 @@ class ProductTemplate(models.Model):
             return str(proposal.get(field) or '')
 
         name = (tmpl.ke_web_name if 'ke_web_name' in own else
-                tmpl.name if 'name' in own else '') or ''
+                supplier_name or (tmpl.name if 'name' in own else '')) or ''
         texts = {
             'name': name,
             'slug': pick('ke_web_slug'),
