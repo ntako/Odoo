@@ -86,8 +86,10 @@ class ProductCategoryRule(models.Model):
             parent = child
         return parent
 
-    @api.model
     def action_load_default_rules(self):
+        # Niente @api.model: il bottone nell'intestazione della lista passa gli id selezionati
+        # (anche nessuno) e con @api.model la chiamata fallisce ("takes 1 positional argument").
+        self = self.browse()
         """Crea le regole predefinite che mancano (e le sottocategorie che servono); solo se c'è "Pesca"."""
         from . import category_rules_default as defaults
         if not self._category_by_path('Pesca'):

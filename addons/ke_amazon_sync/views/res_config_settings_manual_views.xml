@@ -57,11 +57,29 @@
                                 string="Recupera testi da Amazon" type="object" class="btn btn-secondary"
                                 confirm="Avvio il recupero dei testi da Amazon per ogni lingua dei marketplace, in background (solo lettura su Amazon). Continuare?"/>
                     </setting>
+                    <setting string="Riattiva prodotti con inserzioni"
+                             help="Riattiva i prodotti archiviati che hanno inserzioni Amazon, anche inattive (esauriti ma ancora in vendita). Salta quelli con lo stesso EAN di un prodotto attivo (possibili doppioni). Nessuna chiamata ad Amazon.">
+                        <button name="action_reactivate_listed_products"
+                                string="Riattiva prodotti" type="object" class="btn btn-secondary"
+                                confirm="Riattivo i prodotti archiviati che hanno inserzioni Amazon (anche inattive). L'elenco finisce in un log. Continuare?"/>
+                    </setting>
+                    <setting string="Codici prodotto senza &quot;+&quot;"
+                             help="Toglie il &quot;+&quot; finale dai codici prodotto (es. PFS-1636736+ → PFS-1636736; il &quot;.&quot; resta: indica un altro articolo). Gli SKU Amazon non cambiano: restano sulle inserzioni e come SKU principale. I codici che diventerebbero uguali a quelli di un altro prodotto non si toccano e finiscono nel log come doppioni da unire. Nessuna chiamata ad Amazon.">
+                        <button name="action_clean_codes_check"
+                                string="Verifica" type="object" class="btn btn-secondary"/>
+                        <button name="action_clean_codes"
+                                string="Pulisci codici" type="object" class="btn btn-secondary ms-2"
+                                confirm="Tolgo il &quot;+&quot; finale dai codici prodotto (gli SKU Amazon non cambiano). Continuare?"/>
+                    </setting>
                     <setting string="Specifiche tecniche da Amazon"
                              help="Rapporto di recupero, cuscinetti, diametro, carico di rottura, tecnica… dal Catalog API di ogni marketplace con lingua (solo lettura). Unità uniformate; i valori scritti a mano non si toccano. Circa 15 minuti per marketplace.">
                         <button name="action_run_import_specs"
                                 string="Importa specifiche da Amazon" type="object" class="btn btn-secondary"
                                 confirm="Avvio l'import delle specifiche tecniche da Amazon per ogni marketplace con lingua, in background (solo lettura su Amazon, circa 15 minuti per marketplace). Continuare?"/>
+                        <button name="action_run_import_specs_new"
+                                string="Solo prodotti nuovi" type="object" class="btn btn-secondary ms-2"
+                                help="Solo le varianti che non hanno ancora specifiche da Amazon (es. inserzioni nuove): pochi minuti invece di un'ora."
+                                confirm="Avvio l'import delle specifiche tecniche da Amazon solo per le varianti che non ne hanno ancora, in background (solo lettura su Amazon). Continuare?"/>
                     </setting>
                 </block>
             </xpath>

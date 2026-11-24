@@ -198,7 +198,8 @@ class TestFullImportRobustness(TransactionCase):
         it_client = FakeSpApiClient({child: 'B0ZZROBUPPB'}, marketplace_id='ZZ_ROB_IT')
         log, _eng = self._run(it_client, [make_report_row('ZZT-ROBUP-1+', asin=child)])
         self.assertIn('[ZZRI] Righe senza problemi: collegati a famiglie di altri marketplace 1', log.log_lines)
-        self.assertEqual((variant.x_amazon_sku, variant.default_code), ('ZZT-ROBUP-1+', 'ZZT-ROBUP-1+'))
+        # Dal 2026-11-20 il codice prodotto non segue lo SKU principale (resta senza "+").
+        self.assertEqual((variant.x_amazon_sku, variant.default_code), ('ZZT-ROBUP-1+', 'ZZT-ROBUP-1'))
         self.assertEqual(self._listing(variant, self.es).sku, 'ZZT-ROBUP-1', "l'annuncio ES resta col suo SKU")
 
         # Su un marketplace secondario lo SKU principale non cambia.
@@ -286,7 +287,7 @@ class TestFullImportRobustness(TransactionCase):
             make_report_row('ZZT-ROBPL-2+', asin='B0ZZROBPL2'),
             make_report_row('ZZT-ROBPL-3', asin='B0ZZROBPL3'),
         ])
-        simple = self.env['product.template'].search([('default_code', '=', 'ZZT-ROBPL-1+')]).product_variant_id
+        simple = self.env['product.template'].search([('x_amazon_sku', '=', 'ZZT-ROBPL-1+')]).product_variant_id
         variant = self.env['product.product'].search([('x_amazon_asin', '=', 'B0ZZROBPL2')])
 
         es_client = FakeSpApiClient({'B0ZZROBPL2': 'B0ZZROBPLPA', 'B0ZZROBPL3': 'B0ZZROBPLPA'},
@@ -308,7 +309,7 @@ class TestFullImportRobustness(TransactionCase):
         # variante (prima veniva saltato se c'era già l'annuncio '+').
         it_client = FakeSpApiClient(marketplace_id='ZZ_ROB_IT')
         self._run(it_client, [make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1')])
-        simple = self.env['product.template'].search([('default_code', '=', 'ZZT-ROBPK-1+')]).product_variant_id
+        simple = self.env['product.template'].search([('x_amazon_sku', '=', 'ZZT-ROBPK-1+')]).product_variant_id
         es_client = FakeSpApiClient(marketplace_id='ZZ_ROB_ES')
         self._run(es_client, [
             make_report_row('ZZT-ROBPK-1+', asin='B0ZZROBPK1', open_date='05/08/2026 10:00:00 MEST'),

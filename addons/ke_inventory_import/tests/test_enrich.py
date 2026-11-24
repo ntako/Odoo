@@ -6,7 +6,7 @@ from odoo.tests import TransactionCase, tagged
 
 from odoo.addons.ke_inventory_import.models.enrich import do_enrich
 
-HEADER = ['SAP', 'SAP Description', 'Master Description', 'Category', 'SubCategory', 'Product Type', 'Water Type', 'Color',
+HEADER = ['SAP', 'SAP Description', 'Master code', 'Master Description', 'Category', 'SubCategory', 'Product Type', 'Water Type', 'Color',
           'Gear Ratio', 'Bearing Count', 'Max Drag', 'Reel Handle Position', 'Advertised Diameter',
           'Break Strength', 'Advertised Length', 'EAN/UPC',
           'Each Dimension - Length', 'Each Dimension - Width', 'Each Dimension - Height',
@@ -156,3 +156,52 @@ class TestSupplierCatalog(TransactionCase):
         self.assertFalse(self.line.ke_supplier_name)
         self.assertFalse(self.line.with_context(active_test=False).ke_spec_ids)
         self.assertIn('abbinate a prodotti Odoo: 1', result)
+
+
+    # --- Famiglia del fornitore sulla variante (2026-11-20) ---
+
+    def test_family_on_variants_code_beats_ean(self):
+        self.reel.barcode = '036282000002'
+        other = self.env['product.template'].create({'name': 'ZZF Altro', 'barcode': '036282000001'})
+        self.rows[0].update({'Master code': '1641516', 'Master Description': 'Beast\u2122 200 Low Profile Reel'})
+        self.rows[1].update({'Master code': '1578680'})
+        self.rows += [
+            # stesso EAN del mulinello, ma il mulinello è abbinato per codice: resta della sua famiglia
+            {'SAP': '4444444', 'Master code': '9000002', 'EAN/UPC': '036282000002'},
+            # un EAN su due righe con famiglie diverse: ambiguo, non si scrive
+            {'SAP': '2222222', 'Master code': '9000000', 'EAN/UPC': '036282000001'},
+            {'SAP': '3333333', 'Master code': '9000001', 'EAN/UPC': '036282000001'},
+        ]
+        result = self._run()
+        self.assertEqual(self.reel.product_variant_id.ke_supplier_family_ref, '1641516')
+        self.assertEqual(self.reel.product_variant_id.ke_supplier_family_name, 'Beast\u2122 200 Low Profile Reel')
+        self.assertEqual(self.line.product_variant_id.ke_supplier_family_ref, '1578680')
+        self.assertFalse(other.product_variant_id.ke_supplier_family_ref)
+        self.assertIn('Famiglie del fornitore: 2 famiglie per 2 varianti', result)
+        self.assertIn('1 varianti con famiglie diverse', result)
+
+    def test_existing_preset_gets_family_columns(self):
+        self.preset.line_ids.filtered(lambda l: l.target.startswith('_supplier_family') or l.target == '_brand').unlink()
+        self.env['inventory.mapping.preset']._ke_add_purefishing_family_lines()
+        cols = {l.target: l.csv_column for l in self.preset.line_ids}
+        self.assertEqual(cols.get('_brand'), 'Brand')
+        self.assertEqual(cols.get('_supplier_family_ref'), 'Master code')
+        self.assertEqual(cols.get('_supplier_family_name'), 'Master Description')
+        size = self.preset.line_ids.filtered(lambda l: l.spec_key_id.code == 'size')
+        self.assertIn('Reel Size', size.mapped('csv_column'))
+        self.env['inventory.mapping.preset']._ke_add_purefishing_family_lines()
+        self.assertEqual(len(self.preset.line_ids.filtered(lambda l: l.spec_key_id.code == 'size')), len(size),
+                         'di nuovo: nessun doppione')
+
+    def test_free_text_replaces_amazon_translations(self):
+        """Colore del fornitore (solo inglese) sopra un colore Amazon tradotto male: uguale in ogni lingua."""
+        key = self.env['ke.product.spec.key'].search([('code', '=', 'color')], limit=1)
+        if not key:
+            from odoo.addons.ke_product_catalog.spec_rules import SPEC_KEYS
+            key = self.env['ke.product.spec.key']._ensure('color', SPEC_KEYS['color'][1], SPEC_KEYS['color'][0])
+        self.reel._ke_set_specs({key: 'Limone posteriore'}, 'amazon', 'it_IT')
+        self.reel._ke_set_specs({key: 'Lemon Back'}, 'amazon', 'en_US')
+        self.rows[0]['Color'] = 'Lemon Back'
+        self._run()
+        self.assertEqual(self._specs(self.reel, 'it_IT')['color'], 'Lemon Back')
+        self.assertEqual(self._specs(self.reel, 'de_DE')['color'], 'Lemon Back')

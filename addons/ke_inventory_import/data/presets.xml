@@ -2,4 +2,10 @@
 <odoo>
     <!-- Preset di arricchimento Pure Fishing (2026-11-17): creato una volta, poi modificabile. -->
     <function model="inventory.mapping.preset" name="_ke_create_purefishing_enrich_preset"/>
+    <!-- Famiglia del fornitore (2026-11-20): aggiunta anche al preset già esistente. -->
+    <function model="inventory.mapping.preset" name="_ke_add_purefishing_family_lines"/>
+    <!-- Trabucco, Tubertini, Lineaeffe, C4 (2026-11-20): creati una volta, poi modificabili. -->
+    <function model="inventory.mapping.preset" name="_ke_create_supplier_presets"/>
+    <!-- File del magazzino (2026-11-24): giacenze di Cavallino e costi. -->
+    <function model="inventory.mapping.preset" name="_ke_create_stock_preset"/>
 </odoo>

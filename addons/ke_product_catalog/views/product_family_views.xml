@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Famiglie del fornitore (2026-11-20): proposte per riunire o separare le famiglie nate da Amazon. -->
+    <record id="view_ke_family_proposal_list" model="ir.ui.view">
+        <field name="name">ke.product.family.proposal.list</field>
+        <field name="model">ke.product.family.proposal</field>
+        <field name="arch" type="xml">
+            <list create="false" decoration-warning="state == 'pending' and not certain"
+                  decoration-muted="state != 'pending'">
+                <header>
+                    <button name="action_propose_all" type="object" string="Calcola proposte" display="always"/>
+                    <button name="action_apply" type="object" string="Applica"
+                            confirm="Le varianti delle famiglie scelte vengono spostate (con giacenze, inserzioni, codici e specifiche); i prodotti rimasti vuoti vengono archiviati. Procedere?"/>
+                    <button name="action_discard" type="object" string="Scarta"/>
+                    <button name="action_restore" type="object" string="Rimetti da valutare"/>
+                </header>
+                <field name="brand_id" optional="show"/>
+                <field name="name"/>
+                <field name="family_ref" optional="hide"/>
+                <field name="kind"/>
+                <field name="summary"/>
+                <field name="target_tmpl_id" optional="show"/>
+                <field name="variant_count" optional="show"/>
+                <field name="tmpl_count" optional="show"/>
+                <field name="certain" optional="show"/>
+                <field name="state" optional="show"/>
+                <field name="apply_error" optional="show"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_ke_family_proposal_form" model="ir.ui.view">
+        <field name="name">ke.product.family.proposal.form</field>
+        <field name="model">ke.product.family.proposal</field>
+        <field name="arch" type="xml">
+            <form create="false" edit="false">
+                <header>
+                    <button name="action_apply" type="object" string="Applica" class="btn-primary"
+                            invisible="state != 'pending'"
+                            confirm="Le varianti vengono spostate (con giacenze, inserzioni, codici e specifiche); i prodotti rimasti vuoti vengono archiviati. Procedere?"/>
+                    <button name="action_discard" type="object" string="Scarta" invisible="state != 'pending'"/>
+                    <button name="action_restore" type="object" string="Rimetti da valutare"
+                            invisible="state != 'discarded'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name"/></h1>
+                        <field name="summary"/>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="kind"/>
+                            <field name="brand_id"/>
+                            <field name="family_ref"/>
+                        </group>
+                        <group>
+                            <field name="target_tmpl_id"/>
+                            <field name="variant_count"/>
+                            <field name="tmpl_count"/>
+                        </group>
+                    </group>
+                    <group string="Da sapere" invisible="not warnings">
+                        <field name="warnings" nolabel="1" colspan="2"/>
+                    </group>
+                    <notebook>
+                        <page string="Varianti della famiglia">
+                            <field name="variant_ids">
+                                <list>
+                                    <field name="default_code"/>
+                                    <field name="display_name"/>
+                                    <field name="barcode" optional="show"/>
+                                    <field name="product_tmpl_id" string="Prodotto attuale"/>
+                                    <field name="qty_available" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Prodotti dove sono oggi">
+                            <field name="tmpl_ids">
+                                <list>
+                                    <field name="name"/>
+                                    <field name="default_code" optional="show"/>
+                                    <field name="product_variant_count" string="Varianti in tutto"/>
+                                    <field name="categ_id" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_ke_family_proposal_search" model="ir.ui.view">
+        <field name="name">ke.product.family.proposal.search</field>
+        <field name="model">ke.product.family.proposal</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="family_ref"/>
+                <field name="brand_id"/>
+                <field name="tmpl_ids" string="Prodotto"/>
+                <filter name="pending" string="Da valutare" domain="[('state', '=', 'pending')]"/>
+                <filter name="sure" string="Senza avvisi" domain="[('state', '=', 'pending'), ('certain', '=', True)]"/>
+                <filter name="warn" string="Con avvisi" domain="[('state', '=', 'pending'), ('certain', '=', False)]"/>
+                <separator/>
+                <filter name="merge" string="Unisci" domain="[('kind', '=', 'merge')]"/>
+                <filter name="split" string="Separa" domain="[('kind', '=', 'split')]"/>
+                <filter name="both" string="Riorganizza" domain="[('kind', '=', 'both')]"/>
+                <separator/>
+                <filter name="discarded" string="Scartate" domain="[('state', '=', 'discarded')]"/>
+                <group>
+                    <filter name="group_brand" string="Marca" context="{'group_by': 'brand_id'}"/>
+                    <filter name="group_kind" string="Cosa fare" context="{'group_by': 'kind'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_ke_family_proposal" model="ir.actions.act_window">
+        <field name="name">Proposte di famiglia</field>
+        <field name="res_model">ke.product.family.proposal</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_pending': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Nessuna proposta</p>
+            <p>Le famiglie vengono dal catalogo del fornitore: importalo con l'arricchimento (colonne
+               "Codice famiglia fornitore" e "Nome famiglia fornitore"), poi premi "Calcola proposte".</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_ke_family_proposal" name="Proposte di famiglia" parent="stock.menu_product_in_config_stock"
+              action="action_ke_family_proposal" groups="product.group_product_manager" sequence="39"/>
+
+    <!-- Nomi di famiglie e varianti dal catalogo del fornitore. -->
+    <record id="view_ke_family_names_wizard_form" model="ir.ui.view">
+        <field name="name">ke.product.family.names.wizard.form</field>
+        <field name="model">ke.product.family.names.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Nomi dal catalogo fornitore">
+                <p class="text-muted">Per i prodotti le cui varianti sono tutte della stessa famiglia del fornitore:
+                    nome del prodotto come sul sito (marca + famiglia + tipo, in ogni lingua) e nomi delle varianti
+                    dalle specifiche che le distinguono (es. "0,30 mm"). Le famiglie applicate dalle proposte li
+                    ricevono già.</p>
+                <group>
+                    <field name="scope" widget="radio"/>
+                    <field name="product_count" invisible="scope != 'selected'"/>
+                    <field name="rename_product"/>
+                    <field name="rename_variants"/>
+                    <field name="dry_run"/>
+                </group>
+                <field name="result" invisible="not result" nolabel="1" class="font-monospace"/>
+                <footer>
+                    <button name="action_run" type="object" string="Avvia" class="btn-primary"/>
+                    <button special="cancel" string="Chiudi"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_ke_family_names_wizard" model="ir.actions.act_window">
+        <field name="name">Nomi dal catalogo fornitore</field>
+        <field name="res_model">ke.product.family.names.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="binding_view_types">list</field>
+        <field name="group_ids" eval="[(4, ref('product.group_product_manager'))]"/>
+    </record>
+
+    <menuitem id="menu_ke_family_names" name="Nomi dal catalogo fornitore" parent="stock.menu_product_in_config_stock"
+              action="action_ke_family_names_wizard" groups="product.group_product_manager" sequence="40"/>
+
+    <!-- Famiglia del fornitore nella lista varianti (colonne facoltative). -->
+    <record id="view_product_product_tree_ke_family" model="ir.ui.view">
+        <field name="name">product.product.list.ke.family</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_product_tree_view"/>
+        <field name="arch" type="xml">
+            <field name="default_code" position="after">
+                <field name="ke_supplier_code" optional="hide"/>
+                <field name="ke_supplier_family_ref" optional="hide"/>
+                <field name="ke_supplier_family_name" optional="hide"/>
+            </field>
+        </field>
+    </record>
+</odoo>

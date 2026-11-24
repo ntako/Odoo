@@ -79,8 +79,8 @@
 
     <menuitem id="menu_ke_product_classification_export" name="Esporta classificazione prodotti"
               parent="stock.menu_product_in_config_stock" action="action_ke_product_classification_export"
-              groups="product.group_product_manager" sequence="40"/>
+              groups="product.group_product_manager" sequence="39"/>
     <menuitem id="menu_ke_product_classification_import" name="Importa classificazione prodotti"
               parent="stock.menu_product_in_config_stock" action="action_ke_product_classification_import"
-              groups="product.group_product_manager" sequence="41"/>
+              groups="product.group_product_manager" sequence="40"/>
 </odoo>

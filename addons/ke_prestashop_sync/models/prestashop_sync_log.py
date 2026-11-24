@@ -26,6 +26,7 @@ class PrestashopSyncLog(models.Model):
         ('sync_prices', 'Sync Prezzi → PS'),
         ('import_orders', 'Import Ordini da PS'),
         ('sync_images', 'Sync Immagini → PS'),
+        ('sync_categories', 'Albero categorie → PS'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('queued', 'In coda'),

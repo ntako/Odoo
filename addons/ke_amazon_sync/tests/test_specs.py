@@ -118,6 +118,31 @@ class TestImportSpecs(TransactionCase):
         self.assertEqual(vals(reel, 'it_IT')['color'], 'Nero opaco')
         self.assertNotIn('gear_ratio', vals(reel, 'it_IT'))
 
+    def test_only_new_reads_variants_without_amazon_specs(self):
+        """"Solo prodotti nuovi": rilegge solo le varianti senza specifiche Amazon prima dell'avvio."""
+        from datetime import datetime, timedelta
+        old = self.env['product.template'].create({'name': 'ZZT Mulinello già letto'})
+        self._listing(old.product_variant_id, 'B0ZZSPOLD1', 'ZZT-SP-OLD')
+        items = {'B0ZZSPOLD1': {'attributes': REEL, 'productTypes': [{'productType': 'FISHING_REEL'}]}}
+        client = _Client(items)
+        eng = self.se.SyncEngine(self.env, client)
+        with no_commit(self.env):
+            eng.import_marketplace_specs(self.log, self.it, primary=True)
+        self.assertTrue(old.ke_spec_ids)
+
+        new = self.env['product.template'].create({'name': 'ZZT Mulinello nuovo'})
+        self._listing(new.product_variant_id, 'B0ZZSPNEW1', 'ZZT-SP-NEW')
+        items['B0ZZSPNEW1'] = items['B0ZZSPOLD1']
+        asked = []
+        client.get_catalog_items_batch = lambda asins: asked.extend(asins) or {a: items[a] for a in asins}
+        # Nel test le righe hanno tutte la data della transazione: l'avvio del giro è "dopo".
+        with no_commit(self.env):
+            updated, _empty, errors = eng.import_marketplace_specs(
+                self.log, self.it, primary=True, missing_before=datetime.now() + timedelta(days=1))
+        self.assertEqual(asked, ['B0ZZSPNEW1'])
+        self.assertEqual((updated, errors), (1, 0))
+        self.assertTrue(new.ke_spec_ids)
+
 
 class TestPhysicalValues(TransactionCase):
     """Peso e dimensioni da Amazon solo se mancano (2026-11-17)."""
@@ -129,3 +154,19 @@ class TestPhysicalValues(TransactionCase):
         self.assertNotIn('weight', vals, 'peso già presente (es. dal fornitore): resta')
         if 'product_length' in tmpl._fields:
             self.assertEqual(vals, {'product_length': 20.0, 'product_height': 5.0})
+
+
+@tagged('post_install', '-at_install')
+class TestStuckPerMarketplaceJob(TransactionCase):
+    """Giro specifiche rimasto "in corso" (thread morto): "Ferma e segna terminato" lo sblocca (2026-11-19)."""
+
+    def test_mark_done_frees_state_and_closes_children(self):
+        params = self.env['ir.config_parameter'].sudo()
+        params.set_param('ke_amazon_sync.import_specs_state', 'running')
+        Log = self.env['ke.amazon.sync.log']
+        main = Log.create({'name': 'ZZT giro', 'sync_type': 'import_specs', 'state': 'running'})
+        child = Log.create({'name': 'ZZT giro IT', 'sync_type': 'import_specs', 'state': 'running',
+                            'parent_log_id': main.id})
+        child.action_mark_done()
+        self.assertEqual(params.get_param('ke_amazon_sync.import_specs_state'), 'idle')
+        self.assertEqual((main.state, child.state), ('done', 'done'))

@@ -5,6 +5,10 @@ from .field_mapping import MAPPING_TARGETS, VOLUME_UNIT_SELECTION, WEIGHT_UNIT_S
 from .import_job import _AUTO_DETECT_MAP
 
 
+# Misura (2026-11-20): dà il nome alle varianti di mulinelli, abbigliamento, attrezzatura.
+_SIZE_COLUMNS = ['Reel Size', 'Apparel Size', 'Equipment Size', 'Tackle Size']
+
+
 class InventoryMappingPreset(models.Model):
     _name = 'inventory.mapping.preset'
     _description = 'Mapping Preset'
@@ -49,6 +53,26 @@ class InventoryMappingPreset(models.Model):
     spec_text_lang = fields.Selection(
         lambda self: self.env['inventory.import.job']._spec_lang_selection(),
         string='Lingua dei testi delle specifiche', default='en_GB')
+    # Import integrato (2026-11-20): crea gli articoli mancanti nella loro famiglia, riusa gli archiviati.
+    create_missing = fields.Boolean(
+        'Crea gli articoli mancanti',
+        help='Gli articoli del file che non sono in Odoo vengono creati nella loro famiglia del fornitore '
+             '(aggiunti alla famiglia esistente o in una famiglia nuova); quelli archiviati vengono riattivati, '
+             'mai duplicati. Poi l\'arricchimento e i nomi del fornitore.')
+    code_suffix = fields.Char(
+        'Suffisso del codice nel file',
+        help='Parte finale del codice del file che in Odoo non c\'è (es. Tubertini "20181XX" = TUB-20181: "XX").')
+    brand_name = fields.Char('Marca (se il file non ha la colonna)')
+    family_from_name = fields.Boolean(
+        'Famiglie dal nome',
+        help='Per i file senza codice famiglia: articoli con lo stesso nome a meno delle misure finali '
+             '("Marginal Carp X 1,50 Mt.", "… 1,80 Mt.") sono la stessa famiglia.')
+
+    # Giacenze e costi dal magazzino (2026-11-24): vedi inventory.import.job.
+    stock_mode = fields.Boolean('Giacenze e costi dal magazzino')
+    qty_skip_values = fields.Text('Niente quantità per')
+    sublocations = fields.Boolean('Ubicazioni come sotto-posizioni', default=True)
+    stock_location_id = fields.Many2one('stock.location', 'Posizione del magazzino', domain=[('usage', '=', 'internal')])
 
     @api.onchange('csv_file_id')
     def _onchange_csv_file_id(self):
@@ -95,7 +119,9 @@ class InventoryMappingPreset(models.Model):
 
     _PUREFISHING_ENRICH = {
         'name': 'Pure Fishing EMEA (arricchimento)',
-        'fields': [('SAP', 'default_code'), ('EAN/UPC', 'barcode'), ('Master Description', '_supplier_name'),
+        'fields': [('SAP', 'default_code'), ('EAN/UPC', 'barcode'), ('SAP Description', 'name'),
+                   ('Master Description', '_supplier_name'), ('Brand', '_brand'),
+                   ('Master code', '_supplier_family_ref'), ('Master Description', '_supplier_family_name'),
                    ('Category', '_supplier_category'), ('SubCategory', '_supplier_category'),
                    ('Each Dimension - Length', '_volume_l'), ('Each Dimension - Width', '_volume_w'),
                    ('Each Dimension - Height', '_volume_h'),
@@ -120,7 +146,7 @@ class InventoryMappingPreset(models.Model):
             ('transport_length', ['Transport Length']), ('guides', ['Number of guides With Tip']),
             ('buoyancy', ['Bait Buoyancy']), ('depth', ['Swimming Depth - Meters']),
             ('hook_size', ['Hook Size']), ('hooks', ['Number of Hooks']), ('scent', ['Bait Scent/Flavor']),
-            ('color', ['Color']), ('material', ['Rod Blank Material', 'Reel Spool Material']),
+            ('color', ['Color']), ('size', _SIZE_COLUMNS), ('material', ['Rod Blank Material', 'Reel Spool Material']),
             ('weight', ['Bait Weight - Grams', 'Reel Weight (g)', 'Rod Weight (g)', 'Net Weight']),
         ],
     }
@@ -155,6 +181,100 @@ class InventoryMappingPreset(models.Model):
             'match_ean': True, 'spec_text_lang': 'en_GB', 'weight_unit': 'kg', 'volume_unit': 'cm',
             'line_ids': [(0, 0, l) for l in lines],
         })
+
+
+    # Altri fornitori (2026-11-20, file in docs/Fornitori): nessun codice famiglia tranne C4 (righe di
+    # intestazione "Modello"); niente specifiche né testi in più lingue. Costo = prezzo di listino.
+    _SUPPLIER_PRESETS = [
+        {'name': 'Trabucco (catalogo)', 'code_prefix': 'TRA-', 'brand_name': 'Trabucco', 'family_from_name': True,
+         'fields': [('Codice Articolo', 'default_code'), ('Descrizione Articolo', 'name'), ('EAN', 'barcode'),
+                    ('Prezzo', 'standard_price'), ('Codice Categoria Articolo', '_supplier_category')]},
+        # Marca: colonna "Brand" (Tubertini, Seika, Ryobi…); vuota in 1.379 righe su 7.072 → Tubertini.
+        {'name': 'Tubertini (catalogo)', 'code_prefix': 'TUB-', 'code_suffix': 'XX', 'brand_name': 'Tubertini',
+         'family_from_name': True,
+         'fields': [('Codice', 'default_code'), ('Descrizione', 'name'), ('Brand', '_brand'),
+                    ('Barcode EAN13', 'barcode'), ('Gruppo', '_supplier_category'),
+                    ('Prezzo Listino', 'standard_price')]},
+        {'name': 'Lineaeffe (catalogo)', 'code_prefix': 'LNF-', 'brand_name': 'Lineaeffe', 'family_from_name': True,
+         'fields': [('CODE', 'default_code'), ('CODICE A BARRE', 'barcode'), ('DESCRIZIONE', 'name'),
+                    ('€ PRICE LIST 2026', 'standard_price')]},
+        {'name': 'C4 / H.Dessault (fotolistino)', 'code_prefix': 'C4C-',
+         'fields': [('CODICE', 'default_code'), ('Codice a barre', 'barcode'), ('DESCRIZIONE', 'name'),
+                    ('MODELLO + link', '_supplier_family_name'), ('LINEA', '_brand'),
+                    ('LINEA', '_supplier_category'), ('FAMIGLIA', '_supplier_category'),
+                    ('Riservato', 'standard_price')]},
+    ]
+
+    @api.model
+    def _ke_create_supplier_presets(self):
+        """Preset dei fornitori senza codice famiglia (2026-11-20), se non ci sono già (poi modificabili)."""
+        for conf in self._SUPPLIER_PRESETS:
+            existing = self.search([('name', '=', conf['name'])], limit=1)
+            if existing:
+                if conf.get('brand_name') and not existing.brand_name:
+                    existing.brand_name = conf['brand_name']
+                continue
+            self.create({
+                'name': conf['name'], 'delimiter': ';', 'enrich_only': True, 'match_ean': True,
+                'create_missing': True,   # decisione 2026-11-20: si creano tutti gli articoli del listino
+                'code_prefix': conf['code_prefix'], 'code_suffix': conf.get('code_suffix') or False,
+                'brand_name': conf.get('brand_name') or False, 'family_from_name': conf.get('family_from_name'),
+                'line_ids': [(0, 0, {'csv_column': c, 'target': t, 'sequence': (i + 1) * 10})
+                             for i, (c, t) in enumerate(conf['fields'])],
+            })
+
+    # File del magazzino (2026-11-24, docs/MagazzinoArundo.csv): giacenze di Cavallino e costi reali.
+    # Niente quantità per Pure Fishing e per 5 articoli Sbirulino (MA.GIA.); il costo sì per tutti.
+    _STOCK_PRESET = {
+        'name': 'Magazzino Arundo (giacenze e costi)',
+        'fields': [('MPN', 'default_code'), ('EAN', 'barcode'), ('ASIN', '_asin'), ("Q.TA'", '_qty'),
+                   ('UBICAZIONE', '_location'), ('PREZZO UNITARIO', 'standard_price')],
+        'skip': ['PURE FISHING', '0000100300030', '0000100200035', '0000100120030', '0000100160020',
+                 '0000100130020'],
+    }
+
+    @api.model
+    def _ke_create_stock_preset(self):
+        """Preset del file del magazzino, se non c'è già (poi modificabile)."""
+        conf = self._STOCK_PRESET
+        if self.search_count([('name', '=', conf['name'])]):
+            return
+        warehouse = self.env['stock.warehouse'].search([('code', '=', 'CAV')], limit=1)
+        self.create({
+            'name': conf['name'], 'delimiter': ',', 'stock_mode': True, 'sublocations': True,
+            'stock_location_id': warehouse.lot_stock_id.id or False,
+            'qty_skip_values': '\n'.join(conf['skip']),
+            'line_ids': [(0, 0, {'csv_column': c, 'target': t, 'sequence': (i + 1) * 10})
+                         for i, (c, t) in enumerate(conf['fields'])],
+        })
+
+    @api.model
+    def _ke_add_purefishing_family_lines(self):
+        """
+        Preset Pure Fishing creato prima del 2026-11-20: aggiunge le colonne arrivate dopo, se mancano —
+        famiglia del fornitore ("Master code", "Master Description"), marca ("Brand") e specifica "Misura"
+        (Reel Size…).
+        A ogni aggiornamento del modulo: una colonna tolta a mano ritorna (si toglie di nuovo senza problemi).
+        """
+        preset = self.search([('name', '=', self._PUREFISHING_ENRICH['name'])], limit=1)
+        if not preset:
+            return
+        seq = max(preset.line_ids.mapped('sequence') or [0])
+        new = []
+        if not preset.line_ids.filtered(lambda l: l.target == '_supplier_family_ref'):
+            new += [{'csv_column': 'Master code', 'target': '_supplier_family_ref'},
+                    {'csv_column': 'Master Description', 'target': '_supplier_family_name'}]
+        if not preset.line_ids.filtered(lambda l: l.target == '_brand'):
+            new.append({'csv_column': 'Brand', 'target': '_brand'})   # marca solo dove il prodotto non l'ha
+        if not preset.line_ids.filtered(lambda l: l.target == '_spec' and l.spec_key_id.code == 'size'):
+            from odoo.addons.ke_product_catalog.spec_rules import SPEC_KEYS
+            seq_key, labels = SPEC_KEYS['size']
+            key = self.env['ke.product.spec.key'].sudo()._ensure('size', labels, seq_key)
+            new += [{'csv_column': c, 'target': '_spec', 'spec_key_id': key.id} for c in _SIZE_COLUMNS]
+        for i, vals in enumerate(new, 1):
+            vals.update(preset_id=preset.id, sequence=seq + 10 * i)
+        if new:
+            self.env['inventory.mapping.preset.line'].create(new)
 
 
 class InventoryMappingPresetLine(models.Model):

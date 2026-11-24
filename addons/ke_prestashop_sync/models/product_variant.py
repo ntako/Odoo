@@ -19,6 +19,11 @@ class ProductProduct(models.Model):
         help='Modalità "varianti come prodotti separati": il prodotto semplice PrestaShop di questa '
              'variante. 0 = non collegata.',
     )
+    ps_options_dirty = fields.Boolean(
+        string='Valori PS da aggiornare', copy=False,
+        help='Il nome della variante (valori degli attributi) è cambiato in Odoo: il prossimo export aggiorna '
+             'i valori della combinazione già creata su PrestaShop.',
+    )
     ps_legacy_product_id = fields.Integer(
         string='Prodotto PS sostituito',
         copy=False,

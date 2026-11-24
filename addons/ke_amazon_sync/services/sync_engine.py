@@ -602,6 +602,33 @@ def _resolve_product_type(env, requested):
 _GTIN_WIDTHS = (8, 12, 13, 14)
 
 
+def _clean_code(sku):
+    """
+    Codice prodotto da uno SKU Amazon: senza "+" finali (2026-11-20). Gli SKU con "+" (rietichettati) sono
+    inserzioni dello stesso prodotto: restano tali sulle inserzioni e in x_amazon_sku, il codice del
+    prodotto resta uno solo e non cambia più quando cambia lo SKU principale. Il "." resta: indica un altro
+    ASIN, cioè un altro articolo (decisione del 2026-11-11, es. PFS-1523250. = Max X vecchio modello).
+    """
+    return re.sub(r'\++$', '', (sku or '').strip())
+
+
+def _free_code(env, sku, exclude_id=None):
+    """Codice pulito per un prodotto nuovo; lo SKU così com'è se il codice pulito è già di un altro prodotto
+    ("X+" su un ASIN diverso da "X" è un altro articolo)."""
+    clean = _clean_code(sku)
+    if clean != sku and env['product.product'].with_context(active_test=False).search_count(
+            [('default_code', '=', clean), ('id', '!=', exclude_id or 0)], limit=1):
+        return sku
+    return clean
+
+
+def _code_vals(record, sku):
+    """{'default_code': codice pulito} solo se il prodotto non ha ancora un codice."""
+    if record.default_code or not sku:
+        return {}
+    return {'default_code': _free_code(record.env, sku, record.id if record._name == 'product.product' else None)}
+
+
 def _normalize_ean(code):
     """
     Forma canonica di un EAN/UPC per il confronto (chiavi delle mappe di
@@ -815,6 +842,12 @@ class _MatchMaps:
             env['product.template'].search([('default_code', '!=', False)])
             if p.default_code
         }
+        # Codice senza "+" finali (2026-11-20): il codice prodotto non porta più il "+" dello SKU.
+        # Vale solo con un ASIN compatibile (vedi code_match): "X" e "X+" su ASIN diversi sono prodotti
+        # diversi (SPRO-4621-104/105).
+        self.by_clean_code = {}
+        for p in self.by_default_code.values():
+            self.by_clean_code.setdefault(_clean_code(p.default_code), p)
         # Costruita a parte (SyncEngine._build_barcode_map(), serve self)
         # e passata qui invece di ricostruita, per non duplicare la query.
         self.by_barcode = by_barcode
@@ -822,6 +855,12 @@ class _MatchMaps:
             p.x_amazon_parent_asin: p for p in
             env['product.template'].search([('x_amazon_parent_asin', '!=', False)])
         }
+        # Famiglie Amazon unite in Odoo a un'altra (proposte di famiglia, 2026-11-20): il loro parent
+        # ASIN porta alla famiglia che ne ha ricevuto le varianti, non ne crea una nuova. Mai sopra un
+        # prodotto attivo che ha davvero quel parent ASIN.
+        for p in env['product.template'].search([('x_amazon_parent_asin_alias', '!=', False)]):
+            for alias in p._ke_alias_list():
+                self.by_parent_asin.setdefault(alias, p)
         self.variant_by_asin = {
             v.x_amazon_asin: v for v in
             env['product.product'].search([('x_amazon_asin', '!=', False)])
@@ -891,9 +930,22 @@ class _MatchMaps:
             self.by_sku.get(sku)
             or self.by_asin.get(asin)
             or (ean and self.by_barcode.get(_normalize_ean(ean)))
-            or self.by_default_code.get(sku)
+            or self.code_match(sku, asin)
         )
         if match and match.x_amazon_parent_asin:
+            return None
+        return match
+
+    def code_match(self, sku, asin=None):
+        """
+        Prodotto per codice: identico allo SKU, o uguale allo SKU senza "+" finali se l'ASIN non lo
+        smentisce (prodotto senza ASIN, riga senza ASIN o stesso ASIN). Vedi by_clean_code.
+        """
+        match = self.by_default_code.get(sku)
+        if match:
+            return match
+        match = self.by_clean_code.get(_clean_code(sku))
+        if match and asin and match.x_amazon_asin and match.x_amazon_asin != asin:
             return None
         return match
 
@@ -907,7 +959,7 @@ class _MatchMaps:
         report, due famiglie diverse trovate per lo stesso SKU in momenti
         diversi dello stesso import).
         """
-        match = self.by_sku.get(sku) or self.by_default_code.get(sku)
+        match = self.by_sku.get(sku) or self.code_match(sku)
         if match and match.x_amazon_parent_asin:
             return match
         return None
@@ -955,7 +1007,7 @@ class _MatchMaps:
         """Toglie 'tmpl' da tutte le mappe del ramo semplice — usato dopo
         averlo archiviato (SyncEngine._merge_manual_into_variant), perché
         una riga successiva dello stesso import non lo ritrovi."""
-        for mapping in (self.by_sku, self.by_asin, self.by_default_code, self.by_barcode):
+        for mapping in (self.by_sku, self.by_asin, self.by_default_code, self.by_clean_code, self.by_barcode):
             for key in [k for k, v in mapping.items() if v.id == tmpl.id]:
                 del mapping[key]
 
@@ -967,6 +1019,7 @@ class _MatchMaps:
         if ean:
             self.by_barcode[_normalize_ean(ean)] = tmpl
         self.by_default_code[sku] = tmpl
+        self.by_clean_code.setdefault(_clean_code(sku), tmpl)
 
     def register_family(self, parent_asin, tmpl):
         self.by_parent_asin[parent_asin] = tmpl
@@ -1044,7 +1097,8 @@ class SyncEngine:
         annuncio nuovo, quello vecchio tiene il suo FNSKU.
         """
         marketplace = self._current_marketplace()
-        if not marketplace:
+        if not marketplace or not variant:
+            # Senza variante (prodotto archiviato) l'annuncio resterebbe senza prodotto.
             return
         Listing = self.env['ke.amazon.listing'].sudo()
         sku = data.get('sku') or False
@@ -1129,7 +1183,7 @@ class SyncEngine:
             Product = self.env['product.product']
             variant = (
                 Product.search([('x_amazon_sku', '=', sku)], limit=1)
-                or Product.search([('default_code', '=', sku)], limit=1)
+                or Product.search([('default_code', 'in', list({sku, _clean_code(sku)}))], limit=1)
                 or self.env['ke.amazon.listing'].sudo().search([('sku', '=', sku)], limit=1).product_id
             )
         if not variant:
@@ -1158,10 +1212,7 @@ class SyncEngine:
             return
         if not self._switch_main_sku(current, sku, data.get('status')):
             return
-        vals = {'x_amazon_sku': sku, 'x_amazon_fnsku': False}
-        if not variant.default_code or variant.default_code == current:
-            vals['default_code'] = sku
-        variant.write(vals)
+        variant.write({'x_amazon_sku': sku, 'x_amazon_fnsku': False, **_code_vals(variant, sku)})
 
     def _attach_listing_by_sku(self, product, family_tmpl):
         """
@@ -1298,6 +1349,13 @@ class SyncEngine:
                     if existing and not sku.endswith('+') and (existing.x_amazon_sku or '').endswith('+'):
                         skipped += 1
                         msg = f'SALTATO (sostituito da {existing.x_amazon_sku}): {sku}'
+                        result_tmpl = None
+                    elif existing and not existing.product_variant_id:
+                        # Prodotto archiviato in Odoo (trovato dall'annuncio): non si aggiorna,
+                        # non si riattiva e non si crea un doppione (2026-11-19: prima
+                        # l'annuncio veniva riscritto senza prodotto -> errore NOT NULL).
+                        skipped += 1
+                        msg = f'SALTATO (prodotto archiviato in Odoo, id={existing.id}): {sku}'
                         result_tmpl = None
                     elif existing:
                         if update_existing:
@@ -1655,7 +1713,14 @@ class SyncEngine:
                     # ricade sul controllo variant_tmpl_by_sku sotto invece di
                     # corrompere la famiglia con _update_product.
                     existing = maps.find_simple(sku, asin, product['ean'])
-                    if existing:
+                    if existing and not existing.product_variant_id:
+                        # Prodotto archiviato in Odoo (trovato dall'annuncio): non si aggiorna,
+                        # non si riattiva e non si crea un doppione (2026-11-19: prima
+                        # l'annuncio veniva riscritto senza prodotto -> errore NOT NULL).
+                        skipped += 1
+                        msg = f'SALTATO (prodotto archiviato in Odoo, id={existing.id}): {sku}'
+                        result_tmpl = None
+                    elif existing:
                         if update_existing:
                             self._update_product(existing, product)
                             updated += 1
@@ -1819,6 +1884,13 @@ class SyncEngine:
                     if existing and not sku.endswith('+') and (existing.x_amazon_sku or '').endswith('+'):
                         skipped += 1
                         msg = f'SALTATO (sostituito da {existing.x_amazon_sku}): {sku}'
+                        result_tmpl = None
+                    elif existing and not existing.product_variant_id:
+                        # Prodotto archiviato in Odoo (trovato dall'annuncio): non si aggiorna,
+                        # non si riattiva e non si crea un doppione (2026-11-19: prima
+                        # l'annuncio veniva riscritto senza prodotto -> errore NOT NULL).
+                        skipped += 1
+                        msg = f'SALTATO (prodotto archiviato in Odoo, id={existing.id}): {sku}'
                         result_tmpl = None
                     elif existing:
                         if update_existing:
@@ -2441,6 +2513,97 @@ class SyncEngine:
         Brand.search([('amazon_name', '=', False)])._propose_amazon_name()
         return updated
 
+    def reactivate_listed_products(self):
+        """
+        Riattiva i prodotti (e le varianti) archiviati che hanno inserzioni
+        Amazon, anche inattive (2026-11-19). Regola concordata: si archivia
+        solo dopo aver chiuso le inserzioni in Seller Central; un prodotto
+        esaurito resta attivo. Esclusi gli SKU Grade & Resell. Una variante
+        con lo stesso EAN di un prodotto attivo non si riattiva (probabile
+        doppione): finisce nell'elenco da controllare.
+        Nessuna chiamata Amazon. Ritorna (template riattivati, varianti
+        riattivate, saltati, righe di log).
+        """
+        Variant = self.env['product.product'].with_context(active_test=False)
+        self.env.flush_all()   # la query legge il database: prima le modifiche ancora in memoria
+        self.env.cr.execute(
+            """SELECT DISTINCT pp.id
+                 FROM ke_amazon_listing l
+                 JOIN product_product pp ON pp.id = l.product_id
+                 JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                WHERE (NOT pp.active OR NOT pt.active) AND COALESCE(l.sku, '') NOT LIKE %s""",
+            ('amzn.gr.%',))
+        variants = Variant.browse([r[0] for r in self.env.cr.fetchall()])
+        lines, skipped = [], 0
+        todo = Variant.browse()
+        for variant in variants:
+            twin = variant.barcode and self.env['product.product'].search(
+                [('barcode', '=', variant.barcode), ('id', '!=', variant.id)], limit=1)
+            if twin:
+                skipped += 1
+                lines.append(f'SALTATO (stesso EAN {variant.barcode} del prodotto attivo '
+                             f'{twin.default_code or twin.id}): {variant.default_code or variant.id} — '
+                             f'{variant.product_tmpl_id.name}')
+            else:
+                todo |= variant
+        n_tmpl = n_var = 0
+        for tmpl in todo.product_tmpl_id:
+            mine = todo.filtered(lambda v: v.product_tmpl_id == tmpl)
+            try:
+                with self.env.cr.savepoint():
+                    if not tmpl.active:
+                        # Odoo riattiva da sé le varianti se il template non ne ha di attive.
+                        tmpl.write({'active': True})
+                        n_tmpl += 1
+                    off = mine.filtered(lambda v: not v.active)
+                    off.write({'active': True})
+                    n_var += len(off)
+                lines.append(f'RIATTIVATO: {tmpl.default_code or ", ".join(filter(None, mine.mapped("default_code")))} '
+                             f'— {tmpl.name}')
+            except Exception as exc:
+                skipped += 1
+                lines.append(f'ERRORE {tmpl.display_name}: {exc}')
+        return n_tmpl, n_var, skipped, lines
+
+    def clean_product_codes(self, dry_run=True):
+        """
+        Codici prodotto senza "+" finali (2026-11-20, vedi _clean_code). Gli SKU Amazon non cambiano
+        (inserzioni e x_amazon_sku). Un codice che dopo la pulizia coincide con quello di un'altra variante
+        attiva non si tocca: sono due prodotti per lo stesso articolo, da unire. Nessuna chiamata Amazon.
+        Ritorna (varianti cambiate o da cambiare, righe di log).
+        """
+        self.env.flush_all()
+        self.env.cr.execute("""
+            SELECT pp.id, pp.default_code, pp.active AND pt.active
+              FROM product_product pp JOIN product_template pt ON pt.id = pp.product_tmpl_id
+             WHERE pp.default_code IS NOT NULL AND pp.default_code != ''""")
+        rows = self.env.cr.fetchall()
+        active_by_code = {}
+        for vid, code, active in rows:
+            if active:
+                active_by_code.setdefault(_clean_code(code), []).append((vid, code))
+        todo, lines = {}, []
+        for vid, code, active in rows:
+            clean = _clean_code(code)
+            if clean == code or not clean:
+                continue
+            others = [c for v, c in active_by_code.get(clean, []) if v != vid]
+            if others:
+                continue
+            todo[vid] = clean
+        doubles = {c: items for c, items in active_by_code.items() if len(items) > 1}
+        for clean, items in sorted(doubles.items()):
+            lines.append(f'DOPPIONE (da unire, codici non toccati): {" | ".join(c for _v, c in items)}')
+        Variant = self.env['product.product'].with_context(active_test=False)
+        if not dry_run:
+            for vid, clean in todo.items():
+                Variant.browse(vid).default_code = clean
+        lines.insert(0, f'{"Da pulire" if dry_run else "Puliti"}: {len(todo)} codici; doppioni da unire: {len(doubles)}.')
+        examples = list(todo.items())[:15]
+        codes = dict((vid, code) for vid, code, _a in rows)
+        lines[1:1] = [f'   {codes[vid]} → {clean}' for vid, clean in examples]
+        return len(todo), lines
+
     def recompute_family_names(self, templates=None, extra_marketplaces=None):
         """
         Nome delle famiglie in ogni lingua dei marketplace attivi: la parte
@@ -2514,7 +2677,7 @@ class SyncEngine:
             ean = False
         vals = {
             'name': data['name'] or data['sku'],
-            'default_code': data['sku'],
+            'default_code': _free_code(self.env, data['sku']),
             'barcode': ean,
             'list_price': self._net_price(data['price']),
             'type': product_type_odoo,
@@ -2557,8 +2720,10 @@ class SyncEngine:
             **self._marketplace_lang_context()
         ).create(vals)
         self._correct_seeded_list_price(template, data['price'])
-        if data.get('spec_attrs'):
-            self._set_product_attributes(template, data['spec_attrs'])
+        # Specifiche tecniche: non più come righe di attributi "no_variant"
+        # (2026-11-19). Le scrive in ke.product.spec il giro "solo prodotti
+        # nuovi" avviato a fine Full Import (vedi _start_specs_after_full_import).
+        # spec_attrs resta: serve a riconoscere le varianti delle famiglie.
         self._init_product_warehouse_quant(
             template.product_variant_id, data['fulfillment'], data.get('qty_available') or 0,
         )
@@ -2630,45 +2795,6 @@ class SyncEngine:
                 self.env.cr.commit()
                 self.env.invalidate_all()
         return len(ids)
-
-    def _set_product_attributes(self, template, spec_attrs):
-        """Creates product.attribute.line entries as specifications (no variant generation)."""
-        for label, value in spec_attrs.items():
-            if not value:
-                continue
-            attr = self.env['product.attribute'].search([('name', '=', label)], limit=1)
-            if not attr:
-                attr = self.env['product.attribute'].create({
-                    'name': label,
-                    'create_variant': 'no_variant',
-                })
-            elif attr.create_variant != 'no_variant':
-                # L'attributo è già una dimensione di variante (create_variant='always'):
-                # non tentare di convertirlo, salta la spec per questo prodotto.
-                continue
-
-            attr_val = self.env['product.attribute.value'].search([
-                ('attribute_id', '=', attr.id),
-                ('name', '=', value),
-            ], limit=1)
-            if not attr_val:
-                attr_val = self.env['product.attribute.value'].create({
-                    'attribute_id': attr.id,
-                    'name': value,
-                })
-
-            existing_line = template.attribute_line_ids.filtered(
-                lambda l: l.attribute_id.id == attr.id
-            )
-            if existing_line:
-                if attr_val.id not in existing_line.value_ids.ids:
-                    existing_line.write({'value_ids': [(4, attr_val.id)]})
-            else:
-                self.env['product.template.attribute.line'].create({
-                    'product_tmpl_id': template.id,
-                    'attribute_id': attr.id,
-                    'value_ids': [(4, attr_val.id)],
-                })
 
     def _switch_main_sku(self, current, new, new_status):
         """
@@ -2792,7 +2918,8 @@ class SyncEngine:
                 # il prossimo Import FNSKU (già incatenato al Full Import).
                 vals['x_amazon_fnsku'] = False
             if new_sku != old_sku and (not old_sku or product.default_code == old_sku):
-                vals['default_code'] = new_sku
+                # Il codice prodotto non segue più lo SKU (2026-11-20): solo se manca, ripulito.
+                vals.update(_code_vals(product, new_sku))
                 # Indicazione informativa (non usata per nessun match): tiene
                 # visibile l'ultimo codice sostituito, per capire a colpo
                 # d'occhio quali prodotti sono stati riassegnati (es.
@@ -2866,7 +2993,7 @@ class SyncEngine:
         asin = product['asin']
         attr_info = product.get('variation_attr')
 
-        conflict = maps.by_sku.get(sku) or maps.by_default_code.get(sku)
+        conflict = maps.by_sku.get(sku) or maps.code_match(sku, asin)
 
         # Prodotto manuale con lo stesso EAN, da unire nella variante (vedi
         # _find_manual_by_ean). Se coincide con 'conflict' lo gestisce già la
@@ -3016,7 +3143,7 @@ class SyncEngine:
                 # in più: la variante tiene il suo SKU (_switch_main_sku).
                 switch_sku = self._switch_main_sku(existing_variant.x_amazon_sku, sku, product.get('status'))
                 legacy_sku_changed = switch_sku and (existing_variant.x_amazon_sku or '') != sku
-                variant_vals = {'x_amazon_sku': sku, 'default_code': sku} if switch_sku else {}
+                variant_vals = {'x_amazon_sku': sku, **_code_vals(existing_variant, sku)} if switch_sku else {}
                 if legacy_sku_changed:
                     variant_vals['x_amazon_fnsku'] = False
                 if variant_vals:
@@ -3263,7 +3390,10 @@ class SyncEngine:
             cost = mv.standard_price
             cost_copied = bool(cost and not variant.standard_price)
             if cost_copied:
-                variant.write({'standard_price': cost})
+                cost_vals = {'standard_price': cost}
+                if 'ke_cost_source' in variant._fields:   # ke_inventory_import: con la sua fonte (listino/manuale)
+                    cost_vals['ke_cost_source'] = mv.ke_cost_source
+                variant.write(cost_vals)
             manual_listings = self.env['ke.amazon.listing'].sudo().search([('product_id', '=', mv.id)])
             # Spostati dall'import: non diventano "Abbinato a mano".
             manual_listings.with_context(ke_import_listing=True).write({'product_id': variant.id})
@@ -3390,7 +3520,7 @@ class SyncEngine:
 
         variant = variant[0]
         variant.write({
-            'default_code': product['sku'],
+            'default_code': variant.default_code or _free_code(self.env, product['sku'], variant.id),
             'x_amazon_asin': product['asin'],
             'x_amazon_sku': product['sku'],
         })
@@ -4416,7 +4546,7 @@ class SyncEngine:
 
     _SPECS_COMMIT_EVERY = 20   # gruppi da 10 ASIN tra un salvataggio e l'altro
 
-    def import_marketplace_specs(self, log_rec, marketplace, primary=False):
+    def import_marketplace_specs(self, log_rec, marketplace, primary=False, missing_before=None):
         """
         Specifiche tecniche (ke.product.spec, vedi services/specs.py) dagli
         attributi del Catalog API del marketplace, per ogni variante con
@@ -4426,6 +4556,12 @@ class SyncEngine:
         della lingua principale toglie anche i valori Amazon che Amazon non
         ha più. I valori scritti a mano non si toccano. Prodotti con una sola
         variante: specifiche del prodotto; famiglie: di ogni variante.
+        missing_before (data, 2026-11-19): solo le varianti che a quella data
+        non avevano specifiche Amazon (inserzioni nuove), invece di rileggere
+        tutto. La data è l'avvio del giro, uguale per ogni marketplace: così
+        le specifiche scritte dal primo marketplace non escludono la variante
+        dai successivi. Le varianti senza specifiche utili su Amazon vengono
+        rilette ogni volta.
         Ritorna (varianti aggiornate, senza specifiche, errori).
         """
         from . import specs as spec_rules
@@ -4436,20 +4572,30 @@ class SyncEngine:
         site_langs = sorted((l for l in self.env['res.lang'].search([('active', '=', True)]).mapped('code')
                              if l != lang), key=lambda l: (l == 'en_US', l))
 
+        only_new = ''
+        args = [marketplace.id]
+        if missing_before:
+            # Specifiche della variante, o del prodotto per tutte le varianti (product_id vuoto).
+            only_new = """ AND NOT EXISTS (
+                SELECT 1 FROM ke_product_spec s
+                 WHERE s.source = 'amazon' AND s.create_date < %s
+                   AND (s.product_id = pp.id OR (s.product_id IS NULL AND s.product_tmpl_id = pt.id)))"""
+            args.append(missing_before)
         self.env.cr.execute(
             """SELECT DISTINCT ON (l.product_id) l.product_id, TRIM(l.asin)
                  FROM ke_amazon_listing l
                  JOIN product_product pp ON pp.id = l.product_id
                  JOIN product_template pt ON pt.id = pp.product_tmpl_id
-                WHERE l.marketplace_id = %s AND COALESCE(TRIM(l.asin), '') <> '' AND pt.active
-                ORDER BY l.product_id, l.id""", (marketplace.id,))
+                WHERE l.marketplace_id = %s AND COALESCE(TRIM(l.asin), '') <> '' AND pt.active"""
+            + only_new + " ORDER BY l.product_id, l.id", args)
         variant_asin = self.env.cr.fetchall()
         by_asin = {}
         for variant_id, asin in variant_asin:
             by_asin.setdefault(asin, []).append(variant_id)
         asins = list(by_asin)
         Variant = self.env['product.product'].with_context(active_test=False)
-        lines = [f'[{marketplace.code}] {len(variant_asin)} varianti, {len(asins)} ASIN da leggere.']
+        lines = [f'[{marketplace.code}] {len(variant_asin)} varianti'
+                 + (' senza specifiche Amazon' if missing_before else '') + f', {len(asins)} ASIN da leggere.']
         updated = empty = errors = 0
         found = {}
 
@@ -5425,7 +5571,7 @@ class SyncEngine:
         if not product_tmpl and asin:
             product_tmpl = Template.search([('x_amazon_asin', '=', asin)], limit=1)
         if not product_tmpl and sku:
-            product_tmpl = Template.search([('default_code', '=', sku)], limit=1)
+            product_tmpl = Template.search([('default_code', 'in', list({sku, _clean_code(sku)}))], limit=1)
         if not product_tmpl and sku:
             sku_alt = sku[:-1] if sku.endswith('+') else sku + '+'
             product_tmpl = Template.search(
@@ -5719,7 +5865,8 @@ class SyncEngine:
             if variants:
                 return variants, ''
             for field in ('x_amazon_sku', 'default_code'):
-                tmpls = Template.search([(field, '=', sku_value)], limit=2)
+                values = [sku_value] if field == 'x_amazon_sku' else list({sku_value, _clean_code(sku_value)})
+                tmpls = Template.search([(field, 'in', values)], limit=2)
                 if len(tmpls) > 1:
                     return Product.browse(), 'ambiguo'
                 if tmpls:
@@ -6122,7 +6269,7 @@ class SyncEngine:
                     if is_primary:
                         product.write({
                             'x_amazon_sku': plus_sku,
-                            'default_code': plus_sku,
+                            **_code_vals(product, plus_sku),
                             'x_amazon_status': new_status,
                             'x_amazon_price': new_price,
                             'x_amazon_last_sync': datetime.now(),
@@ -6171,7 +6318,7 @@ class SyncEngine:
                         if is_primary:
                             product.write({
                                 'x_amazon_sku': new_sku,
-                                'default_code': new_sku,
+                                **_code_vals(product, new_sku),
                                 'x_amazon_status': new_status,
                                 'x_amazon_price': new_price,
                                 'x_amazon_last_sync': datetime.now(),
@@ -6216,7 +6363,7 @@ class SyncEngine:
                     new_price = plus_data.get('price') or 0.0
                     if is_primary:
                         variant.write({
-                            'x_amazon_sku': plus_sku, 'default_code': plus_sku,
+                            'x_amazon_sku': plus_sku, **_code_vals(variant, plus_sku),
                             'x_amazon_fnsku': False,  # nuovo SKU → nuovo FNSKU, vedi sopra
                             'x_amazon_sku_previous': sku,  # solo indicazione informativa
                         })
@@ -6257,7 +6404,7 @@ class SyncEngine:
                         new_price = amazon_data_by_asin.get('price') or 0.0
                         if is_primary:
                             variant.write({
-                                'x_amazon_sku': new_sku, 'default_code': new_sku,
+                                'x_amazon_sku': new_sku, **_code_vals(variant, new_sku),
                                 'x_amazon_fnsku': False,  # nuovo SKU → nuovo FNSKU, vedi sopra
                                 'x_amazon_sku_previous': sku,  # solo indicazione informativa
                             })

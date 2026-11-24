@@ -5,3 +5,7 @@ from . import product_website
 from . import product_supplier_texts
 from . import product_spec
 from . import product_category_rule
+from . import product_category
+from . import product_family
+from . import product_family_move
+from . import product_family_names

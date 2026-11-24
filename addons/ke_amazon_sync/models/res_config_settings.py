@@ -545,6 +545,8 @@ class ResConfigSettings(models.TransientModel):
         params = self.env['ir.config_parameter'].sudo()
         if params.get_param(f'ke_amazon_sync.{sync_type}_state') == 'running':
             raise UserError(f'{label}: un giro è già in corso.')
+        if self.env.context.get('ke_specs_only_new'):
+            label += ' — solo prodotti nuovi'
         log_rec = self.env['ke.amazon.sync.log'].create({
             'name': f'{label} ({", ".join(marketplaces.mapped("code"))}) — {datetime.now().strftime("%d/%m/%Y %H:%M")}',
             'sync_type': sync_type,
@@ -564,6 +566,45 @@ class ResConfigSettings(models.TransientModel):
     def action_run_import_specs(self):
         """Specifiche tecniche dal Catalog API di ogni marketplace con lingua (sola lettura Amazon), in background."""
         return self._start_per_marketplace('specs')
+
+    def action_clean_codes_check(self):
+        return self._clean_codes(dry_run=True)
+
+    def action_clean_codes(self):
+        return self._clean_codes(dry_run=False)
+
+    def _clean_codes(self, dry_run):
+        """Codici prodotto senza "+" finali (vedi SyncEngine.clean_product_codes). Nessuna chiamata Amazon."""
+        from ..services.sync_engine import SyncEngine
+        start = datetime.now()
+        n, lines = SyncEngine(self.env, None).clean_product_codes(dry_run=dry_run)
+        log_rec = self.env['ke.amazon.sync.log'].create({
+            'name': f'Pulizia codici prodotto{" — solo verifica" if dry_run else ""} — {start.strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'clean_codes', 'state': 'done', 'start_date': start, 'end_date': datetime.now(),
+            'products_total': n, 'products_updated': 0 if dry_run else n, 'log_lines': '\n'.join(lines),
+        })
+        return {'type': 'ir.actions.act_window', 'res_model': 'ke.amazon.sync.log', 'res_id': log_rec.id,
+                'view_mode': 'form', 'target': 'current'}
+
+    def action_reactivate_listed_products(self):
+        """Riattiva i prodotti archiviati con inserzioni Amazon (anche inattive). Nessuna chiamata Amazon."""
+        from ..services.sync_engine import SyncEngine
+        start = datetime.now()
+        n_tmpl, n_var, skipped, lines = SyncEngine(self.env, None).reactivate_listed_products()
+        lines.insert(0, f'Prodotti riattivati: {n_tmpl}; varianti riattivate: {n_var}; saltati: {skipped}.')
+        log_rec = self.env['ke.amazon.sync.log'].create({
+            'name': f'Riattivazione prodotti con inserzioni — {start.strftime("%d/%m/%Y %H:%M")}',
+            'sync_type': 'reactivate_products', 'state': 'done',
+            'start_date': start, 'end_date': datetime.now(),
+            'products_total': n_tmpl + skipped, 'products_updated': n_tmpl, 'products_skipped': skipped,
+            'log_lines': '\n'.join(lines),
+        })
+        return {'type': 'ir.actions.act_window', 'res_model': 'ke.amazon.sync.log', 'res_id': log_rec.id,
+                'view_mode': 'form', 'target': 'current'}
+
+    def action_run_import_specs_new(self):
+        """Come action_run_import_specs, solo per le varianti che non hanno ancora specifiche Amazon."""
+        return self.with_context(ke_specs_only_new=True)._start_per_marketplace('specs')
 
     def action_compute_sync_prices(self):
         """Ricalcola il "Prezzo con sync" degli annunci attivi (nessuna chiamata Amazon)."""
@@ -708,6 +749,8 @@ class ResConfigSettings(models.TransientModel):
                     try:
                         engine = SyncEngine(env, SpApiClient(env, marketplace_id=marketplace.marketplace_id))
                         kwargs = {'primary': n == 0} if kind == 'specs' else {}
+                        if kind == 'specs' and ctx.get('ke_specs_only_new'):
+                            kwargs['missing_before'] = log_rec.start_date
                         res = getattr(engine, method)(child, marketplace, **kwargs)
                         child.write({'state': 'error' if res[2] else 'done', 'end_date': datetime.now()})
                         last = (child.log_lines or '').splitlines()[-1:]

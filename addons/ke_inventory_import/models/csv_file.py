@@ -8,13 +8,61 @@ from odoo.exceptions import UserError
 from .field_mapping import VOLUME_UNIT_SELECTION
 
 
+def _cell(value):
+    """Valore di una cella Excel come testo: numeri interi senza ".0" (EAN, codici), decimali corti."""
+    if value is None:
+        return ''
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else ('%.10g' % value)
+    return str(value).strip()
+
+
+def _header_index(rows):
+    """
+    Riga di intestazione tra le prime 15: la prima con quasi tante celle di testo quante la più piena (numeri e
+    indirizzi web non contano). Salta righe di titolo (listino Tubertini, fotolistino C4) e righe di soli
+    numeri di colonna sopra l'intestazione (file Pure Fishing EMEA: 1, 2, 3… poi indirizzi, poi i nomi).
+    """
+    def texts(row):
+        return sum(1 for v in row if isinstance(v, str) and v.strip() and not v.strip().startswith('http'))
+    counts = [texts(r) for r in rows[:15]]
+    best = max(counts, default=0)
+    if best < 3:
+        return 0
+    return next(i for i, n in enumerate(counts) if n >= max(3, 0.8 * best))
+
+
+def file_text(content, delimiter=';'):
+    """
+    Testo CSV del file (2026-11-20): un file Excel (.xlsx) si converte qui, dal primo foglio, partendo dalla
+    riga di intestazione (_header_index). Un CSV si decodifica (UTF-8, se no Latin-1 come il file Trabucco).
+    """
+    if content[:4] == b'PK\x03\x04':
+        import openpyxl
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True).worksheets[0]
+        rows = list(sheet.iter_rows(values_only=True))
+        out = io.StringIO()
+        writer = csv.writer(out, delimiter=delimiter)
+        for row in rows[_header_index(rows):]:
+            cells = [_cell(v) for v in row]
+            while cells and not cells[-1]:
+                cells.pop()
+            if any(cells):
+                writer.writerow(cells)
+        return out.getvalue()
+    try:
+        return content.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return content.decode('latin-1')
+
+
 class InventoryCsvFile(models.Model):
     _name = 'inventory.csv.file'
     _description = 'CSV File Library'
     _order = 'upload_date desc, name'
 
     name = fields.Char('Nome', required=True)
-    file_data = fields.Binary('File CSV', attachment=True, required=True)
+    file_data = fields.Binary('File CSV o Excel', attachment=True, required=True)
     file_name = fields.Char('Nome file originale')
     delimiter = fields.Selection([
         (';', 'Semicolon (;)'),
@@ -31,12 +79,7 @@ class InventoryCsvFile(models.Model):
         (e.g. 'UK\\nCopy') are handled correctly and all columns are returned.
         """
         self.ensure_one()
-        content = base64.b64decode(self.file_data)
-        try:
-            text = content.decode('utf-8-sig')
-        except UnicodeDecodeError:
-            text = content.decode('latin-1')
-
+        text = file_text(base64.b64decode(self.file_data), self.delimiter)
         reader = csv.reader(io.StringIO(text), delimiter=self.delimiter)
         headers = next(reader, [])
         return headers

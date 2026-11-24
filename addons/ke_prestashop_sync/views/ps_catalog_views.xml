@@ -5,12 +5,14 @@
         <field name="name">ke.prestashop.category.list</field>
         <field name="model">ke.prestashop.category</field>
         <field name="arch" type="xml">
-            <list string="Categorie PrestaShop" create="0" delete="0">
+            <list string="Categorie del negozio" create="0" delete="0">
                 <field name="complete_name"/>
                 <field name="ps_id"/>
                 <field name="level" optional="hide"/>
-                <field name="odoo_category_ids" widget="many2many_tags" string="Categorie Odoo mappate"/>
-                <field name="active" optional="hide"/>
+                <field name="ps_product_count"/>
+                <field name="odoo_category_ids" widget="many2many_tags" string="Categorie Odoo collegate"/>
+                <field name="odoo_managed" optional="show"/>
+                <field name="active" optional="show"/>
             </list>
         </field>
     </record>
@@ -21,17 +23,21 @@
         <field name="arch" type="xml">
             <search>
                 <field name="complete_name"/>
-                <filter name="not_mapped" string="Senza categorie Odoo" domain="[('odoo_category_ids', '=', False)]"/>
+                <filter name="not_mapped" string="Non collegate a Odoo" domain="[('odoo_category_ids', '=', False)]"/>
+                <filter name="with_products" string="Con prodotti" domain="[('ps_product_count', '>', 0)]"/>
+                <filter name="odoo_managed" string="Create da Odoo" domain="[('odoo_managed', '=', True)]"/>
                 <filter name="inactive" string="Non più su PrestaShop" domain="[('active', '=', False)]"/>
             </search>
         </field>
     </record>
 
     <record id="action_ke_prestashop_category" model="ir.actions.act_window">
-        <field name="name">Categorie PrestaShop</field>
+        <field name="name">Categorie del negozio</field>
         <field name="res_model">ke.prestashop.category</field>
         <field name="view_mode">list</field>
         <field name="help" type="html">
+            <p>Copia dell'albero delle categorie del negozio. Filtro "Non collegate a Odoo": le categorie che
+               l'albero del sito non usa (da disattivare sul negozio quando non servono più).</p>
             <p>Nessuna categoria: Impostazioni → PrestaShop → "Aggiorna categorie da PrestaShop".</p>
         </field>
     </record>
@@ -42,10 +48,20 @@
         <field name="model">product.category</field>
         <field name="priority">99</field>
         <field name="arch" type="xml">
-            <list string="Mappatura categorie PrestaShop" editable="bottom" create="0" delete="0">
+            <list string="Categorie del sito" editable="bottom" create="0" delete="0"
+                  decoration-muted="not ps_in_site">
+                <header>
+                    <button name="action_ps_sync_categories" type="object" string="Sincronizza categorie"
+                            display="always" class="btn-primary"
+                            confirm="Riporto sul negozio l'albero delle categorie dei rami 'Pubblica sul sito': riusa le categorie coerenti, crea le altre, accende quelle con prodotti. Continuare?"/>
+                </header>
                 <field name="display_name" string="Categoria Odoo" readonly="1"/>
+                <field name="ps_publish"/>
+                <field name="ps_in_site" optional="hide"/>
                 <field name="product_count" string="Prodotti" readonly="1"/>
+                <field name="ps_published_count" readonly="1"/>
                 <field name="ps_category_id" options="{'no_create': True}"/>
+                <field name="ps_shop_active" readonly="1"/>
             </list>
         </field>
     </record>
@@ -60,17 +76,23 @@
                 <field name="ps_category_id"/>
                 <filter name="not_mapped" string="Da mappare" domain="[('ps_category_id', '=', False)]"/>
                 <filter name="mapped" string="Mappate" domain="[('ps_category_id', '!=', False)]"/>
+                <filter name="in_site" string="Nel sito" domain="[('ps_in_site', '=', True)]"/>
+                <filter name="published" string="Rami pubblicati" domain="[('ps_publish', '=', True)]"/>
             </search>
         </field>
     </record>
 
     <record id="action_product_category_ps_mapping" model="ir.actions.act_window">
-        <field name="name">Mappatura categorie PrestaShop</field>
+        <field name="name">Categorie del sito</field>
         <field name="res_model">product.category</field>
         <field name="view_mode">list</field>
         <field name="view_id" ref="view_product_category_ps_mapping_list"/>
         <field name="search_view_id" ref="view_product_category_ps_mapping_search"/>
-        <field name="context">{'search_default_not_mapped': 1}</field>
+        <field name="context">{'search_default_in_site': 1}</field>
+        <field name="help" type="html">
+            <p>L'albero delle categorie Odoo che va sul sito: spuntare "Pubblica sul sito" sui rami principali
+               (es. Pesca) e premere "Sincronizza categorie" (parte anche da sola a fine export).</p>
+        </field>
     </record>
 
     <record id="product_category_form_view_ps" model="ir.ui.view">

@@ -33,6 +33,8 @@ class AmazonSyncLog(models.Model):
         ('listing_fees', 'Commissioni Amazon'),
         ('recover_texts', 'Recupero Testi da Amazon'),
         ('import_specs', 'Specifiche Tecniche da Amazon'),
+        ('reactivate_products', 'Riattivazione prodotti con inserzioni'),
+        ('clean_codes', 'Pulizia codici prodotto'),
     ], string='Tipo', required=True)
     state = fields.Selection([
         ('running', 'In corso'),
@@ -159,6 +161,20 @@ class AmazonSyncLog(models.Model):
                 self, error=error_summary if state == 'error' else None,
                 note='Import FNSKU chiuso manualmente o dal controllo di igiene.',
             )
+        elif self.sync_type in ('import_specs', 'recover_texts', 'reactivate_products', 'clean_codes'):
+            # Giri "un marketplace alla volta" (_thread_per_marketplace,
+            # 2026-11-17): mancavano qui (2026-11-19, produzione) — il log si
+            # chiudeva ma <tipo>_state restava 'running' e il giro dopo veniva
+            # rifiutato ("un giro è già in corso"), anche col thread morto per
+            # un riavvio. Si chiudono anche gli altri log dello stesso giro
+            # (principale e dettagli per marketplace) ancora "in corso".
+            if self.sync_type not in ('reactivate_products', 'clean_codes'):
+                params.set_param(f'ke_amazon_sync.{self.sync_type}_state', 'idle')
+            main = self.parent_log_id or self
+            others = self.search([('state', '=', 'running'), ('id', '!=', self.id), '|',
+                                  ('id', '=', main.id), ('parent_log_id', '=', main.id)])
+            others.write({'state': state, 'end_date': fields.Datetime.now(),
+                          'error_summary': error_summary or 'Chiuso insieme al giro.'})
         elif self.sync_type == 'apply_cat_mapping':
             # Cron a chunk (non un thread): qui bisogna anche disattivare il
             # cron esplicitamente, non solo liberare lo stato — a differenza
@@ -850,6 +866,29 @@ class AmazonSyncLog(models.Model):
         log_rec.write({'state': 'done', 'end_date': fields.Datetime.now()})
         self.env['ir.config_parameter'].sudo().set_param('ke_amazon_sync.import_state', 'idle')
         self.env.cr.commit()
+        self._start_specs_after_full_import(log_rec)
+
+    def _start_specs_after_full_import(self, parent):
+        """
+        Specifiche tecniche dei prodotti nuovi a fine Full Import (2026-11-19):
+        lo stesso giro di "Importa specifiche → Solo prodotti nuovi" (varianti
+        senza specifiche Amazon, tutti i marketplace con lingua), in un suo log.
+        Parte dopo l'Import FNSKU incatenato, mai in parallelo al Full Import
+        (deadlock del 2026-11-03). Non bloccante: se non parte (giro già in
+        corso, nessun marketplace con lingua…) lo dice nel log e si lancia a mano.
+        """
+        try:
+            self.env['res.config.settings'].with_context(
+                ke_specs_only_new=True)._start_per_marketplace('specs')
+            note = 'Specifiche tecniche dei prodotti nuovi: avviate (log "Specifiche tecniche da Amazon").'
+        except Exception as exc:
+            # Nessun rollback: _start_per_marketplace fallisce solo prima di scrivere (credenziali,
+            # marketplace, giro già in corso), e il log principale è già salvato.
+            _log.warning('Specifiche dopo il full import non avviate: %s', exc)
+            note = (f'Specifiche tecniche dei prodotti nuovi non avviate: {exc}. '
+                    f'Lanciare a mano "Importa specifiche → Solo prodotti nuovi".')
+        self._append_log_line(parent, note)
+        self.env.cr.commit()
 
     def _close_parent_log(self, child_log, error=None, note=None):
         """
@@ -889,6 +928,7 @@ class AmazonSyncLog(models.Model):
                         '(Impostazioni → Amazon).',
             )
             self.env.cr.commit()
+            self._start_specs_after_full_import(parent)
 
     def _cron_check_new_products(self):
         client = SpApiClient(self.env)

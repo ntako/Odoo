@@ -19,3 +19,4 @@ from . import product_brand
 from . import amazon_price_analysis
 from . import amazon_category_map
 from . import amazon_safe_mode
+from . import product_family_amazon

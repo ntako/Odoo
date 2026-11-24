@@ -31,3 +31,6 @@ from . import test_category_map
 from . import test_safe_mode
 from . import test_recover_texts
 from . import test_specs
+from . import test_archive_policy
+from . import test_family_merge_import
+from . import test_clean_codes

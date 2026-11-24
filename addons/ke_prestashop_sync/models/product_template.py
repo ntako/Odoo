@@ -87,3 +87,18 @@ class ProductTemplate(models.Model):
         """Id PS delle categorie aggiuntive, senza la principale."""
         self.ensure_one()
         return [c.ps_id for c in self.ps_extra_category_ids if c.ps_id and c.ps_id != main_id]
+
+    def _ke_family_after_move(self, variants, sources, emptied):
+        """
+        Varianti spostate in un'altra famiglia (proposte di famiglia, 2026-11-20): la combinazione PS era del
+        vecchio prodotto PS, il prossimo export la ricrea sotto questa famiglia. Un vecchio prodotto PS separato
+        della variante lo disattiva l'export con redirect 301 (_retire_legacy_variants, lo trova per codice/EAN);
+        i prodotti archiviati perché vuoti li disattiva l'export completo.
+        """
+        super()._ke_family_after_move(variants, sources, emptied)
+        variants.filtered('ps_combination_id').write({'ps_combination_id': 0})
+
+    def _ke_variants_renamed(self, variants):
+        """Nomi delle varianti dal catalogo fornitore (2026-11-20): l'export aggiorna le combinazioni già create."""
+        super()._ke_variants_renamed(variants)
+        variants.filtered('ps_combination_id').write({'ps_options_dirty': True})

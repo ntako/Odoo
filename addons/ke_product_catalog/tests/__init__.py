@@ -6,3 +6,6 @@ from . import test_supplier_texts
 from . import test_classification
 from . import test_product_spec
 from . import test_category_rule
+from . import test_family_proposal
+from . import test_family_move
+from . import test_family_names

@@ -150,7 +150,8 @@ class PsApiClient:
             _log.error('PS POST %s: risposta JSON inattesa (tipo %s): %s',
                        resource, type(data).__name__, str(data)[:500])
             return 0
-        singular = resource.rstrip('s')
+        # products → product, categories → category (non "categorie": ID mai letto, 2026-11-17)
+        singular = resource[:-3] + 'y' if resource.endswith('ies') else resource.rstrip('s')
         item = data.get(singular) or data.get(resource)
         if isinstance(item, list):
             item = item[0] if item else {}
@@ -464,6 +465,14 @@ class PsApiClient:
                               for i, v in values)
         return f'\n    <{tag}>{entries}\n    </{tag}>'
 
+    @staticmethod
+    def _broken_text(value):
+        """
+        Testo rotto sul negozio: HTML codificato due volte ("&lt;ul&gt;&lt;li&gt;…"), che sul sito
+        mostra i tag come testo (150 prodotti nel DB di produzione, da un vecchio import; 2026-11-17).
+        """
+        return bool(re.search(r'&lt;/?[a-z][a-z0-9]*[^&]*?&gt;', value or '', re.I))
+
     def _apply_translations(self, prod, translations, replace=False):
         """
         Scrive nel prodotto PS (XML del GET) i testi delle altre lingue. Senza
@@ -482,7 +491,7 @@ class PsApiClient:
                 if node is None:
                     node = ET.SubElement(el, 'language', id=str(lang_id))
                 current = (node.text or '').strip()
-                if replace or not current or current == main:
+                if replace or not current or current == main or self._broken_text(current):
                     node.text = value
 
     def _seo_xml(self, description, meta_title, meta_description, translations=None):
@@ -581,7 +590,9 @@ class PsApiClient:
         nella categoria predefinita (2026-11-10: l'albero del negozio è più
         dettagliato di quello Odoo, la scelta fatta sul sito resta).
         Altre lingue (translations): scritte dove su PS sono vuote o sono la
-        copia della lingua principale; con replace_texts sempre.
+        copia della lingua principale; con replace_texts sempre. In ogni lingua
+        un testo vuoto o rotto (HTML codificato, _broken_text) si sostituisce
+        sempre (2026-11-17).
         Le categorie aggiuntive (extra_category_ids) si aggiungono sempre;
         tolte in Odoo, spariscono dal negozio solo con replace_category.
         """
@@ -630,11 +641,15 @@ class PsApiClient:
             texts.append(('meta_description', self._clean_meta(meta_description)[:self._META_DESCRIPTION_MAX]))
         if link_rewrite:
             texts.append(('link_rewrite', self._make_slug(link_rewrite)))
-        for tag, value in (texts if replace_texts else []):
+        # Anche senza "Aggiorna testi": un testo che sul negozio manca o è rotto (HTML
+        # codificato) si sostituisce con quello di Odoo; i testi buoni del negozio restano.
+        for tag, value in texts:
             el = prod.find(tag)
             for lang in (el.findall('language') if el is not None else []):
                 if int(lang.get('id', 0)) == self._lang_id:
-                    lang.text = value
+                    current = (lang.text or '').strip()
+                    if value and (replace_texts or not current or self._broken_text(current)):
+                        lang.text = value
         if cats is None and (set_category or extra_category_ids):
             assoc = prod.find('associations')
             if assoc is None:
@@ -676,13 +691,62 @@ class PsApiClient:
 
     def get_categories(self):
         """Tutte le categorie PS: [{'id', 'parent', 'name', 'level', 'active'}]."""
-        data = self._get_json('categories', {'display': '[id,id_parent,name,level_depth,active]'})
+        data = self._get_json('categories', {'display': '[id,id_parent,name,level_depth,active,nb_products_recursive]'})
         rows = (data.get('categories') or []) if isinstance(data, dict) else []
         return [{
             'id': int(c['id']), 'parent': int(c.get('id_parent') or 0),
             'name': self._lang_value(c.get('name')), 'level': int(c.get('level_depth') or 0),
             'active': str(c.get('active')) == '1',
+            'products': max(int(c.get('nb_products_recursive') or 0), 0),
         } for c in (rows if isinstance(rows, list) else []) if isinstance(c, dict)]
+
+    _CATEGORY_READONLY = ('level_depth', 'nb_products_recursive')
+
+    def _category_names_xml(self, names):
+        """Blocchi <name> e <link_rewrite> per {id lingua PS: nome}."""
+        esc = lambda v: v.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        name_xml = ''.join(f'<language id="{i}">{esc(self._clean_name(n)[:128])}</language>'
+                           for i, n in names.items() if n)
+        slug_xml = ''.join(f'<language id="{i}">{esc(self._make_slug(n)[:128])}</language>'
+                           for i, n in names.items() if n)
+        return f'<name>{name_xml}</name><link_rewrite>{slug_xml}</link_rewrite>'
+
+    def create_category(self, parent_id, names, active=True):
+        """Crea una categoria PS sotto parent_id; names: {id lingua PS: nome}. Restituisce l'ID."""
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <category>
+    <id_parent>{int(parent_id)}</id_parent>
+    <active>{int(bool(active))}</active>
+    <is_root_category>0</is_root_category>
+    {self._category_names_xml(names)}
+  </category>
+</prestashop>""".encode('utf-8')
+        return self._post_xml('categories', xml)
+
+    def update_category(self, ps_id, names=None, active=None):
+        """
+        Aggiorna nome (solo le lingue date) e/o stato di una categoria PS.
+        L'indirizzo (link_rewrite) non cambia: le categorie esistenti tengono
+        il loro URL (posizionamento sui motori di ricerca).
+        """
+        root = ET.fromstring(self._get_xml_str('categories', ps_id))
+        cat = root.find('category')
+        if active is not None:
+            el = cat.find('active')
+            if el is not None:
+                el.text = str(int(bool(active)))
+        if names:
+            name_el = cat.find('name')
+            nodes = {int(n.get('id')): n for n in (name_el if name_el is not None else [])}
+            for lang_id, value in names.items():
+                if value and int(lang_id) in nodes:
+                    nodes[int(lang_id)].text = self._clean_name(value)[:128]
+        for tag in self._CATEGORY_READONLY:
+            el = cat.find(tag)
+            if el is not None:
+                cat.remove(el)
+        self._put_xml('categories', ps_id, ET.tostring(root, encoding='utf-8', xml_declaration=True))
 
     def get_manufacturers(self):
         """Tutte le marche PS: [{'id', 'name'}]."""
@@ -779,8 +843,11 @@ class PsApiClient:
             './/combination/price': f'{float(price_impact):.6f}',
         })
 
-    def update_combination(self, combo_id, price_impact=0.0, reference='', ean13=''):
-        """Aggiorna impatto prezzo, riferimento ed EAN/UPC di una combinazione (GET → PUT)."""
+    def update_combination(self, combo_id, price_impact=0.0, reference='', ean13='', option_value_ids=None):
+        """
+        Aggiorna impatto prezzo, riferimento ed EAN/UPC di una combinazione (GET → PUT); con option_value_ids
+        anche i suoi valori attributo (nome della variante cambiato in Odoo).
+        """
         ean, upc = self._split_barcode(ean13)
         root = ET.fromstring(self._get_xml_str('combinations', combo_id))
         combo = root.find('combination')
@@ -790,6 +857,17 @@ class PsApiClient:
             el = combo.find(tag)
             if el is not None:
                 el.text = value
+        if option_value_ids is not None:
+            assoc = combo.find('associations')
+            if assoc is None:
+                assoc = ET.SubElement(combo, 'associations')
+            values = assoc.find('product_option_values')
+            if values is None:
+                values = ET.SubElement(assoc, 'product_option_values')
+            for child in list(values):
+                values.remove(child)
+            for ov in option_value_ids:
+                ET.SubElement(ET.SubElement(values, 'product_option_value'), 'id').text = str(ov)
         self._put_xml('combinations', combo_id, ET.tostring(root, encoding='utf-8', xml_declaration=True))
 
     def create_combination(self, ps_product_id, option_value_ids,

@@ -63,9 +63,9 @@ Per mettere i prodotti nella categoria giusta (il menu del sito ricalca le categ
 
    "**Carica regole predefinite**" crea quelle messe a punto su mulinelli e canne (circa 90),
    e le sottocategorie che servono, senza doppioni.
-2. **Proponi categorie** (Inventario → Prodotti, o dalla lista prodotti: Azioni): applica le
+2. **Proponi categorie** (Inventario → Configurazione → Prodotti, o dalla lista prodotti: Azioni): applica le
    regole ai prodotti di alcune categorie o a quelli selezionati.
-3. **Proposte di categoria** (Inventario → Prodotti): categoria attuale, **categoria proposta
+3. **Proposte di categoria** (Inventario → Configurazione → Prodotti): categoria attuale, **categoria proposta
    (modificabile)**, motivo, *Sicura*, *Sul sito*, *Nome come categoria Amazon*. Filtri
    "Da verificare" / "Sicure", raggruppamento per categoria; **Applica** o **Scarta** sulle
    righe selezionate. Applicare cambia solo la categoria Odoo del prodotto.
@@ -82,6 +82,53 @@ Effetti sugli altri moduli:
   la proposta lo segnala ("Nome come categoria Amazon").
 - **PrestaShop**: un prodotto spostato in una sottocategoria più precisa segue la corrispondenza
   della categoria Odoo (Odoo come riferimento dell'albero del sito).
+
+### Famiglie del fornitore (2026-11-20)
+Le famiglie nate da Amazon spesso sono sbagliate: la stessa canna in più prodotti separati, o un
+prodotto che contiene modelli diversi come varianti (es. "Berkley PowerBait" con 8 esche diverse).
+- L'**arricchimento** dal catalogo fornitore salva su ogni **variante** il codice e il nome della
+  famiglia del fornitore (Pure Fishing: "Master code" / "Master Description"; destinazioni di
+  colonna "Codice famiglia fornitore" e "Nome famiglia fornitore", già nel preset Pure Fishing).
+  Sulla variante, non sul prodotto, perché un prodotto Odoo può oggi mescolare più famiglie.
+  L'abbinamento per codice vale più di quello per EAN; un EAN che porta a famiglie diverse non
+  scrive nulla (conteggiato nel riepilogo).
+- **Inventario → Configurazione → Proposte di famiglia**, "Calcola proposte": una proposta per
+  ogni famiglia del fornitore che in Odoo non sta in un prodotto solo, da sola — *Unisci*
+  (varianti sparse su più prodotti), *Separa* (dentro un prodotto con altre famiglie),
+  *Riorganizza* (entrambe). Prodotto di destinazione: quello dove la famiglia è la principale;
+  un prodotto va a una sola famiglia, vuoto = prodotto nuovo. "Da sapere": varianti non nel
+  file (restano dove sono), più famiglie Amazon coinvolte, prodotti già su PrestaShop che si
+  svuoterebbero. Una proposta scartata non ricompare finché le sue varianti non cambiano.
+- **Applica** (dalla lista, sulle proposte scelte, o dalla scheda): una proposta alla volta, per intero
+  o niente. Prima controlla che le varianti della famiglia siano ancora quelle del calcolo (se no:
+  "Calcola proposte"). Le varianti si **spostano**, non si ricreano: giacenze, movimenti, ordini,
+  inserzioni Amazon, EAN, codici e costi restano attaccati. Seguono la variante anche le specifiche
+  (quelle del vecchio prodotto diventano sue), la galleria e l'immagine di un vecchio prodotto
+  semplice, il prezzo (se diverso da quello della famiglia diventa il prezzo della variante) e il
+  listino acquisti. La famiglia ha un solo attributo che crea varianti (come quelle della sync
+  Amazon): le varianti arrivate prendono come valore la loro etichetta di prima (o il codice).
+  Prodotti rimasti vuoti: archiviati, mai cancellati. Famiglia nuova (nessun prodotto libero): nome
+  marca + famiglia del fornitore, dati base dal prodotto da cui arriva la maggior parte delle
+  varianti. "Nome fornitore" della famiglia = nome della famiglia del fornitore.
+- **Nomi** (applicati con la proposta, o da *Nomi dal catalogo fornitore* per tutte le famiglie, con
+  "Solo verifica"): per un prodotto le cui varianti sono tutte di una famiglia del fornitore, "Nome
+  fornitore" = famiglia; nome del prodotto in ogni lingua = nome sul sito (marca + famiglia + tipo,
+  es. "Berkley Flex Carp – Filo monofilo"); nomi delle varianti = le specifiche che le distinguono,
+  il meno possibile, in ordine misura, misura amo, diametro, lunghezza, potenza, grammatura… (Flex
+  Carp: "0,30 mm"), tradotte come le specifiche; due varianti uguali in una lingua → il codice.
+  Attributo della specifica se ne basta una ("Diametro"), altrimenti "Variante"; la vecchia riga
+  attributo si archivia (si tiene l'attributo vecchio se varianti archiviate ne usano i valori).
+  Nomi tradotti scritti con l'inglese di base per ultimo (scrivere una lingua su un nome che ha solo
+  l'inglese riscrive anche l'inglese).
+- **Amazon** (ke_amazon_sync): SKU/ASIN/FNSKU di un prodotto semplice passano alla sua variante; la
+  famiglia prende il parent ASIN di una famiglia Amazon svuotata o uno interno "ODOO-FAM-<id>" (mai
+  mandato ad Amazon); i parent ASIN delle famiglie Amazon svuotate restano come "Altri parent ASIN":
+  il Full Import vi porta le loro nuove varianti invece di ricreare la famiglia. Su Amazon non cambia
+  niente.
+- **PrestaShop**: le varianti spostate perdono la combinazione del vecchio prodotto PS; il prossimo
+  export le ricrea sotto la famiglia, disattiva con redirect 301 il vecchio prodotto PS separato della
+  variante e (export completo) i prodotti archiviati. Varianti rinominate: `ps_options_dirty`, l'export
+  aggiorna i valori attributo della combinazione già creata.
 
 ### Esporta / Importa classificazione
 Per riportare la classificazione da un database all'altro (es. dal locale alla produzione):

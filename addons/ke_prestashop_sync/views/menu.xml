@@ -8,35 +8,32 @@
               sequence="90"
               groups="stock.group_stock_manager"/>
 
-    <menuitem id="menu_ps_log"
-              name="Log sincronizzazioni"
-              parent="menu_prestashop_root"
-              action="action_ps_sync_log"
-              sequence="10"/>
-
-    <menuitem id="menu_ps_import_products"
-              name="Import prodotti da PS"
-              parent="menu_prestashop_root"
-              action="action_ps_product_import"
-              sequence="20"/>
-
     <menuitem id="menu_ps_export_products"
               name="Export prodotti verso PS"
               parent="menu_prestashop_root"
               action="action_ps_product_export"
-              sequence="30"/>
+              sequence="10"/>
 
     <menuitem id="menu_ps_category_mapping"
-              name="Mappatura categorie"
+              name="Categorie del sito"
               parent="menu_prestashop_root"
               action="action_product_category_ps_mapping"
-              sequence="40"/>
+              sequence="20"/>
 
     <menuitem id="menu_ps_categories"
-              name="Categorie PrestaShop"
+              name="Categorie del negozio"
               parent="menu_prestashop_root"
               action="action_ke_prestashop_category"
-              sequence="45"/>
+              sequence="30"/>
+
+    <menuitem id="menu_ps_log"
+              name="Log sincronizzazioni"
+              parent="menu_prestashop_root"
+              action="action_ps_sync_log"
+              sequence="40"/>
+
+    <!-- 2026-11-17: "Import prodotti da PS" tolto dal menu (Odoo è il riferimento: è
+         un'operazione straordinaria), ora in Impostazioni → PrestaShop → Strumenti. -->
 
     <!-- Apre le Impostazioni direttamente sulla sezione PrestaShop
          (l'azione generale apriva la prima sezione, Impostazioni generali). -->

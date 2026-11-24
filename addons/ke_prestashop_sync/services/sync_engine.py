@@ -831,6 +831,16 @@ class SyncEngine:
                 only_in_stock=only_in_stock, warehouse_id=warehouse_id, family_mode=family_mode,
             )
 
+        # --- Ultimo turno: albero delle categorie del sito (2026-11-17) ---
+        # Le categorie create da Odoo si accendono quando ricevono prodotti: dopo l'export
+        # si risincronizza l'albero, così non serve un secondo passaggio a mano.
+        last_turn = not time_cut and not (auto_continue and remaining > 0 and (created + updated) > 0)
+        if last_turn and (created + updated) and self._param('category_tree_from_odoo') in ('True', '1'):
+            if self.env['ke.prestashop.sync.log'].enqueue(
+                    'sync_categories', 'sync_category_tree', skip_if_pending=True,
+                    label=f'Albero categorie → PS (dopo l\'export) — {fields.Datetime.now().strftime("%d/%m/%Y %H:%M")}'):
+                lines.append('[CATEGORIE] accodata la sincronizzazione dell\'albero delle categorie')
+
         # --- Prodotti archiviati in Odoo → disattiva su PS (solo ultimo lotto) ---
         if not time_cut and not product_ids and remaining == 0:
             archived = self.env['product.template'].with_context(active_test=False).search([
@@ -1011,6 +1021,14 @@ class SyncEngine:
             lines.append(f'[IMG] {variant.display_name}: {uploaded} immagini')
         return uploaded
 
+    def _ps_option_value_ids(self, variant):
+        """Id PS dei valori attributo della variante (gruppi e valori creati se mancano)."""
+        ids = []
+        for ptav in variant.product_template_attribute_value_ids:
+            opt_id = self.client.get_or_create_product_option(ptav.attribute_id.name)
+            ids.append(self.client.get_or_create_option_value(opt_id, ptav.product_attribute_value_id.name))
+        return ids
+
     def _export_configurable(self, tmpl, lines):
         """
         Prodotto con varianti: prodotto padre su PS (creato o aggiornato come
@@ -1051,19 +1069,19 @@ class SyncEngine:
             try:
                 if variant.ps_combination_id:
                     try:
+                        # Nome della variante cambiato in Odoo (2026-11-20): anche i valori della combinazione.
+                        options = self._ps_option_value_ids(variant) if variant.ps_options_dirty else None
                         self.client.update_combination(
                             variant.ps_combination_id, price_impact=impact,
-                            reference=self._ps_reference(variant.default_code), ean13=variant.barcode or '')
+                            reference=self._ps_reference(variant.default_code), ean13=variant.barcode or '',
+                            option_value_ids=options)
+                        if options is not None:
+                            variant.write({'ps_options_dirty': False})
                         ok_combos += 1
                         continue
                     except PsResourceNotFound:
                         variant.write({'ps_combination_id': 0})
-                option_value_ids = []
-                for ptav in variant.product_template_attribute_value_ids:
-                    opt_id = self.client.get_or_create_product_option(ptav.attribute_id.name)
-                    ov_id = self.client.get_or_create_option_value(
-                        opt_id, ptav.product_attribute_value_id.name)
-                    option_value_ids.append(ov_id)
+                option_value_ids = self._ps_option_value_ids(variant)
                 combo_id = self.client.create_combination(
                     ps_product_id=ps_id,
                     option_value_ids=option_value_ids,
@@ -1299,6 +1317,136 @@ class SyncEngine:
         })
         self.env.cr.commit()
         return ok, skip, err
+
+    # ------------------------------------------------------------------
+    # 5b. Albero delle categorie Odoo → PrestaShop (2026-11-17)
+    # ------------------------------------------------------------------
+
+    def _category_names(self, categ, lang_map, main_id, main_lang, only_own=False):
+        """{id lingua PS: nome}: "Nome sul sito" della lingua, altrimenti il nome Odoo (only_own: solo i propri)."""
+        own = (lambda lang: categ._ke_web_name_own(lang)) if 'ke_web_name' in categ._fields else (lambda lang: '')
+        names = {main_id: own(main_lang) or categ.name}
+        for ps_lang, lang in lang_map.items():
+            value = own(lang)
+            if value or not only_own:
+                names[ps_lang] = value or names[main_id]
+        return names
+
+    def _published_counts(self, categories):
+        """Prodotti pubblicati su PS in ogni categoria, sottocategorie comprese."""
+        Tmpl = self.env['product.template']
+        direct = {c.id: n for c, n in Tmpl._read_group(
+            [('categ_id', 'in', categories.ids), ('ps_product_id', '>', 0)], ['categ_id'], ['__count'])}
+        return {c.id: sum(direct.get(d.id, 0) for d in categories if (d.parent_path or '').startswith(c.parent_path))
+                for c in categories}
+
+    def _sync_one_category(self, categ, parent_ps, has_products, used, by_ps, lang_map, main_id, main_lang):
+        """Riusa, adotta o crea la categoria PS di una categoria Odoo. Ritorna (id PS, creata?, riga di log)."""
+        PsCat = self.env['ke.prestashop.category'].sudo().with_context(active_test=False)
+        linked = categ.ps_category_id
+        fits = lambda c: c and c.parent_ps_id == parent_ps and c.ps_id not in used
+        if not fits(linked):
+            # Già sul negozio sotto lo stesso padre, con lo stesso nome e non collegata (es. creata
+            # da un giro interrotto): si adotta invece di farne un doppione.
+            name = self._category_names(categ, lang_map, main_id, main_lang)[main_id].strip().lower()
+            linked_ids = set(self.env['product.category'].search(
+                [('ps_category_id', '!=', False)]).mapped('ps_category_id.ps_id'))
+            twin = next((c for c in by_ps.values() if fits(c) and c.ps_id not in linked_ids
+                         and (c.name or '').strip().lower() == name), None)
+            if twin:
+                categ.ps_category_id = twin
+                linked = twin
+        if fits(linked):
+            names = self._category_names(categ, lang_map, main_id, main_lang, only_own=True)
+            current = (linked.name or '').strip()
+            renamed = names.get(main_id) != current
+            rename = names if renamed else {k: v for k, v in names.items() if k != main_id}
+            if linked.odoo_managed:
+                self.client.update_category(linked.ps_id, names=rename or None, active=has_products)
+            elif rename or (has_products and not linked.active):
+                # Riusata: si accende se ha prodotti, non si spegne mai (può avere prodotti del negozio).
+                self.client.update_category(linked.ps_id, names=rename or None, active=True if has_products else None)
+            return linked.ps_id, False, (f'[RIUSATA] {categ.complete_name} → PS {linked.ps_id}'
+                                         + (f' (rinominata da "{current}")' if renamed else ''))
+        names = self._category_names(categ, lang_map, main_id, main_lang)
+        ps_id = self.client.create_category(parent_ps, names, active=has_products)
+        rec = PsCat.create({'ps_id': ps_id, 'name': names[main_id], 'parent_ps_id': parent_ps,
+                            'level': (by_ps[parent_ps].level + 1) if parent_ps in by_ps else 0,
+                            'active': has_products, 'odoo_managed': True})
+        by_ps[ps_id] = rec
+        why = (f'prima su PS {linked.ps_id} "{linked.complete_name}", fuori posto o già usata' if linked else 'nuova')
+        categ.ps_category_id = rec
+        return ps_id, True, (f'[CREATA] {categ.complete_name} → PS {ps_id} ({why})'
+                             + ('' if has_products else ' — spenta, nessun prodotto pubblicato'))
+
+    def sync_category_tree(self, log_rec):
+        """
+        Albero del sito = albero Odoo (2026-11-17, deciso con l'utente). Per
+        ogni categoria dei rami "Pubblica sul sito", dal padre ai figli:
+        - riusa la categoria PS collegata se sta sotto la categoria PS del
+          padre e non è già usata da un'altra categoria Odoo (rinominata con
+          il nome Odoo nella lingua principale e nelle lingue con un "Nome sul
+          sito" proprio; l'indirizzo resta: posizionamento sui motori);
+        - altrimenti ne crea una nuova sotto il padre (tutte le lingue) e la
+          collega (Creata da Odoo).
+        Le categorie create da Odoo sono attive solo se hanno prodotti
+        pubblicati (anche nelle sottocategorie); quelle riusate si attivano
+        se ne hanno e non si spengono mai (possono avere prodotti del negozio
+        che non sono in Odoo). Le categorie PS non collegate non si toccano.
+        Da qui in poi la categoria PS dei prodotti è quella della categoria
+        Odoo (le corrispondenze Amazon → PrestaShop non valgono più per il sito).
+        """
+        Categ = self.env['product.category']
+        PsCat = self.env['ke.prestashop.category'].sudo().with_context(active_test=False)
+        params = self.env['ir.config_parameter'].sudo()
+        PsCat._sync_from_prestashop(self.client)
+        roots = Categ.search([('ps_publish', '=', True)])
+        # Solo i rami più in alto: una sottocategoria spuntata dentro un ramo già pubblicato non conta.
+        roots = roots.filtered(lambda c: not any(r != c and (c.parent_path or '').startswith(r.parent_path)
+                                                 for r in roots))
+        if not roots:
+            raise ValueError('Nessuna categoria con "Pubblica sul sito" (Inventario → PrestaShop → Mappatura categorie).')
+        categories = Categ.search([('id', 'child_of', roots.ids)]).sorted(lambda c: (c.parent_path or ''))
+        home = PsCat.search([('level', '=', 1)], limit=1)
+        home_id = home.ps_id or 2
+        lang_map = self._ps_lang_map()
+        main_id, main_lang = getattr(self.client, '_lang_id', 1), self._ps_lang()
+        counts = self._published_counts(categories)
+        by_ps = {c.ps_id: c for c in PsCat.search([])}
+        ps_of, used = {}, {}
+        lines = [f'{len(categories)} categorie Odoo in {len(roots)} rami: {", ".join(roots.mapped("complete_name"))}']
+        created = reused = errors = 0
+        for categ in categories:
+            parent_ps = ps_of.get(categ.parent_id.id) if categ.parent_id and categ not in roots else home_id
+            if not parent_ps:
+                lines.append(f'[ERR] {categ.complete_name}: categoria del padre non disponibile')
+                errors += 1
+                continue
+            try:
+                # Ogni categoria a sé e salvata subito: creare una categoria sul negozio non si
+                # annulla, e il collegamento in Odoo non deve sparire per l'errore di un'altra.
+                with self.env.cr.savepoint():
+                    ps_id, was_created, line = self._sync_one_category(
+                        categ, parent_ps, counts.get(categ.id, 0) > 0, used, by_ps, lang_map, main_id, main_lang)
+                self.env.cr.commit()
+            except Exception as exc:
+                errors += 1
+                lines.append(f'[ERR] {categ.complete_name}: {exc}')
+                continue
+            ps_of[categ.id] = ps_id
+            used[ps_id] = categ.id
+            created += was_created
+            reused += not was_created
+            lines.append(line)
+        params.set_param('ke_prestashop_sync.category_tree_from_odoo', 'True')
+        PsCat._sync_from_prestashop(self.client)
+        lines.append(f'Riusate {reused}, create {created}, errori {errors}. Per spostare anche i prodotti già sul sito '
+                     f'serve l\'opzione "Sostituisci la categoria sul negozio" e un export.')
+        log_rec.write({'state': 'done' if not errors else 'error', 'end_date': fields.Datetime.now(),
+                       'products_total': len(categories), 'products_created': created,
+                       'products_updated': reused, 'products_error': errors, 'log_lines': '\n'.join(lines)})
+        self.env.cr.commit()
+        return created, reused, errors
 
     # ------------------------------------------------------------------
     # 6. Reset link orfani (ps_product_id punta a prodotto PS cancellato)

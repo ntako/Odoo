@@ -28,7 +28,7 @@
     </record>
 
     <menuitem id="menu_ke_product_spec_key" name="Specifiche tecniche" parent="stock.menu_product_in_config_stock"
-              action="action_ke_product_spec_key" groups="product.group_product_manager" sequence="35"/>
+              action="action_ke_product_spec_key" groups="product.group_product_manager" sequence="34"/>
 
     <record id="product_template_form_view_ke_specs" model="ir.ui.view">
         <field name="name">product.template.form.ke.specs</field>

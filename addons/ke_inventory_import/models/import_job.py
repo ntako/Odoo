@@ -878,6 +878,9 @@ def _download_images_parallel(image_tasks, existing_products, image_delay, max_w
 
 def _do_import(job, env, file_string, options, cr, cancel_event=None):
     """Run the full CSV import. Called from background thread."""
+    if options.get('stock_mode'):
+        from .stock_cost import do_stock
+        return do_stock(job, env, file_string, options, cr, cancel_event)
     if options.get('enrich_only'):
         from .enrich import do_enrich
         return do_enrich(job, env, file_string, options, cr, cancel_event)
@@ -1514,6 +1517,33 @@ class InventoryImportJob(models.Model):
         help='Il codice del fornitore nel codice articolo di Odoo ha questo prefisso (es. "PFS-": '
              'SAP 1636736 = PFS-1636736, anche con "+" finale).')
     match_ean = fields.Boolean('Abbina anche per EAN', default=True)
+    # Import integrato (2026-11-20): crea gli articoli mancanti nella loro famiglia, riusa gli archiviati.
+    create_missing = fields.Boolean(
+        'Crea gli articoli mancanti',
+        help='Gli articoli del file che non sono in Odoo vengono creati nella loro famiglia del fornitore '
+             '(aggiunti alla famiglia esistente o in una famiglia nuova); quelli archiviati vengono riattivati, '
+             'mai duplicati. Poi l\'arricchimento e i nomi del fornitore.')
+    code_suffix = fields.Char(
+        'Suffisso del codice nel file',
+        help='Parte finale del codice del file che in Odoo non c\'è (es. Tubertini "20181XX" = TUB-20181: "XX").')
+    brand_name = fields.Char('Marca (se il file non ha la colonna)')
+    family_from_name = fields.Boolean(
+        'Famiglie dal nome',
+        help='Per i file senza codice famiglia: articoli con lo stesso nome a meno delle misure finali '
+             '("Marginal Carp X 1,50 Mt.", "… 1,80 Mt.") sono la stessa famiglia.')
+    # Giacenze e costi dal file del magazzino (2026-11-24, ke_inventory_import/models/stock_cost.py).
+    stock_mode = fields.Boolean(
+        'Giacenze e costi dal magazzino',
+        help='Non crea prodotti: riconosce ogni riga (EAN, poi codice, poi ASIN), scrive il costo (vale come '
+             'costo manuale: i listini non lo cambiano più) e porta la giacenza della posizione scelta a quella '
+             'del file, per ubicazione. Gli articoli che non sono nel file restano come sono.')
+    qty_skip_values = fields.Text(
+        'Niente quantità per',
+        help='Uno per riga: se una cella della riga è uguale (fornitore, marca, codice…) la quantità di quella riga '
+             'non si importa; il costo sì. Es. "PURE FISHING".')
+    sublocations = fields.Boolean(
+        'Ubicazioni come sotto-posizioni', default=True,
+        help='Una sotto-posizione della posizione scelta per ogni ubicazione del file (creata se manca).')
     dry_run = fields.Boolean('Solo verifica', default=True,
                              help='Arricchimento: conta cosa cambierebbe senza scrivere niente.')
     spec_text_lang = fields.Selection(
@@ -1570,7 +1600,11 @@ class InventoryImportJob(models.Model):
     def _enrich_options_vals(self):
         self.ensure_one()
         return {'enrich_only': self.enrich_only, 'code_prefix': self.code_prefix,
-                'match_ean': self.match_ean, 'spec_text_lang': self.spec_text_lang}
+                'match_ean': self.match_ean, 'spec_text_lang': self.spec_text_lang,
+                'create_missing': self.create_missing, 'code_suffix': self.code_suffix,
+                'brand_name': self.brand_name, 'family_from_name': self.family_from_name,
+                'stock_mode': self.stock_mode, 'qty_skip_values': self.qty_skip_values,
+                'sublocations': self.sublocations, 'stock_location_id': self.location_id.id}
 
     @api.onchange('preset_id')
     def _onchange_preset_id(self):
@@ -1592,6 +1626,15 @@ class InventoryImportJob(models.Model):
         self.enrich_only = preset.enrich_only
         self.code_prefix = preset.code_prefix
         self.match_ean = preset.match_ean
+        self.create_missing = preset.create_missing
+        self.code_suffix = preset.code_suffix
+        self.brand_name = preset.brand_name
+        self.family_from_name = preset.family_from_name
+        self.stock_mode = preset.stock_mode
+        self.qty_skip_values = preset.qty_skip_values
+        self.sublocations = preset.sublocations
+        if preset.stock_location_id:
+            self.location_id = preset.stock_location_id
         if preset.spec_text_lang:
             self.spec_text_lang = preset.spec_text_lang
         if preset.delimiter:
@@ -1639,11 +1682,8 @@ class InventoryImportJob(models.Model):
         if not raw:
             raise UserError('Seleziona prima un file CSV dalla libreria.')
 
-        file_content = base64.b64decode(raw)
-        try:
-            file_string = file_content.decode('utf-8-sig')
-        except UnicodeDecodeError:
-            file_string = file_content.decode('latin-1')
+        from .csv_file import file_text
+        file_string = file_text(base64.b64decode(raw), self.delimiter)
 
         # Read only the first logical CSV row via csv.reader, which correctly
         # handles quoted fields that contain embedded newlines (e.g. "UK\nCopy").
@@ -1687,12 +1727,11 @@ class InventoryImportJob(models.Model):
         raw = self._get_file_data()
         if not raw:
             raise UserError('Seleziona un file CSV dalla libreria prima di avviare l\'import.')
-        file_content = base64.b64decode(raw)
-        try:
-            file_string = file_content.decode('utf-8-sig')
-        except UnicodeDecodeError:
-            file_string = file_content.decode('latin-1')
+        from .csv_file import file_text
+        file_string = file_text(base64.b64decode(raw), self.delimiter)
 
+        if self.stock_mode:
+            return self._run_stock(file_string)
         if self.enrich_only:
             return self._run_enrich(file_string)
 
@@ -1774,12 +1813,45 @@ class InventoryImportJob(models.Model):
             code_prefix=(self.code_prefix or '').strip(),
             match_ean=self.match_ean,
             spec_text_lang=self.spec_text_lang or 'en_GB',
+            create_missing=self.create_missing,
+            code_suffix=(self.code_suffix or '').strip(),
+            brand_name=(self.brand_name or '').strip(),
+            family_from_name=self.family_from_name,
+            supplier_tag=(self.code_prefix or '').strip() or (self.preset_id.name or ''),
             enrich_mapping=[{
                 'column': l.csv_column or '', 'target': l.target, 'default': l.default_value or '',
                 'spec': l.spec_key_id.code or '', 'lang': l.lang_code or '',
             } for l in lines.sorted('sequence')],
             weight_unit=self.weight_unit or 'g',
             volume_unit=self.volume_unit or 'cm',
+        )
+        self.write({'state': 'running', 'started_at': fields.Datetime.now()})
+        self.env.cr.commit()
+        cancel_event = threading.Event()
+        with _CANCEL_LOCK:
+            _CANCEL_EVENTS[self.id] = cancel_event
+        threading.Thread(
+            target=_run_in_background,
+            args=(self.env.cr.dbname, self.env.uid, self.id, file_string, options, cancel_event),
+            daemon=True,
+        ).start()
+        return {'type': 'ir.actions.act_window', 'res_model': self._name, 'res_id': self.id,
+                'view_mode': 'form', 'target': 'current'}
+
+    def _run_stock(self, file_string):
+        """Giacenze e costi dal file del magazzino (stock_cost.py), nel thread di sempre."""
+        lines = self.mapping_line_ids
+        if not lines.filtered(lambda l: l.target in ('default_code', 'barcode', '_asin') and l.csv_column):
+            raise UserError('Giacenze e costi: serve almeno una colonna mappata a "Codice interno", "Barcode" o '
+                            '"ASIN Amazon" per riconoscere i prodotti.')
+        if lines.filtered(lambda l: l.target == '_qty' and l.csv_column) and not self.location_id:
+            raise UserError('Giacenze e costi: scegli la posizione del magazzino (es. CAV/Arundo).')
+        options = dict(
+            delimiter=self.delimiter, stock_mode=True, dry_run=self.dry_run,
+            location_id=self.location_id.id, sublocations=self.sublocations,
+            qty_skip_values=self.qty_skip_values or '',
+            stock_mapping=[{'column': l.csv_column or '', 'target': l.target, 'default': l.default_value or ''}
+                           for l in lines.sorted('sequence')],
         )
         self.write({'state': 'running', 'started_at': fields.Datetime.now()})
         self.env.cr.commit()

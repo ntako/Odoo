@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <menuitem id="menu_ke_translate_proposal" name="Proposte di testo" parent="stock.menu_stock_inventory_control"
-              action="action_ke_translate_proposal" sequence="40" groups="product.group_product_manager"/>
-    <menuitem id="menu_ke_translate_job" name="Lavori di traduzione" parent="stock.menu_stock_inventory_control"
-              action="action_ke_translate_job" sequence="41" groups="product.group_product_manager"/>
+    <menuitem id="menu_ke_translate_proposal" name="Proposte di testo" parent="stock.menu_product_in_config_stock"
+              action="action_ke_translate_proposal" sequence="45" groups="product.group_product_manager"/>
+    <menuitem id="menu_ke_translate_job" name="Lavori di traduzione" parent="stock.menu_product_in_config_stock"
+              action="action_ke_translate_job" sequence="46" groups="product.group_product_manager"/>
     <menuitem id="menu_ke_translate_provider" name="Fornitori di traduzione" parent="stock.menu_product_in_config_stock"
-              action="action_ke_translate_provider" sequence="40" groups="base.group_system"/>
+              action="action_ke_translate_provider" sequence="47" groups="base.group_system"/>
 </odoo>

@@ -413,6 +413,68 @@ class ProductTemplate(models.Model):
         products._compute_x_amazon_sales_30d()
         self.env.cr.commit()
 
+    # Filtro "Candidati all'archiviazione" (2026-11-19): calcolato al momento
+    # della ricerca (non dagli snapshot giacenza/vendite 30gg, aggiornati solo
+    # dal cron). Regola concordata: si archivia un prodotto fuori produzione
+    # solo con giacenza zero ovunque, niente in arrivo, nessuna vendita da 30
+    # giorni (finestra dei resi) e inserzioni Amazon tutte inattive (da
+    # chiudere anche in Seller Central). Solo prodotti con almeno
+    # un'inserzione: quelli mai stati su Amazon non sono il caso.
+    ke_archive_candidate = fields.Boolean(
+        "Candidato all'archiviazione",
+        compute='_compute_ke_archive_candidate', search='_search_ke_archive_candidate',
+        help='Inserzioni Amazon tutte inattive, nessuna giacenza (anche FBA) né merce in arrivo, '
+             'nessuna vendita negli ultimi 30 giorni. Prima di archiviare: chiudere le '
+             'inserzioni in Seller Central.',
+    )
+
+    def _ke_archive_candidate_ids(self, tmpl_ids=None):
+        only = 'AND t.id = ANY(%(ids)s)' if tmpl_ids is not None else ''
+        self.env.cr.execute(f"""
+            WITH listed AS (
+                SELECT pp.product_tmpl_id AS tid, bool_or(l.status = 'active') AS any_active
+                  FROM ke_amazon_listing l
+                  JOIN product_product pp ON pp.id = l.product_id
+                 WHERE COALESCE(l.sku, '') NOT LIKE %(gr)s
+                 GROUP BY pp.product_tmpl_id)
+            SELECT t.id FROM product_template t JOIN listed ON listed.tid = t.id
+             WHERE t.active AND NOT listed.any_active {only}
+               AND NOT EXISTS (
+                   SELECT 1 FROM stock_quant q
+                     JOIN stock_location sl ON sl.id = q.location_id
+                     JOIN product_product pp ON pp.id = q.product_id
+                    WHERE pp.product_tmpl_id = t.id AND sl.usage = 'internal' AND q.quantity > 0)
+               AND NOT EXISTS (
+                   SELECT 1 FROM stock_move m
+                     JOIN stock_location src ON src.id = m.location_id
+                     JOIN stock_location dst ON dst.id = m.location_dest_id
+                     JOIN product_product pp ON pp.id = m.product_id
+                    WHERE pp.product_tmpl_id = t.id AND m.state NOT IN ('draft', 'done', 'cancel')
+                      AND dst.usage = 'internal' AND src.usage <> 'internal')
+               AND NOT EXISTS (
+                   SELECT 1 FROM sale_order_line sol
+                     JOIN sale_order so ON so.id = sol.order_id
+                     JOIN product_product pp ON pp.id = sol.product_id
+                    WHERE pp.product_tmpl_id = t.id AND so.state IN ('sale', 'done')
+                      AND so.date_order >= (now() at time zone 'UTC') - interval '30 days')
+        """, {'gr': 'amzn.gr.%', 'ids': list(tmpl_ids or [])})
+        return [r[0] for r in self.env.cr.fetchall()]
+
+    @api.depends()
+    def _compute_ke_archive_candidate(self):
+        ids = set(self._ke_archive_candidate_ids(self.ids)) if self.ids else set()
+        for tmpl in self:
+            tmpl.ke_archive_candidate = tmpl.id in ids
+
+    def _search_ke_archive_candidate(self, operator, value):
+        # Odoo 19 normalizza "= True" in "in [True]": gestire entrambe le forme.
+        if operator in ('in', 'not in'):
+            wanted = any(bool(v) for v in (value if isinstance(value, (list, tuple, set)) else [value]))
+            positive = wanted if operator == 'in' else not wanted
+        else:
+            positive = bool(value) if operator in ('=', '==') else not bool(value)
+        return [('id', 'in' if positive else 'not in', self._ke_archive_candidate_ids())]
+
     x_amazon_found_by_manufacturer = fields.Boolean(
         'Presente su Amazon (produttore)',
         copy=False,

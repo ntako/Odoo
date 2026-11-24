@@ -1,6 +1,6 @@
 {
     'name': 'KE Product Catalog',
-    'version': '19.0.1.6.0',
+    'version': '19.0.1.8.0',
     'category': 'Sales/Sales',
     'summary': 'Catalogo prodotti comune: marca con nomi alternativi, galleria immagini come indirizzi',
     'description': """
@@ -23,7 +23,8 @@ corrispondenze (nome trovato → marca).
 Prezzo di vendita per variante: se compilato vale al posto del prezzo della
 famiglia (lst_price, listini, ordini, canali).
 
-In futuro: codice famiglia del fornitore.
+Famiglie del fornitore: codice e nome della famiglia per variante (dal catalogo
+del fornitore) e proposte per unire o separare le famiglie nate da Amazon.
 """,
     'author': 'KE',
     'depends': ['product', 'stock'],
@@ -37,6 +38,8 @@ In futuro: codice famiglia del fornitore.
         'views/product_spec_views.xml',
         'views/product_supplier_views.xml',
         'views/product_category_rule_views.xml',
+        'views/product_category_views.xml',
+        'views/product_family_views.xml',
     ],
     'installable': True,
     'application': False,

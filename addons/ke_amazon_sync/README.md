@@ -382,12 +382,45 @@ Sugli ASIN esistenti la scheda la governa il titolare del marchio: un rivenditor
 |---|---|
 | Nome e descrizione di vendita | solo nella lingua del marketplace e **solo se quella lingua non ha un testo proprio** (vuoto o copia di un'altra lingua) |
 | Testi del catalogo fornitore (`ke_supplier_copy`, `ke_supplier_bullets`) | mai toccati |
-| Specifiche tecniche (`ke.product.spec`) | priorità **manuale > fornitore > Amazon**: Amazon aggiorna solo i valori suoi |
+| Specifiche tecniche (`ke.product.spec`) | priorità **manuale > fornitore > Amazon**: Amazon aggiorna solo i valori suoi. A fine Full Import (dopo l'Import FNSKU) parte da solo il giro "solo prodotti nuovi" (varianti senza specifiche Amazon); il giro completo è il pulsante "Importa specifiche da Amazon". Il Full Import non crea più righe di attributi "no_variant" come specifiche (quelle già create restano) |
 | **Peso e dimensioni** | **solo se il prodotto non li ha** (prima venivano riscritti a ogni aggiornamento) |
 | Marca Amazon | solo se manca |
 | Categoria Odoo | spostata solo dalla categoria predefinita o verso una sottocategoria della stessa ("Corrispondenze categorie") |
 
-Il catalogo fornitore (`ke_inventory_import`, modalità "Solo arricchimento") scrive testi e specifiche con fonte "Fornitore"; peso e dimensioni anche lui solo se mancano. Sul sito (`ke_prestashop_sync`) i testi del fornitore hanno la precedenza sulla descrizione di vendita, nelle lingue dove ci sono.
+Il catalogo fornitore (`ke_inventory_import`, modalità "Solo arricchimento") scrive testi e specifiche con fonte "Fornitore"; peso e dimensioni anche lui solo se mancano. **Costo** (2026-11-24): Amazon non lo scrive; il file del magazzino ("Giacenze e costi dal magazzino") e il costo scritto a mano valgono **manuale** e i listini dei fornitori non li cambiano (scrivono il costo solo dove manca o era del listino: `ke_cost_source`). Sul sito (`ke_prestashop_sync`) i testi del fornitore hanno la precedenza sulla descrizione di vendita, nelle lingue dove ci sono.
+
+### Codice prodotto e SKU Amazon (2026-11-20)
+Il codice prodotto (`default_code`) è prefisso + codice **senza "+"** (es. `PFS-1636736`) e non segue più
+lo SKU principale: gli SKU Amazon (anche "X+", i pezzi rietichettati) stanno sulle inserzioni
+(`ke.amazon.listing`) e lo SKU principale in `x_amazon_sku` (FBA, etichette, sync prezzi/quantità). Il
+"." finale **resta**: indica un altro ASIN, cioè un altro articolo. La sync scrive il codice solo alla
+creazione (`_clean_code`; se il codice pulito è già di un altro prodotto tiene lo SKU intero,
+`_free_code`) e lo confronta con lo SKU senza "+" solo se l'ASIN è compatibile (`_MatchMaps.code_match`:
+"X" e "X+" su ASIN diversi sono articoli diversi). Pulizia dei codici esistenti: Impostazioni → Amazon →
+"Codici prodotto senza +" (Verifica / Pulisci codici); i codici che collidono restano e sono elencati
+nel log come doppioni da unire.
+
+### Famiglie riorganizzate in Odoo dal catalogo fornitore (2026-11-20)
+Le proposte di famiglia (ke_product_catalog) spostano varianti tra prodotti senza toccare Amazon.
+Perché la sync continui a riconoscere tutto (`models/product_family_amazon.py`):
+- SKU/ASIN/FNSKU di un prodotto semplice che diventa variante passano alla variante (dove la sync
+  cerca le varianti di famiglia); quelli del prodotto restano dove sono.
+- Una famiglia senza parent ASIN prende quello di una famiglia Amazon svuotata o uno interno
+  `ODOO-FAM-<id>`: senza, il Full Import la tratterebbe da prodotto semplice (e `_update_product` su
+  un prodotto con più varianti lo corrompe). Il parent ASIN non viene mai mandato ad Amazon.
+- `x_amazon_parent_asin_alias` ("Altri parent ASIN"): parent ASIN delle famiglie Amazon svuotate e
+  archiviate. `_MatchMaps` li mappa sulla famiglia Odoo (mai sopra un prodotto che ha davvero quel
+  parent ASIN): le nuove varianti di quella famiglia Amazon arrivano lì.
+- Righe di famiglie Amazon diverse dalla famiglia Odoo: "COLLEGATO (famiglia diversa)", come già per
+  i marketplace che raggruppano in modo diverso; struttura non modificata.
+
+### Esauriti e fuori produzione (2026-11-19)
+
+- **Esaurito ma ancora ordinabile**: il prodotto resta **attivo** con giacenza 0; l'inserzione Amazon resta inattiva da sola.
+- **Fuori produzione**: si archivia solo con giacenza zero ovunque (anche FBA, niente in arrivo), nessuna vendita da 30 giorni (resi) e dopo aver **chiuso le inserzioni in Seller Central**. Un ordine Amazon su un prodotto archiviato diventa una nota "[NON TROVATO]", senza riga né scarico.
+- Filtro **"Candidati all'archiviazione"** nella ricerca prodotti (`ke_archive_candidate`, calcolato al momento): inserzioni tutte inattive, nessuna giacenza né merce in arrivo, nessuna vendita negli ultimi 30 giorni.
+- **Impostazioni → Amazon → Riattiva prodotti**: riattiva i prodotti e le varianti archiviati con inserzioni (anche inattive), esclusi gli SKU Grade & Resell; salta quelli con lo stesso EAN di un prodotto attivo (possibili doppioni). Log "Riattivazione prodotti con inserzioni". Nessuna chiamata Amazon.
+- Il Full Import salta i prodotti archiviati trovati da un'inserzione ("SALTATO (prodotto archiviato in Odoo)"): non li aggiorna né li riattiva.
 
 ## Relazione con gli altri moduli
 

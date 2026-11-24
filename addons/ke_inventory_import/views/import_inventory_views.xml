@@ -42,6 +42,14 @@
                             <field name="code_prefix" invisible="not enrich_only"/>
                             <field name="match_ean" invisible="not enrich_only"/>
                             <field name="spec_text_lang" invisible="not enrich_only"/>
+                            <field name="create_missing" invisible="not enrich_only"/>
+                            <field name="code_suffix" invisible="not enrich_only"/>
+                            <field name="brand_name" invisible="not enrich_only"/>
+                            <field name="family_from_name" invisible="not enrich_only"/>
+                            <field name="stock_mode" invisible="enrich_only"/>
+                            <field name="stock_location_id" invisible="not stock_mode"/>
+                            <field name="sublocations" invisible="not stock_mode"/>
+                            <field name="qty_skip_values" invisible="not stock_mode"/>
                             <field name="weight_unit" string="Unità peso"/>
                             <field name="volume_unit" string="Unità dimensioni (volume)"/>
                         </group>
@@ -190,14 +198,26 @@
                             <field name="file_name" invisible="1"/>
                             <field name="delimiter"/>
                         </group>
-                        <group string="Arricchimento prodotti esistenti">
+                        <group string="Giacenze e costi dal magazzino" invisible="enrich_only">
+                            <field name="stock_mode"/>
+                            <field name="location_id" string="Posizione del magazzino" invisible="not stock_mode"/>
+                            <field name="sublocations" invisible="not stock_mode"/>
+                            <field name="qty_skip_values" invisible="not stock_mode"
+                                   placeholder="PURE FISHING&#10;0000100300030"/>
+                            <field name="dry_run" invisible="not stock_mode"/>
+                        </group>
+                        <group string="Arricchimento prodotti esistenti" invisible="stock_mode">
                             <field name="enrich_only"/>
                             <field name="code_prefix" invisible="not enrich_only"/>
                             <field name="match_ean" invisible="not enrich_only"/>
                             <field name="spec_text_lang" invisible="not enrich_only"/>
+                            <field name="create_missing" invisible="not enrich_only"/>
+                            <field name="code_suffix" invisible="not enrich_only"/>
+                            <field name="brand_name" invisible="not enrich_only"/>
+                            <field name="family_from_name" invisible="not enrich_only"/>
                             <field name="dry_run" invisible="not enrich_only"/>
                         </group>
-                        <group string="Opzioni" invisible="enrich_only">
+                        <group string="Opzioni" invisible="enrich_only or stock_mode">
                             <field name="update_existing"      invisible="images_only"/>
                             <field name="import_attributes"    invisible="images_only"/>
                             <field name="import_descriptions"  invisible="images_only"/>

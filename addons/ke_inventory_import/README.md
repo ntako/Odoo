@@ -2,7 +2,7 @@
 
 Modulo Odoo 19 per l'importazione massiva di prodotti da file CSV, con supporto a mapping personalizzato delle colonne, conversione automatica di unità di misura, aggiornamento giacenze e prezzi, e importazione immagini.
 
-**Versione:** 19.0.1.0
+**Versione:** 19.0.1.4
 **Dipendenze:** `stock`, `product`
 **Autore:** Matteo Nuzzachi
 
@@ -243,6 +243,70 @@ La cella viene parsata direttamente in **m³**.
 | `cl`, `dl` | centilitri / decilitri → m³ |
 
 ---
+
+## Catalogo fornitore integrato (2026-11-20)
+
+Modalità **"Solo arricchimento prodotti esistenti"** + **"Crea gli articoli mancanti"**: l'import da usare
+per i cataloghi dei fornitori sui prodotti nati da Amazon. L'import "normale" (senza arricchimento) non va
+usato su questo catalogo: cerca solo il codice esatto (es. "1636736" contro "PFS-1636736") e duplica.
+
+Abbinamento di ogni riga: **codice fornitore della variante** (scritto dagli import precedenti, per
+fornitore = prefisso del preset) → **prefisso + codice** (togliendo il "Suffisso del codice nel file", es.
+Tubertini "20181XX" = TUB-20181) → **EAN** (anche se Excel lo scrive "8055400196916.0").
+
+Con "Crea gli articoli mancanti" (`models/catalog_create.py`), prima dell'arricchimento:
+- articoli **archiviati** presenti nel file (codice con prefisso, codice nudo come negli import di marzo,
+  EAN) → **riattivati** col codice giusto, mai duplicati;
+- articoli mancanti → **creati nella loro famiglia**: aggiunti alla famiglia che c'è già (stesso codice
+  famiglia del fornitore) o in una famiglia nuova; una famiglia di una riga è un prodotto semplice. Codice
+  = prefisso + codice; EAN se libero; prezzo di vendita 0 (sul sito vanno solo i prodotti con giacenza).
+Famiglia di una riga: colonna "Codice famiglia fornitore"; se no "Nome famiglia fornitore"; se il file non
+ha famiglie e il preset ha **"Famiglie dal nome"**, il nome senza le misure finali ("Marginal Carp X 1,50
+Mt." → "Marginal Carp X"; Trabucco: la parte prima di "*"). Righe senza codice con un nome famiglia (righe
+di intestazione, es. fotolistino C4) valgono per le righe successive. Nome di partenza delle varianti: la
+parte del nome che cambia ("1,50 Mt."), poi quello dalle specifiche dove ci sono.
+
+L'arricchimento scrive anche: **codice fornitore per variante**, **costo** (colonna "Prezzo costo" =
+listino del fornitore; solo dove il costo manca o era già del listino, mai sopra il costo manuale — vedi
+sotto; prezzo 0 = nessun prezzo), **marca** (colonna "Marca" o marca fissa del preset,
+solo dove manca; riconosciuta anche dalla prima parola: "C4 SPEARFISHING" → C4), **immagini** come
+indirizzi nella galleria (colonna "Immagine (indirizzo)"). Alla fine i nomi del fornitore
+(ke_product_catalog) per i prodotti creati o riattivati.
+
+**File Excel** (.xlsx) accettati nella libreria: convertiti dal primo foglio, partendo dalla riga di
+intestazione = la prima, tra le prime 15, con quasi tante celle di testo quante la più piena (numeri e
+indirizzi web non contano: salta righe di titolo e la riga 1, 2, 3… del file Pure Fishing); numeri interi
+senza ".0".
+
+Preset creati all'installazione: Pure Fishing EMEA, Trabucco, Tubertini, Lineaeffe, C4 / H.Dessault (file
+in `docs/Fornitori`).
+
+## Giacenze e costi dal magazzino (2026-11-24)
+
+Modalità **"Giacenze e costi dal magazzino"** (`models/stock_cost.py`), per il file del magazzino
+(`docs/MagazzinoArundo.csv`, preset "Magazzino Arundo (giacenze e costi)"). Non crea prodotti.
+
+Riconoscimento di ogni riga tra i prodotti attivi, in quest'ordine: **EAN** → **codice** esatto (anche
+senza "+" e senza gli zeri iniziali del file; il "." resta: è un altro ASIN) → **ASIN** (variante, prodotto
+semplice, inserzioni, se c'è ke_amazon_sync) → codice **senza il prefisso** del fornitore in Odoo o codice
+fornitore della variante (per ultimo: lo stesso numero può essere di un altro fornitore). Una chiave che
+porta a più prodotti non vale. Il riepilogo elenca le righe non trovate e quelle dove EAN, codice e ASIN
+indicano prodotti diversi (vale il primo dell'ordine).
+
+Colonne: Codice, Barcode, "ASIN Amazon", "Quantità stock", "Ubicazione in magazzino", "Prezzo costo".
+- **Costo**: scritto come **costo manuale** (`product.product.ke_cost_source`, `models/product_cost.py`).
+  Fonte del costo: "Listino fornitore" (scritto dall'arricchimento) o "Manuale / magazzino" (questo file,
+  o qualunque altra scrittura del costo, anche a mano). I listini scrivono il costo solo dove manca o è già
+  del listino; un costo di fonte sconosciuta (scritto prima del 2026-11-24) resta.
+- **Quantità** nella posizione scelta (es. CAV/Arundo): per ogni prodotto del file la posizione e le sue
+  sotto-posizioni prendono le quantità del file, per ubicazione (con "Ubicazioni come sotto-posizioni" una
+  sotto-posizione per ubicazione, creata se manca; righe dello stesso prodotto sommate); le altre
+  sotto-posizioni per quel prodotto vanno a zero (rettifica d'inventario). Prodotti che non sono nel file:
+  non toccati. Quantità vuota = niente quantità.
+- **"Niente quantità per"**: un valore per riga; se una cella della riga è uguale (fornitore, marca,
+  codice…) la quantità di quella riga non si importa, il costo sì. Preset: "PURE FISHING" e 5 codici
+  Sbirulino di MA.GIA.
+- "Solo verifica" conta senza scrivere.
 
 ## Modalità di importazione
 

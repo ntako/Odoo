@@ -32,6 +32,21 @@ class TestPsApiClient(TransactionCase):
         self.assertEqual(PsApiClient._clean_reference(None), '')
 
 
+class TestPsPostId(TransactionCase):
+    """ID della risorsa creata letto dalla risposta JSON, anche per i nomi in "-ies" (2026-11-17)."""
+
+    def test_post_returns_id_for_categories_and_products(self):
+        from unittest.mock import MagicMock
+        client = PsApiClient.__new__(PsApiClient)
+        client._url, client._ps_key_param = 'http://x', lambda: {}
+        client._check = lambda resp, what: None
+        for resource, payload in (('categories', {'category': {'id': 77}}), ('products', {'product': {'id': 88}})):
+            resp = MagicMock()
+            resp.json.return_value = payload
+            with patch('requests.post', return_value=resp):
+                self.assertEqual(client._post_xml(resource, b'<x/>'), payload[resource[:-3] + 'y' if resource.endswith('ies') else resource[:-1]]['id'])
+
+
 class FakePsClient:
     """Implementa la sola superficie usata dal SyncEngine, in memoria."""
 
@@ -118,7 +133,18 @@ class FakePsClient:
             {'id': 2, 'parent': 1, 'name': 'Home', 'level': 1, 'active': True},
             {'id': 30, 'parent': 2, 'name': 'Mulinelli', 'level': 2, 'active': True},
             {'id': 31, 'parent': 30, 'name': 'Spinning', 'level': 3, 'active': True},
-        ]
+        ] + getattr(self, 'created_categories', [])
+
+    def create_category(self, parent_id, names, active=True):
+        self._next_id += 1
+        self.created_categories = getattr(self, 'created_categories', [])
+        self.created_categories.append({'id': self._next_id, 'parent': parent_id, 'name': names[1],
+                                        'level': 9, 'active': bool(active)})
+        return self._next_id
+
+    def update_category(self, ps_id, names=None, active=None):
+        self.category_updates = getattr(self, 'category_updates', [])
+        self.category_updates.append((ps_id, names, active))
 
     def get_manufacturers(self):
         return [{'id': 5, 'name': 'Bad Bass Tech'}]
@@ -840,6 +866,24 @@ class TestPsMultilang(TransactionCase):
         self.assertEqual(prod.find('name/language[@id="3"]').text, 'Moulinet Odoo', 'con "Aggiorna testi": sempre')
 
 
+    def test_update_repairs_broken_and_missing_texts_only(self):
+        """Testo rotto (HTML codificato) o mancante sul negozio: sostituito anche senza "Aggiorna testi" (2026-11-17)."""
+        import xml.etree.ElementTree as ET
+        broken = _PS_PRODUCT_XML.replace(
+            '<description_short><language id="1">Breve</language>',
+            '<description_short><language id="1">&amp;lt;ul&amp;gt;&amp;lt;li&amp;gt;Grasso&amp;lt;/li&amp;gt;&amp;lt;/ul&amp;gt;</language>'
+        ).replace('<link_rewrite>', '<description><language id="1"></language></description><link_rewrite>')
+        sent = {}
+        with patch.object(PsApiClient, '_get_xml_str', return_value=broken), \
+                patch.object(PsApiClient, '_put_xml', side_effect=lambda r, i, b: sent.update(xml=b)):
+            self._client().update_product(7, 'Nome da Odoo', description_short='<ul><li>Facile</li></ul>',
+                                          description='<p>Descrizione</p>')
+        prod = ET.fromstring(sent['xml']).find('product')
+        self.assertEqual(prod.find('description_short/language[@id="1"]').text, '<ul><li>Facile</li></ul>')
+        self.assertEqual(prod.find('description/language[@id="1"]').text, '<p>Descrizione</p>', 'vuota: riempita')
+        self.assertEqual(prod.find('name/language[@id="1"]').text, 'Mulinello', 'testo buono del negozio: resta')
+
+
 @tagged('post_install', '-at_install')
 class TestPsFamilyModes(TransactionCase):
     """Famiglie (2026-11-13): combinazioni con sostituzione dei vecchi prodotti, oppure prodotti separati."""
@@ -923,3 +967,89 @@ class TestPsFamilyModes(TransactionCase):
             self.engine.export_products_to_ps(log, product_ids=self.tmpl.ids, family_mode='separate')
         self.assertEqual(self.red.ps_variant_product_id, 700)
         self.assertFalse(self.tmpl.ps_product_id)
+
+
+@tagged('post_install', '-at_install')
+class TestPsCategoryTree(TransactionCase):
+    """Albero del sito = albero Odoo (2026-11-17)."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(self.env.cr, 'commit', lambda: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = FakePsClient()
+        self.engine = SyncEngine(self.env, self.client)
+        PsCat = self.env['ke.prestashop.category']
+        PsCat._sync_from_prestashop(self.client)
+        ps = {c.ps_id: c for c in PsCat.search([])}
+        Categ = self.env['product.category']
+        self.fishing = Categ.create({'name': 'ZZC Pesca', 'ps_publish': True, 'ps_category_id': ps[30].id})
+        self.reels = Categ.create({'name': 'ZZC Mulinelli', 'parent_id': self.fishing.id, 'ps_category_id': ps[30].id})
+        self.spin = Categ.create({'name': 'ZZC Spinning', 'parent_id': self.reels.id, 'ps_category_id': ps[31].id})
+        self.empty = Categ.create({'name': 'ZZC Vuota', 'parent_id': self.fishing.id})
+        self.other = Categ.create({'name': 'ZZC Altro'})
+        self.env['product.template'].create({'name': 'ZZC Mulinello', 'categ_id': self.spin.id, 'ps_product_id': 777})
+
+    def _log(self):
+        return self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'sync_categories',
+                                                          'state': 'running'})
+
+    def test_reuse_consistent_create_the_rest(self):
+        created, reused, errors = self.engine.sync_category_tree(self._log())
+        self.assertEqual(errors, 0)
+        self.assertEqual(self.fishing.ps_category_id.ps_id, 30, 'coerente (sotto Home): riusata')
+        self.assertNotEqual(self.reels.ps_category_id.ps_id, 30, 'già usata dal padre: nuova')
+        self.assertEqual(self.reels.ps_category_id.parent_ps_id, 30)
+        self.assertNotEqual(self.spin.ps_category_id.ps_id, 31, 'la 31 sta sotto la 30, non sotto Mulinelli: nuova')
+        self.assertEqual(self.spin.ps_category_id.parent_ps_id, self.reels.ps_category_id.ps_id)
+        self.assertTrue(self.spin.ps_category_id.odoo_managed)
+        made = {c['name']: c for c in self.client.created_categories}
+        self.assertTrue(made['ZZC Spinning']['active'])
+        self.assertFalse(made['ZZC Vuota']['active'], 'nessun prodotto pubblicato: spenta')
+        self.assertNotIn('ZZC Altro', made, 'ramo non pubblicato')
+        self.assertEqual(self.env['ir.config_parameter'].sudo().get_param(
+            'ke_prestashop_sync.category_tree_from_odoo'), 'True')
+
+    def test_second_run_reuses_what_it_created(self):
+        self.engine.sync_category_tree(self._log())
+        first = {c.id: c.ps_category_id.ps_id for c in (self.reels | self.spin | self.empty)}
+        n = len(self.client.created_categories)
+        created, reused, errors = self.engine.sync_category_tree(self._log())
+        self.assertEqual(created, 0)
+        self.assertEqual(len(self.client.created_categories), n)
+        self.assertEqual({c.id: c.ps_category_id.ps_id for c in (self.reels | self.spin | self.empty)}, first)
+
+    def test_orphan_category_from_interrupted_run_is_adopted(self):
+        """Categoria già creata sul negozio da un giro interrotto: si adotta, niente doppione (2026-11-17)."""
+        orphan = self.client.create_category(30, {1: 'ZZC Mulinelli'})
+        self.env['ke.prestashop.category']._sync_from_prestashop(self.client)
+        n = len(self.client.created_categories)
+        self.engine.sync_category_tree(self._log())
+        self.assertEqual(self.reels.ps_category_id.ps_id, orphan)
+        self.assertFalse([c for c in self.client.created_categories[n:] if c['name'] == 'ZZC Mulinelli'])
+
+    def test_export_queues_category_sync_at_the_end(self):
+        self.engine.sync_category_tree(self._log())
+        tmpl = self.env['product.template'].create({'name': 'ZZC Nuovo', 'categ_id': self.spin.id,
+                                                    'type': 'consu', 'list_price': 5.0})
+        log = self.env['ke.prestashop.sync.log'].create({'name': 't', 'sync_type': 'export_products',
+                                                         'state': 'running'})
+        Log = self.env['ke.prestashop.sync.log']
+        Log.search([('sync_type', '=', 'sync_categories'), ('state', 'in', ('queued', 'running'))]).write(
+            {'state': 'done'})
+        with patch.object(SyncEngine, '_ps_price', return_value=5.0), \
+                patch.object(SyncEngine, '_ps_manufacturer_id', return_value=0):
+            self.engine.export_products_to_ps(log, product_ids=tmpl.ids)
+        self.assertTrue(Log.search([('sync_type', '=', 'sync_categories'), ('state', '=', 'queued')]))
+        self.assertIn('[CATEGORIE]', log.log_lines)
+
+    def test_in_site_filter_and_counts(self):
+        Categ = self.env['product.category']
+        in_site = Categ.search([('ps_in_site', '=', True)])
+        self.assertEqual(in_site & (self.fishing | self.reels | self.spin | self.empty | self.other),
+                         self.fishing | self.reels | self.spin | self.empty)
+        self.assertNotIn(self.other, in_site)
+        self.assertIn(self.other, Categ.search([('ps_in_site', '=', False)]))
+        self.assertEqual(self.fishing.ps_published_count, 1)
+        self.assertEqual(self.empty.ps_published_count, 0)

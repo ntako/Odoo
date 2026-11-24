@@ -61,6 +61,9 @@
                             <div class="mt8">
                                 <button name="action_refresh_ps_categories" type="object"
                                         string="Aggiorna categorie da PrestaShop" class="btn btn-sm btn-secondary"/>
+                                <button name="action_run_sync_categories" type="object"
+                                        string="Sincronizza categorie da Odoo" class="btn btn-sm btn-secondary ms-2"
+                                        confirm="Riporto sul negozio l'albero delle categorie Odoo dei rami 'Pubblica sul sito': riusa le categorie coerenti, crea le altre. Continuare?"/>
                             </div>
                         </setting>
                         <setting string="Gruppo regole IVA PS"
@@ -153,7 +156,14 @@
                     </block>
 
                     <!-- Manutenzione link PS -->
-                    <block title="Manutenzione">
+                    <block title="Strumenti e manutenzione">
+                        <setting string="Import prodotti da PrestaShop"
+                                 help="Operazione straordinaria: crea o aggiorna prodotti Odoo dal catalogo del negozio (direzione opposta a quella normale: Odoo è il riferimento).">
+                            <div>
+                                <button name="%(action_ps_product_import)d" type="action"
+                                        string="Import prodotti da PS" class="btn btn-sm btn-secondary"/>
+                            </div>
+                        </setting>
                         <setting string="Diagnostica link PS"
                                  help="Mostra quanti prodotti Odoo hanno ps_product_id duplicato (più prodotti Odoo → stesso prodotto PS).">
                             <div>

@@ -17,3 +17,5 @@ access_ke_category_rule_user,ke.product.category.rule utente,model_ke_product_ca
 access_ke_category_rule_manager,ke.product.category.rule gestione,model_ke_product_category_rule,product.group_product_manager,1,1,1,1
 access_ke_category_proposal_manager,ke.product.category.proposal,model_ke_product_category_proposal,product.group_product_manager,1,1,1,1
 access_ke_category_propose_wizard,ke.product.category.propose.wizard,model_ke_product_category_propose_wizard,product.group_product_manager,1,1,1,1
+access_ke_family_proposal_manager,ke.product.family.proposal,model_ke_product_family_proposal,product.group_product_manager,1,1,1,1
+access_ke_family_names_wizard,ke.product.family.names.wizard,model_ke_product_family_names_wizard,product.group_product_manager,1,1,1,1

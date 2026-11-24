@@ -277,6 +277,10 @@ class ResConfigSettings(models.TransientModel):
             'ke_prestashop_sync.orders_hours_back', '24'))
         return self._run('import_orders', 'import_orders_from_ps', hours_back=hours_back)
 
+    def action_run_sync_categories(self):
+        """Albero categorie Odoo → PrestaShop (rami "Pubblica sul sito", 2026-11-17)."""
+        return self._run('sync_categories', 'sync_category_tree')
+
     def action_run_sync_images(self):
         return self._run('sync_images', 'sync_images_to_prestashop')
 

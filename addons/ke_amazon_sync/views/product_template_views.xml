@@ -170,6 +170,9 @@
                         context="{'group_by': 'x_amazon_warehouse_id'}"/>
                 <filter string="Discrepanza giacenza FBM/Amazon" name="filter_amazon_qty_diff"
                         domain="[('x_amazon_qty_diff', '!=', 0)]"/>
+                <filter string="Candidati all'archiviazione" name="filter_ke_archive_candidate"
+                        domain="[('ke_archive_candidate', '=', True)]"
+                        help="Inserzioni Amazon tutte inattive, nessuna giacenza (anche FBA) né merce in arrivo, nessuna vendita negli ultimi 30 giorni"/>
             </xpath>
         </field>
     </record>
