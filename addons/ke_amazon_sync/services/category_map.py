@@ -83,6 +83,7 @@ class CategoryMapper:
         all_categ = self.env.ref('product.product_category_all', raise_if_not_found=False)
         maps = {m.key: m for m in self.Map.search([])}
         targets = {m.categ_id.id for m in maps.values() if m.categ_id}
+        managed = self._managed_ids()
         moves = defaultdict(list)
         for tmpl in self.Template.search([('x_amazon_category', '!=', False)]):
             key = category_key(tmpl.x_amazon_category)
@@ -95,13 +96,13 @@ class CategoryMapper:
             current = tmpl.categ_id
             if not target or current == target:
                 continue
-            if not force and not self._replaceable(current, default, all_categ, targets, maps, target):
+            if not force and not self._replaceable(current, default, all_categ, targets, maps, target, managed):
                 continue
             moves[target.id].append(tmpl.id)
         # Senza categoria Amazon salvata (famiglie del vecchio import: la
         # categoria Odoo era il nome Amazon, x_amazon_category vuoto) vale il
         # nome della vecchia categoria (su odoo_2 ~200 prodotti, 2026-11-10).
-        legacy = self.Category.search([('id', 'not in', list(targets | {default.id}))]).filtered(
+        legacy = self.Category.search([('id', 'not in', list(targets | managed | {default.id}))]).filtered(
             lambda c: category_key(c.name) in maps)
         for categ in legacy:
             target = maps[category_key(categ.name)].categ_id or default
@@ -112,8 +113,20 @@ class CategoryMapper:
             self.Template.browse(ids).write({'categ_id': categ_id})
         return sum(len(ids) for ids in moves.values())
 
+    def _managed_ids(self):
+        """Categorie dell'albero di classificazione (2026-11-26): destinazioni delle regole di
+        ke_product_catalog e i loro rami superiori. Hanno nomi come "Guanti", "Accessori", "Sonde"
+        uguali a categorie Amazon, ma non sono residui del vecchio import: mai svuotate né spostate."""
+        if 'ke.product.category.rule' not in self.env:
+            return set()
+        rules = self.env['ke.product.category.rule'].sudo().with_context(active_test=False).search([])
+        ids = set()
+        for path in set(rules.mapped('target_categ_id.parent_path')):
+            ids.update(int(x) for x in (path or '').split('/') if x)
+        return ids
+
     @staticmethod
-    def _replaceable(current, default, all_categ, targets, maps, target=None):
+    def _replaceable(current, default, all_categ, targets, maps, target=None, managed=()):
         if not current or current == default or current == all_categ:
             return True
         # Affinamento (2026-11-11): da una categoria padre alla sottocategoria
@@ -123,7 +136,7 @@ class CategoryMapper:
         if target and target.parent_path and current.parent_path \
                 and target.parent_path.startswith(current.parent_path):
             return True
-        return current.id not in targets and category_key(current.name) in maps
+        return current.id not in targets and current.id not in managed and category_key(current.name) in maps
 
     # ------------------------------------------------------------------
     # Import del file di corrispondenze
@@ -191,7 +204,7 @@ class CategoryMapper:
         stesso (con identificativo esterno).
         """
         maps = self.Map.search([])
-        keep = set(maps.categ_id.ids) | {self.default_category().id}
+        keep = set(maps.categ_id.ids) | {self.default_category().id} | self._managed_ids()
         keep |= set(self.env['ir.model.data'].sudo().search(
             [('model', '=', 'product.category')]).mapped('res_id'))
         keys = set(maps.mapped('key'))

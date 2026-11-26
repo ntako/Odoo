@@ -13,6 +13,9 @@ posto del file da rivedere in Excel).
 Scelta della categoria: le regole che si applicano, in ordine; vince la
 prima non debole (una regola debole cede a qualsiasi altra che trova una
 categoria diversa). Due regole non deboli in disaccordo → da verificare.
+Se la categoria trovata ha regole sue ("si applica a"), si provano subito
+(es. amo → Ami → Ami / Mare). Nessuna proposta verso una categoria più
+generica di quella attuale (un amo già in "Ami / Mare" resta lì).
 """
 import re
 
@@ -62,10 +65,11 @@ class ProductCategoryRule(models.Model):
                     except re.error as exc:
                         raise UserError(f'Espressione non valida "{value}": {exc}')
 
-    def _applies_to(self, tmpl):
+    def _applies_to(self, tmpl, categ=None):
+        """categ: la categoria da considerare al posto di quella del prodotto (seconda passata)."""
         if not self.source_categ_ids:
             return True
-        path = tmpl.categ_id.parent_path or ''
+        path = (categ or tmpl.categ_id).parent_path or ''
         return any(path.startswith(c.parent_path) for c in self.source_categ_ids if c.parent_path)
 
     # ------------------------------------------------------------------
@@ -94,6 +98,8 @@ class ProductCategoryRule(models.Model):
         from . import category_rules_default as defaults
         if not self._category_by_path('Pesca'):
             raise UserError('Le regole predefinite sono per l\'albero "Pesca / …": qui non c\'è.')
+        renamed, merged, moved = self._apply_tree_changes(defaults.TREE_CHANGES)
+        retired = self._retire_rules(defaults.RETIRED, defaults.rules())
         created = 0
         for seq, kind, pattern, sources, target, weak, exclude in defaults.rules():
             target_categ = self._category_by_path(target, create=True)
@@ -102,8 +108,14 @@ class ProductCategoryRule(models.Model):
             if sources and not source_categs:
                 continue
             exists = self.with_context(active_test=False).search([
-                ('kind', '=', kind), ('pattern', '=', pattern), ('target_categ_id', '=', target_categ.id)], limit=1)
+                ('kind', '=', kind), ('pattern', '=', pattern), ('target_categ_id', '=', target_categ.id),
+                ('weak', '=', bool(weak)), ('exclude_pattern', '=', exclude or False), ('sequence', '=', seq)],
+                limit=1)
             if exists:
+                # "Si applica a" comparse dopo la prima creazione (es. "Nautica" creata in seguito).
+                missing = source_categs - exists.source_categ_ids
+                if missing:
+                    exists.source_categ_ids = [(4, c.id) for c in missing]
                 continue
             self.create({'sequence': seq, 'kind': kind, 'pattern': pattern, 'exclude_pattern': exclude or False,
                          'source_categ_ids': [(6, 0, source_categs.ids)], 'target_categ_id': target_categ.id,
@@ -111,7 +123,82 @@ class ProductCategoryRule(models.Model):
             created += 1
         return {'type': 'ir.actions.client', 'tag': 'display_notification',
                 'params': {'title': 'Regole di classificazione', 'type': 'success',
-                           'message': f'{created} regole create.', 'next': {'type': 'ir.actions.act_window_close'}}}
+                           'message': self._load_message(created, retired, renamed, merged, moved),
+                           'next': {'type': 'ir.actions.act_window_close'}}}
+
+    @api.model
+    def _load_message(self, created, retired, renamed, merged, moved):
+        parts = [f'{created} regole create']
+        if retired:
+            parts.append(f'{retired} regole di prima disattivate')
+        if renamed:
+            parts.append(f'{renamed} categorie rinominate')
+        if merged:
+            parts.append(f'{merged} categorie unite ({moved} prodotti spostati)')
+        return '; '.join(parts) + '.'
+
+    @api.model
+    def _apply_tree_changes(self, changes):
+        """Albero delle categorie (2026-11-26, come Nencini Sport): vecchia → nuova. Se la nuova non c'è
+        si rinomina o si sposta la vecchia (tiene prodotti, regole, corrispondenze); altrimenti si unisce: ogni campo
+        che punta alla vecchia (prodotti, regole, corrispondenze Amazon, sottocategorie…) passa alla nuova
+        e la vecchia si cancella. Ritorna (rinominate, unite, prodotti spostati)."""
+        renamed = merged = moved = 0
+        for old_path, new_path in changes:
+            old = self._category_by_path(old_path)
+            if not old:
+                continue
+            new = self._category_by_path(new_path)
+            if not new:
+                # Rinomina o sposta (es. Pesca / Minuteria / Ami → Pesca / Ami): stesso record, con le
+                # sue sottocategorie, i prodotti e ogni riferimento.
+                parent = self._category_by_path(new_path.rsplit('/', 1)[0], create=True)
+                old.write({'name': new_path.rsplit('/', 1)[1].strip(), 'parent_id': parent.id})
+                renamed += 1
+                continue
+            new = new or self._category_by_path(new_path, create=True)
+            moved += self.env['product.template'].with_context(active_test=False).search_count(
+                [('categ_id', '=', old.id)])
+            self._repoint_category(old, new)
+            old.unlink()
+            merged += 1
+        return renamed, merged, moved
+
+    @api.model
+    def _repoint_category(self, old, new):
+        """Ogni riferimento a old (many2one e many2many salvati, di qualsiasi modulo) passa a new."""
+        fields_ = self.env['ir.model.fields'].sudo().search([
+            ('relation', '=', 'product.category'), ('ttype', 'in', ('many2one', 'many2many')), ('store', '=', True)])
+        for f in fields_:
+            if f.model not in self.env or f.name not in self.env[f.model]._fields:
+                continue
+            Model = self.env[f.model].sudo().with_context(active_test=False)
+            if Model._abstract or not Model._auto:
+                continue
+            records = Model.search([(f.name, 'in', old.ids)])
+            if not records:
+                continue
+            if f.ttype == 'many2one':
+                records.write({f.name: new.id})
+            else:
+                records.write({f.name: [(3, old.id), (4, new.id)]})
+
+    @api.model
+    def _retire_rules(self, retired, current):
+        """Disattiva le regole predefinite sostituite: (tipo, testo, categoria sotto cui stanno). Resta
+        attiva quella uguale a una regola di adesso (stessa priorità, tipo, testo, categoria e "debole")."""
+        keep = {(seq, kind, pattern, target, bool(weak)) for seq, kind, pattern, _src, target, weak, _e in current}
+        count = 0
+        for kind, pattern, root_path in retired:
+            root = self._category_by_path(root_path)
+            if not root:
+                continue
+            rules = self.search([('kind', '=', kind), ('pattern', '=', pattern),
+                                 ('target_categ_id', 'child_of', root.id)]).filtered(
+                lambda r: (r.sequence, r.kind, r.pattern, r.target_categ_id.complete_name, r.weak) not in keep)
+            rules.write({'active': False})
+            count += len(rules)
+        return count
 
 
 class ProductCategoryProposal(models.Model):
@@ -169,12 +256,12 @@ class ProductCategoryProposal(models.Model):
         }
 
     @api.model
-    def _decide(self, tmpl, rules):
-        """(categoria, regola, motivo, sicura) o None."""
+    def _decide(self, tmpl, rules, categ=None):
+        """(categoria, regola, motivo, sicura) o None. categ: come se il prodotto fosse in quella categoria."""
         texts = self._texts(tmpl)
         hits = []
         for rule in rules:
-            if not rule._applies_to(tmpl):
+            if not rule._applies_to(tmpl, categ):
                 continue
             m = re.search(rule.pattern, texts[rule.kind] or '', re.I)
             if not m:
@@ -207,7 +294,10 @@ class ProductCategoryProposal(models.Model):
         differ = lambda h: h[0].target_categ_id != rule.target_categ_id and not under(rule.target_categ_id,
                                                                                       h[0].target_categ_id)
         # Nel motivo prima il disaccordo che conta (stessa priorità), poi gli altri.
-        others = sorted((h for h in hits if differ(h)), key=lambda h: (h not in top, weak(h), h[0].sequence))
+        # Una regola debole che cede a una non debole non si cita (es. il ripiego "Accessori vari").
+        chosen_weak = weak((rule, found))
+        others = sorted((h for h in hits if differ(h) and (chosen_weak or not weak(h))),
+                        key=lambda h: (h not in top, weak(h), h[0].sequence))
         if others:
             o_rule, o_found = others[0]
             reason += f' (ma {dict(KINDS)[o_rule.kind].lower()} "{o_found}" → {o_rule.target_categ_id.name})'
@@ -220,6 +310,25 @@ class ProductCategoryProposal(models.Model):
         maps = self.env['ke.amazon.category.map'].sudo().search([])
         return set(maps.mapped('key')), set(maps.mapped('categ_id').ids)
 
+    @staticmethod
+    def _under(child, parent):
+        """child è una sottocategoria (anche indiretta) di parent."""
+        return bool(child and parent) and child != parent and (child.parent_path or '').startswith(
+            parent.parent_path or '~')
+
+    @api.model
+    def _refine(self, tmpl, rules, decision):
+        """Seconda passata (2026-11-24): se il prodotto va in una categoria che ha regole sue ("si applica
+        a" Ami), le prova come se ci fosse già; vale se non è più generica della prima. Così un amo
+        appena importato va subito in "Ami / Mare" e un Penn Surfblaster ("Spinning Reels" per il
+        fornitore) in "Mulinelli / Surfcasting" invece di "Frizione anteriore"."""
+        if not decision or decision[0] == tmpl.categ_id:
+            return decision
+        second = self._decide(tmpl, rules, categ=decision[0])
+        if second and second[0] != decision[0] and not self._under(decision[0], second[0]):
+            return second
+        return decision
+
     @api.model
     def propose_for(self, templates):
         """Proposte per i prodotti dati (sostituisce quelle ancora da valutare). Ritorna il numero creato."""
@@ -231,11 +340,16 @@ class ProductCategoryProposal(models.Model):
         key_of = lambda name: re.sub(r'[^a-z0-9]', '', (name or '').lower())
         vals = []
         for tmpl in templates:
-            decision = self._decide(tmpl, rules)
-            if not decision or decision[0] == tmpl.categ_id:
+            decision = self._refine(tmpl, rules, self._decide(tmpl, rules))
+            if not decision or decision[0] == tmpl.categ_id or self._under(tmpl.categ_id, decision[0]):
                 continue
             categ, rule, reason, certain = decision
-            clash = bool(keys) and categ.id not in mapped and any(key_of(categ.name) == key_of(k) for k in keys)
+            # Dal 2026-11-26 la sync Amazon non tocca le destinazioni delle regole (né i loro rami): una
+            # categoria proposta da una regola non rischia più di essere svuotata anche se si chiama come
+            # una categoria Amazon (es. "Pesca / Abbigliamento / Guanti").
+            protected = categ in rules.mapped('target_categ_id')
+            clash = (bool(keys) and not protected and categ.id not in mapped
+                     and any(key_of(categ.name) == key_of(k) for k in keys))
             vals.append({'product_tmpl_id': tmpl.id, 'current_categ_id': tmpl.categ_id.id,
                          'proposed_categ_id': categ.id, 'rule_id': rule.id, 'reason': reason[:250],
                          'certain': certain and not clash, 'amazon_clash': clash})

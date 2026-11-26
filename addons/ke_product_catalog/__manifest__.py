@@ -1,6 +1,6 @@
 {
     'name': 'KE Product Catalog',
-    'version': '19.0.1.8.0',
+    'version': '19.0.1.29.0',
     'category': 'Sales/Sales',
     'summary': 'Catalogo prodotti comune: marca con nomi alternativi, galleria immagini come indirizzi',
     'description': """

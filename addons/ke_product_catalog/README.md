@@ -62,7 +62,110 @@ Per mettere i prodotti nella categoria giusta (il menu del sito ricalca le categ
      "Spinning" o "Casting" di Amazon, data anche ai mulinelli da surf).
 
    "**Carica regole predefinite**" crea quelle messe a punto su mulinelli e canne (circa 90),
-   e le sottocategorie che servono, senza doppioni.
+   quelle degli ami (2026-11-24) e le sottocategorie che servono, senza doppioni. Si può
+   ricaricare dopo un aggiornamento del modulo: aggiunge solo le regole nuove.
+
+   **Ami** (Pesca / Ami, prima Pesca / Minuteria / Ami): 12 sottocategorie come Nencini Sport (Acque interne, Ami
+   legati, Mare, Drifting bolentino e traina, Assist hook, Ancorette, Spinning, Jig head, Sabiki,
+   Siluro, Carpfishing, Trota), nell'ordine delle loro regole (`docs/nencini_ami_regole.md`):
+   legato → sabiki → testa piombata → assist → ancoretta → per artificiali → siluro/carpa/trota e
+   serie note → circle/girella/traina → acque interne o mare dalle parole del nome. Categoria del
+   fornitore per tutti (Tubertini "Ami Legati", "Ancorette"…; Trabucco `002/…_L` = legati,
+   `002/…_P` = ami sciolti, `019/KK-110` = K-Karp); parole nel nome solo per i prodotti in Ami
+   (un artificiale "con ancorette" non diventa un'ancoretta). Serie Tubertini come le classifica
+   Nencini (letto dal loro sito il 24/11/2026); Trabucco Pro Sword, XPS e Lucifer = acque interne.
+   **Albero come Nencini Sport (2026-11-26, una categoria alla volta).** *Carica regole
+   predefinite* porta anche l'albero: una categoria che cambia nome si rinomina (tiene prodotti,
+   regole e corrispondenze Amazon); una che sparisce si unisce alla nuova (ogni riferimento passa
+   alla nuova, poi si cancella); le regole predefinite di prima si disattivano. Fatti:
+   - **Mulinelli**: Frizione anteriore, Frizione posteriore, Casting, Surfcasting, Carpfishing,
+     Traina e drifting, Jigging, Elettrici, Bobine, Mosca, Manuali, Salpapalamito. Spinning →
+     Frizione anteriore, Ricambi e bobine → Bobine, Carpfishing e feeder → Carpfishing, Traina
+     jigging e big game → Traina e drifting; Bolognese e match e Trota e area unite in Frizione
+     anteriore. Categoria del fornitore debole dove il nome precisa (un Penn "Spinning Reels" con
+     "Surf" nel nome va in Surfcasting).
+   - **Canne**: le 22 di Nencini (All round, Bolentino, Bolognesi, Carpfishing, Casting, Da viaggio,
+     Eging, Feeder e ledgering, Fisse, Inglesi e match, Jigging e slow pitch, Luccio e siluro, Mosca,
+     Per mulinelli elettrici, Spinning, Spondini e roubaisienne, Surfcasting e beach ledgering,
+     Traina e drifting, Trota lago, Trota torrente, Trout area, Vette). Rinominate: Surfcasting,
+     Carpfishing e feeder → Carpfishing, Traina e big game → Traina e drifting, Bolentino e
+     jigging → Bolentino, Bolognese match e fisse → Bolognesi, Trota e area → Trota lago. "Casting"
+     cede all'uso (Boat → Bolentino, Trolling → Traina, Vertical → Jigging).
+   - **Fili**: Big game, Cavetti in acciaio, Code, Fluorocarbon, Fluorocoated, Nylon, Shock leader,
+     Trecciati. Monofilo → Nylon, Terminali e leader → Shock leader.
+   - **Ami**: diventa categoria principale come da Nencini (Pesca / Minuteria / Ami → **Pesca / Ami**,
+     spostata con le sue sottocategorie: stesso record). Regole sul nome ritoccate sui 2.817 titoli
+     Nencini del 26/11 (rig, bait band, leader e cm = legati; baitholder = mare; strong single =
+     spinning): concordano con Nencini 1.396 volte su 1.661 dove decidono.
+   - **Esche artificiali**: Egi, Jigs, Hard baits, Soft baits, Wire baits (cucchiaini, spinner,
+     spinnerbait). Calamaro → Egi, Jig e metal → Jigs, Hard bait e altre → Hard baits, Siliconiche →
+     Soft baits, Cucchiaini e spinner → Wire baits; Superficie unita a Hard baits. Pure Fishing dice
+     solo "Hard Bait" anche per spinner e ondulanti: decide il nome, più le serie che il nome non dice
+     (Droppen, Reflex, Toby = Wire; Seeker, Sillen, Cast Hacker = Jigs).
+   - **Esche e pasture** (prima "Esche naturali, aromi e pasturazione"): Inneschi pronti, Pasture
+     liquide, Sfarinati, Pellet, Boiles, Mais, Colla. I non-esche finiti qui dalla categoria Amazon
+     "Aromi attrattivi" (mulinelli, ami, fili…) escono con le stesse regole di mulinelli e canne.
+   - **Piombi**: categoria principale (Pesca / Minuteria / Piombi → **Pesca / Piombi**) con le 21
+     sottocategorie di Nencini (Pasturatori, Con anello inox, Plastificati, Foro passante,
+     Carpfishing, Pallini spaccati, Screw-in, Torpille e sfere, Sonde, Bullet, Drop shot, Cheburashka,
+     Bottom weights, Temolino, Nail, Guardiani, Mascotte, Sgancio rapido, Bolentino, Per affondatore,
+     Filo piombo). I pasturatori finiti in altre categorie vengono proposti qui.
+   - **Galleggianti**: categoria principale (Pesca / Minuteria / Galleggianti → **Pesca /
+     Galleggianti**): Acque interne, Mare, Bombarde, Scorrevoli, Accessori, Trota lago, Inglese,
+     Galleggianti pasturatori. Le bombarde finite altrove (es. in Esche e pasture) vengono proposte qui.
+   - **Minuteria**: Girelle, Moschettoni, Attacchi, Split ring, Perline, Componenti per il montaggio,
+     Anti-tangle, Stopper, Crimps, Solid ring, Terminali. Girelle moschettoni e anellini → Girelle,
+     Montature e altro → Terminali.
+   - **Reggicanne e supporti** (nuova, prima dentro Accessori / Carpfishing e postazione): Rod pod,
+     Reggicanne da sedia, Picchetti e puntali, Tripodi e treppiedi, Poggia kit.
+   - **Panieri** (nuova): Panchetti, Moduli, Piatti laterali, Pedane, Bracci, Cassoni surfcasting,
+     Carrelli e kit trasporto, Staffe per ombrelloni, Accessori. Trabucco 011/SEAT-3 (famiglie
+     "GENIUS", "GNT STATION" che mescolano accessori diversi) → Accessori.
+   - **Valigette e scatole** (Contenitori e borse / Cassette e scatole spostata qui): Valigette, Porta
+     artificiali, Porta minuteria e varie, Porta mosche, Porta ami, Porta terminali.
+   - **Guadini, nasse e bilance** (Accessori / Guadini e reti spostata qui): Guadini, Teste di guadino,
+     Pali per guadino, Nasse. Le bilance restano in Accessori, come da Nencini.
+   - **Borse e foderi** (prima "Contenitori e borse"): Borse generiche (prima Borse e zaini),
+     Portacanne (prima Foderi e portacanne), Borse porta artificiali (prima Borse e secchi per esche),
+     Borse EVA, Borse carpfishing (Prologic/JRC: Avenger, Defender, Element…), Borse frigo, Portanasse.
+   - **Kit pesca** (prima "Combo canna e mulinello"): 11 sottocategorie. Come Nencini, soprattutto per
+     mulinello (Spinning, Casting); per tecnica solo Carpfishing, Feeder e ledgering, Surfcasting,
+     Mosca, Traina (combo rotanti), Bolognesi. "Boat", "Trout", "Pike" sono deboli: cedono al tipo di
+     combo del fornitore. Un "Combo" finito in Mulinelli o Canne viene proposto qui.
+   - **Abbigliamento** (nuova, **Pesca / Abbigliamento**): 13 sottocategorie di Nencini (Giacche e
+     pantaloni, T-shirt, Felpe, Pantaloni e salopette, Cappelli, Occhiali, Intimo, Guanti, Completi,
+     Gilet, Pile e softshell, Polo, Camicie). Ci va solo l'abbigliamento da pesca riconosciuto dal
+     fornitore (Pure Fishing Apparel/Eyewear, Tubertini, Trabucco, K-Karp); quello generico resta in
+     "Abbigliamento e calzature" (scelta dell'utente, da rivedere).
+   - **Stivali e waders** (nuova, **Pesca / Stivali e waders**): Scarpe da wading, Stivali, Waders
+     neoprene, Waders PVC, Waders traspiranti. Come l'abbigliamento: solo da pesca (fornitore "Wading
+     Gear", o wader/wading/scafandro nel nome). Il materiale conta solo per un wader (uno stivale in
+     neoprene è uno stivale); i cosciali vanno in Stivali; le giacche da wading in Abbigliamento.
+   - **Attrezzatura da campo** (nuova): Cura del pescato, Lettini, Sedie, Tende, Ombrelloni, Sacchi a
+     pelo, Tavolini; solo l'attrezzatura da pesca (fornitore Furniture, Tents and Shelters, Unhooking
+     Mats, Sacks and Slings). Fornelli e affumicatori restano in Campeggio; le borse frigo Pure Fishing
+     vanno in Borse e foderi / Borse frigo.
+   - **Belly boat** (nuova, senza sottocategorie): belly boat, kayak e barchini da pesca con pinne,
+     pompe, supporti per ecoscandaglio e portacanne da barca (Pure Fishing "Boats and Motors" e "Rod
+     Holders"; prima in Nautica / Barche e motori).
+   - **Accessori**: le 21 sottocategorie di Nencini. Pinze coltelli e attrezzi → Pinze e forbici,
+     Segnalatori di abboccata → Avvisatori e segnalatori, Bilance e misure → Bilance; Manutenzione
+     mulinelli, Altri accessori e il resto di Carpfishing e postazione unite in Accessori vari, che
+     raccoglie (debole) anche tutto quello che non ha un posto più preciso.
+
+   *Carica regole predefinite* aggiunge alle regole già create le categorie "Si applica a" comparse
+   dopo (una regola nata quando una di quelle categorie non c'era ancora non resta incompleta).
+
+   Nomi come categorie Amazon ("Guanti", "Accessori", "Sonde"…): dal 2026-11-26 la sync Amazon
+   (`ke_amazon_sync` 19.0.1.6) non sposta e non cancella le categorie dell'albero di classificazione,
+   quindi le proposte verso di esse non sono più "da verificare" per questo motivo.
+
+   Le regole predefinite di prima restano solo se uguali a una di adesso (priorità, testo, categoria,
+   debole, eccezione); prima le regole "non è una canna" (ami, fili, borse… finiti in Canne) non
+   venivano create perché uguali a quelle dei mulinelli.
+
+   Gli ami sciolti che il nome non distingue (Hisashi senza "SW", Shinken, Lineaeffe LF) restano
+   in Ami, da sistemare a mano o con una regola nuova.
 2. **Proponi categorie** (Inventario → Configurazione → Prodotti, o dalla lista prodotti: Azioni): applica le
    regole ai prodotti di alcune categorie o a quelli selezionati.
 3. **Proposte di categoria** (Inventario → Configurazione → Prodotti): categoria attuale, **categoria proposta
@@ -73,6 +176,9 @@ Per mettere i prodotti nella categoria giusta (il menu del sito ricalca le categ
 Come si sceglie la categoria: vince la prima regola non debole (in ordine di priorità); due
 regole non deboli in disaccordo → *da verificare*, e il motivo dice quale regola dice altro.
 Una categoria e una sua sottocategoria non sono in disaccordo: vale la più specifica.
+Se la categoria trovata ha regole sue (*Si applica a*), si provano subito: un amo appena importato
+va direttamente in "Ami / Mare" senza applicare e riproporre. Nessuna proposta verso una categoria
+più generica di quella attuale (un amo già in "Ami / Mare" non torna in "Ami").
 
 Effetti sugli altri moduli:
 - **Amazon**: le categorie Amazon e le "Corrispondenze categorie" non cambiano. La sync Amazon

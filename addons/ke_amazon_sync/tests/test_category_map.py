@@ -55,6 +55,21 @@ class TestCategoryMap(TransactionCase):
         CategoryMapper(self.env).assign(force=True)
         self.assertEqual(c.categ_id, self.squid)
 
+    def test_classification_categories_are_not_legacy(self):
+        """Una categoria dell'albero di classificazione che si chiama come una categoria Amazon (es.
+        "Pesca / Abbigliamento / Guanti") non è un residuo del vecchio import (2026-11-26)."""
+        gloves = self.Category.create({'name': 'ZZT Guanti', 'parent_id': self.Category.create({'name': 'ZZT Pesca'}).id})
+        self.Map.create({'name': 'ZZT Guanti', 'categ_id': self.squid.id})
+        self.env['ke.product.category.rule'].create({'kind': 'name', 'pattern': 'guant', 'target_categ_id': gloves.id})
+        a = self._product('ZZT guanti da pesca', False, gloves)
+        b = self._product('ZZT guanti Amazon', 'ZZT Esche da calamaro', gloves)
+        CategoryMapper(self.env).assign()
+        self.assertEqual(a.categ_id, gloves, 'nessuno spostamento per nome')
+        self.assertEqual(b.categ_id, gloves, 'non è una categoria da sostituire')
+        a.categ_id = b.categ_id = self.default
+        CategoryMapper(self.env).delete_unused()
+        self.assertTrue(gloves.exists(), 'vuota ma dell\'albero: non si cancella')
+
     def test_import_builds_tree_moves_old_and_deletes_empty(self):
         old = self.Category.create({'name': 'ZZT Bait'})
         legacy = self.Category.create({'name': 'ZZT Cebos de calamar'})
