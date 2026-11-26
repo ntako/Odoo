@@ -1,11 +1,12 @@
 """Import del catalogo fornitore integrato: crea, riattiva, arricchisce (2026-11-20)."""
+import base64
 import csv
 import io
 from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
 
-from odoo.addons.ke_inventory_import.models.csv_file import file_text
+from odoo.addons.ke_inventory_import.models.csv_file import file_text, sheet_images
 from odoo.addons.ke_inventory_import.models.enrich import do_enrich
 
 
@@ -93,6 +94,26 @@ class TestCatalogCreate(TransactionCase):
         self.assertEqual(new.product_tmpl_id, existing, 'nella famiglia del prodotto già abbinato, non in una nuova')
         self.assertIn('1 aggiunte a famiglie esistenti', job.error_log)
 
+    def test_dropped_rows_not_created_nor_revived(self):
+        # Pure Fishing novembre 2026, "Drop vs New" (2026-11-24): fuori catalogo né creati né riattivati;
+        # se già attivi in Odoo, arricchiti comunque.
+        active = self.Tmpl.create({'name': 'ZZK attivo', 'default_code': 'PFS-9200001'})
+        archived = self.Tmpl.create({'name': 'ZZK archiviato', 'default_code': '9200002'})
+        archived.action_archive()
+        mapping = [('SAP', 'default_code'), ('Desc', 'name'), ('Master Description', '_supplier_name')]
+        rows = [
+            {'SAP': '9200001', 'Drop vs New': 'Dropped', 'Desc': 'A', 'Master Description': 'Nome A'},
+            {'SAP': '9200002', 'Drop vs New': 'Dropped', 'Desc': 'B', 'Master Description': 'Nome B'},
+            {'SAP': '9200003', 'Drop vs New': 'Dropped', 'Desc': 'C', 'Master Description': 'Nome C'},
+            {'SAP': '9200004', 'Drop vs New': 'Pending Drop', 'Desc': 'D', 'Master Description': 'Nome D'},
+        ]
+        job = self._run(rows, mapping, code_prefix='PFS-', create_skip_values='dropped\n')
+        self.assertFalse(archived.active, 'archiviato "Dropped": resta archiviato')
+        self.assertFalse(self._by_code('PFS-9200003'), '"Dropped": non creato')
+        self.assertTrue(self._by_code('PFS-9200004'), '"Pending Drop": creato')
+        self.assertEqual(active.ke_supplier_name, 'Nome A', 'già attivo: arricchito')
+        self.assertIn('Righe non create né riattivate ("Non creare né riattivare se"): 2', job.error_log)
+
     def test_tubertini_like_suffix_and_family_from_name(self):
         old = self.Tmpl.create({'name': 'ZZK Marginal 1,50', 'default_code': 'TUB-01007'})
         mapping = [('Codice', 'default_code'), ('Descrizione', 'name'), ('Barcode EAN13', 'barcode'),
@@ -104,7 +125,10 @@ class TestCatalogCreate(TransactionCase):
             {'Codice': '01009XX', 'Descrizione': 'ZZK Marginal Carp X 2,10 Mt.', 'Barcode EAN13': '8000000000069',
              'Prezzo Listino': '15.98'},
         ]
-        self._run(rows, mapping, code_prefix='TUB-', code_suffix='XX', brand_name='Tubertini', family_from_name=True)
+        job = self._run(rows, mapping, code_prefix='TUB-', code_suffix='XX', brand_name='Tubertini',
+                        family_from_name=True)
+        self.assertNotIn('TUB-01007', job.error_log.split('che non sono nel file')[-1],
+                         'resoconto: "01007XX" è nel file (senza suffisso)')
         v8, v9 = self._by_code('TUB-01008'), self._by_code('TUB-01009')
         self.assertEqual(old.product_variant_id.standard_price, 12.1, '"01007XX" = TUB-01007')
         self.assertEqual(v8.product_tmpl_id, v9.product_tmpl_id, 'stessa famiglia dal nome')
@@ -142,6 +166,50 @@ class TestCatalogCreate(TransactionCase):
         rows = list(csv.reader(io.StringIO(file_text(buf.getvalue(), ';')), delimiter=';'))
         self.assertEqual(rows[0], ['Codice', 'Descrizione', 'Barcode EAN13', 'Prezzo'])
         self.assertEqual(rows[1], ['01007XX', 'Marginal 1,50', '8053831480369', '12.1'])
+
+    def test_c4_sheet_images_on_model_rows(self):
+        """Fotolistino C4 (2026-11-24): immagine sulla riga del modello → immagine principale dei suoi prodotti."""
+        import openpyxl
+        from openpyxl.drawing.image import Image as XlImage
+        from PIL import Image
+
+        def png(color):
+            buf = io.BytesIO()
+            Image.new('RGB', (40, 30), color).save(buf, 'PNG')
+            buf.seek(0)
+            return buf
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(['FOTOLISTINO'])
+        ws.add_image(XlImage(png('black')), 'A1')            # logo sopra l'intestazione: non conta
+        ws.append(['LINEA', 'IMMAGINE', 'MODELLO', 'CODICE', 'DESCRIZIONE'])
+        ws.append(['C4', None, 'ZZK PINNE ROSSE', None, None])     # riga 3: modello con immagine
+        ws.add_image(XlImage(png('red')), 'B3')
+        ws.append(['C4', None, None, 'ZZKR1', 'Pinna rossa 36'])
+        ws.append(['C4', None, None, 'ZZKR2', 'Pinna rossa 38'])
+        ws.append([None] * 5)                                     # riga vuota: non c'è nel testo
+        ws.append(['C4', None, 'ZZK MASCHERA', None, None])      # modello senza immagine
+        ws.append(['C4', None, None, 'ZZKM1', 'Maschera nera'])
+        ws.append(['C4', None, 'ZZK PINNE BLU', None, None])
+        ws.add_image(XlImage(png('blue')), 'B9')
+        ws.append(['C4', None, None, 'ZZKB1', 'Pinna blu 36'])
+        buf = io.BytesIO()
+        wb.save(buf)
+        content = buf.getvalue()
+        images = sheet_images(content)
+        self.assertEqual(sorted(images), [1, 6], 'righe dei due modelli con immagine, contate come nel testo')
+        with_image = self.Tmpl.create({'name': 'ZZK blu già con immagine', 'default_code': 'C4C-ZZKB1',
+                                       'image_1920': base64.b64encode(png('green').getvalue())})
+        mapping = [('CODICE', 'default_code'), ('DESCRIZIONE', 'name'), ('MODELLO', '_supplier_family_name')]
+        rows = list(csv.DictReader(io.StringIO(file_text(content, ';')), delimiter=';'))
+        job = self._run(rows, mapping, code_prefix='C4C-', sheet_images=images)
+        red, mask = self._by_code('C4C-ZZKR1').product_tmpl_id, self._by_code('C4C-ZZKM1').product_tmpl_id
+        self.assertEqual(red, self._by_code('C4C-ZZKR2').product_tmpl_id)
+        self.assertTrue(red.image_1920, 'immagine del modello sul prodotto')
+        self.assertFalse(mask.image_1920, 'modello senza immagine: niente (non quella del modello prima)')
+        self.assertEqual(with_image.image_1920, base64.b64encode(png('green').getvalue()), 'immagine esistente')
+        self.assertIn('Immagini nel foglio: 2; messe come immagine principale su 1 prodotti', job.error_log)
 
     def test_excel_numbered_row_above_header(self):
         """File Pure Fishing EMEA: riga di numeri di colonna e riga di indirizzi sopra l'intestazione."""

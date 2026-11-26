@@ -68,6 +68,8 @@ class InventoryMappingPreset(models.Model):
         help='Per i file senza codice famiglia: articoli con lo stesso nome a meno delle misure finali '
              '("Marginal Carp X 1,50 Mt.", "… 1,80 Mt.") sono la stessa famiglia.')
 
+    create_skip_values = fields.Text('Non creare né riattivare se')
+    sheet_images = fields.Boolean('Immagini incollate nel foglio')
     # Giacenze e costi dal magazzino (2026-11-24): vedi inventory.import.job.
     stock_mode = fields.Boolean('Giacenze e costi dal magazzino')
     qty_skip_values = fields.Text('Niente quantità per')
@@ -151,6 +153,10 @@ class InventoryMappingPreset(models.Model):
         ],
     }
 
+    # File di novembre 2026, colonna "Drop vs New": i fuori catalogo non si creano né si riattivano
+    # (decisione 2026-11-24); "Pending Drop" e "New" sì.
+    _PUREFISHING_SKIP = 'Dropped'
+
     @api.model
     def _ke_create_purefishing_enrich_preset(self):
         """Preset di arricchimento del catalogo Pure Fishing EMEA (2026-11-17), se non c'è già."""
@@ -179,6 +185,7 @@ class InventoryMappingPreset(models.Model):
         self.create({
             'name': conf['name'], 'delimiter': ';', 'enrich_only': True, 'code_prefix': 'PFS-',
             'match_ean': True, 'spec_text_lang': 'en_GB', 'weight_unit': 'kg', 'volume_unit': 'cm',
+            'create_skip_values': self._PUREFISHING_SKIP,
             'line_ids': [(0, 0, l) for l in lines],
         })
 
@@ -202,7 +209,8 @@ class InventoryMappingPreset(models.Model):
          'fields': [('CODICE', 'default_code'), ('Codice a barre', 'barcode'), ('DESCRIZIONE', 'name'),
                     ('MODELLO + link', '_supplier_family_name'), ('LINEA', '_brand'),
                     ('LINEA', '_supplier_category'), ('FAMIGLIA', '_supplier_category'),
-                    ('Riservato', 'standard_price')]},
+                    ('Riservato', 'standard_price')],
+         'sheet_images': True},   # 321 immagini nel foglio, una per modello (2026-11-24)
     ]
 
     @api.model
@@ -213,12 +221,15 @@ class InventoryMappingPreset(models.Model):
             if existing:
                 if conf.get('brand_name') and not existing.brand_name:
                     existing.brand_name = conf['brand_name']
+                if conf.get('sheet_images') and not existing.sheet_images:
+                    existing.sheet_images = True
                 continue
             self.create({
                 'name': conf['name'], 'delimiter': ';', 'enrich_only': True, 'match_ean': True,
                 'create_missing': True,   # decisione 2026-11-20: si creano tutti gli articoli del listino
                 'code_prefix': conf['code_prefix'], 'code_suffix': conf.get('code_suffix') or False,
                 'brand_name': conf.get('brand_name') or False, 'family_from_name': conf.get('family_from_name'),
+                'sheet_images': conf.get('sheet_images', False),
                 'line_ids': [(0, 0, {'csv_column': c, 'target': t, 'sequence': (i + 1) * 10})
                              for i, (c, t) in enumerate(conf['fields'])],
             })
@@ -253,12 +264,14 @@ class InventoryMappingPreset(models.Model):
         """
         Preset Pure Fishing creato prima del 2026-11-20: aggiunge le colonne arrivate dopo, se mancano —
         famiglia del fornitore ("Master code", "Master Description"), marca ("Brand") e specifica "Misura"
-        (Reel Size…).
+        (Reel Size…) — e "Non creare né riattivare se: Dropped" se vuoto.
         A ogni aggiornamento del modulo: una colonna tolta a mano ritorna (si toglie di nuovo senza problemi).
         """
         preset = self.search([('name', '=', self._PUREFISHING_ENRICH['name'])], limit=1)
         if not preset:
             return
+        if not preset.create_skip_values:
+            preset.create_skip_values = self._PUREFISHING_SKIP
         seq = max(preset.line_ids.mapped('sequence') or [0])
         new = []
         if not preset.line_ids.filtered(lambda l: l.target == '_supplier_family_ref'):

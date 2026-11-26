@@ -18,6 +18,7 @@ anche con "+"), poi EAN senza zeri iniziali — e scrive, secondo il mapping:
 - peso e dimensioni solo se il prodotto non li ha.
 "Solo verifica" conta senza scrivere. Il riepilogo va nel log del lavoro.
 """
+import base64
 import csv
 import io
 import logging
@@ -166,6 +167,8 @@ def do_enrich(job, env, file_string, options, cr, cancel_event=None):
                                                    '_weight_unit', '_dim_unit')}
 
     matched = unmatched = costs_written = media_written = 0
+    # Immagini incollate nel foglio (2026-11-24): quella della riga del modello vale per le righe sotto.
+    sheet_images, current_image, imaged, images_written = options.get('sheet_images') or {}, None, set(), 0
     seen, texts_written, spec_writes, dims_written, spec_found = set(), {}, 0, 0, {}
     names = {}   # template → nomi commerciali delle sue righe (famiglie: la parte comune)
     families = {}   # variante → [codice famiglia, nome, abbinata per codice, ambigua]
@@ -178,7 +181,9 @@ def do_enrich(job, env, file_string, options, cr, cancel_event=None):
         code = match_key(raw)
         family = row_families.of(row, raw)
         if family is None:          # riga di intestazione (nessun codice): vale per le righe che seguono
+            current_image = sheet_images.get(n)
             continue
+        image = sheet_images.get(n) or current_image
         if not ids:
             unmatched += 1
             continue
@@ -205,6 +210,12 @@ def do_enrich(job, env, file_string, options, cr, cancel_event=None):
             seen.add(tmpl.id)
             if supplier_name:
                 names.setdefault(tmpl.id, []).append(supplier_name)
+            if image and tmpl.id not in imaged:
+                imaged.add(tmpl.id)
+                if not tmpl.image_1920:   # mai sopra un'immagine che c'è già (Amazon, a mano)
+                    if not dry_run:
+                        tmpl.image_1920 = base64.b64encode(image)
+                    images_written += 1
             if dry_run:
                 continue
             variant_vals = {}
@@ -275,7 +286,7 @@ def do_enrich(job, env, file_string, options, cr, cancel_event=None):
     ambiguous = sum(1 for f in families.values() if f[3])
     labels = {c: SPEC_KEYS[c][1]['it_IT'] if c in SPEC_KEYS else c for c in spec_found}
     prefix = (options.get('code_prefix') or '').upper()
-    file_codes = {next((code_key(_value(r, l)) for l in code_lines), '') for r in rows}
+    file_codes = {match_key(next((_value(r, l) for l in code_lines), '')) for r in rows}   # senza suffisso (Tubertini "XX")
     missing = sorted(c for c in by_code if c not in file_codes)
     summary = [
         'ARRICCHIMENTO — VERIFICA (nessuna modifica scritta)' if dry_run else 'ARRICCHIMENTO ESEGUITO',
@@ -299,6 +310,10 @@ def do_enrich(job, env, file_string, options, cr, cancel_event=None):
             f'{len(families) - ambiguous} varianti'
             + (f' ({families_written} scritte o cambiate)' if not dry_run else '')
             + (f'; {ambiguous} varianti con famiglie diverse dallo stesso EAN, lasciate com\'erano' if ambiguous else ''))
+    if sheet_images:
+        summary.append(f'Immagini nel foglio: {len(sheet_images)}; '
+                       f'{"da mettere" if dry_run else "messe"} come immagine principale su {images_written} prodotti '
+                       f'(senza immagine); {len(imaged) - images_written} prodotti l\'avevano già')
     if spec_found:
         summary.append('Specifiche trovate nelle righe abbinate: ' + ', '.join(
             f'{labels[c]} {n}' for c, n in sorted(spec_found.items(), key=lambda kv: -kv[1])))
@@ -351,7 +366,9 @@ def _create_missing(env, rows, options, match, match_key, row_ean, lines_by, by_
     loro famiglia. Ritorna (resoconto, prodotti toccati).
     """
     report = {'revived': 0, 'variants_created': 0, 'families_new': 0, 'families_existing': 0,
-              'families': 0, 'skipped_ean': 0, 'errors': [], 'names': 0}
+              'families': 0, 'skipped_ean': 0, 'errors': [], 'names': 0, 'not_created': 0}
+    # Righe da non creare né riattivare (es. Pure Fishing "Dropped", 2026-11-24): se una cella è uguale.
+    skip = {v.strip().casefold() for v in (options.get('create_skip_values') or '').splitlines() if v.strip()}
     prefix = (options.get('code_prefix') or '').strip()
     arch_code, arch_raw, arch_ean = archived_index(env, prefix, code_key, ean_key)
     families = RowFamilies(lines_by, options, _value)
@@ -373,6 +390,9 @@ def _create_missing(env, rows, options, match, match_key, row_ean, lines_by, by_
                 matched.setdefault(family[0], set()).update(ids)
                 for vid in ids:
                     refs_of.setdefault(vid, set()).add(family[0])
+            continue
+        if skip and any(str(c or '').strip().casefold() in skip for c in row.values()):
+            report['not_created'] += 1      # già attivo in Odoo: arricchito comunque (ramo sopra)
             continue
         key = match_key(raw)
         if key in seen_codes:          # stessa riga due volte nel file
@@ -464,6 +484,8 @@ def _created_summary(report, dry_run):
         lines = [f'CREAZIONE: {report["revived"]} prodotti archiviati riattivati; {report["variants_created"]} '
                  f'articoli creati — {report["families_new"]} famiglie nuove, {report["families_existing"]} '
                  f'aggiunte a famiglie esistenti; nomi applicati a {report["names"]} prodotti']
+    if report['not_created']:
+        lines.append(f'Righe non create né riattivate ("Non creare né riattivare se"): {report["not_created"]}')
     if report['skipped_ean']:
         lines.append(f'Articoli creati senza EAN (EAN già usato da un altro prodotto): {report["skipped_ean"]}')
     if report['errors']:

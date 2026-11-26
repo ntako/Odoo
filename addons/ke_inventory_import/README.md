@@ -265,6 +265,10 @@ ha famiglie e il preset ha **"Famiglie dal nome"**, il nome senza le misure fina
 Mt." → "Marginal Carp X"; Trabucco: la parte prima di "*"). Righe senza codice con un nome famiglia (righe
 di intestazione, es. fotolistino C4) valgono per le righe successive. Nome di partenza delle varianti: la
 parte del nome che cambia ("1,50 Mt."), poi quello dalle specifiche dove ci sono.
+**"Non creare né riattivare se"** (2026-11-24): valori uno per riga; una riga con una cella uguale (senza
+maiuscole) non crea l'articolo e non riattiva l'archiviato; se è già attivo in Odoo viene arricchito
+comunque. Preset Pure Fishing: "Dropped" (colonna "Drop vs New" del file di novembre 2026: fuori catalogo;
+"Pending Drop" e "New" si creano).
 
 L'arricchimento scrive anche: **codice fornitore per variante**, **costo** (colonna "Prezzo costo" =
 listino del fornitore; solo dove il costo manca o era già del listino, mai sopra il costo manuale — vedi
@@ -277,6 +281,11 @@ indirizzi nella galleria (colonna "Immagine (indirizzo)"). Alla fine i nomi del 
 intestazione = la prima, tra le prime 15, con quasi tante celle di testo quante la più piena (numeri e
 indirizzi web non contano: salta righe di titolo e la riga 1, 2, 3… del file Pure Fishing); numeri interi
 senza ".0".
+
+**"Immagini incollate nel foglio"** (2026-11-24, preset C4): un .xlsx con le immagini dentro il foglio;
+l'immagine sulla riga di un modello diventa l'immagine principale (`image_1920`) dei suoi prodotti, quella su
+una riga articolo vale per quell'articolo; mai sopra un'immagine che c'è già. Fotolistino C4 2027: 320
+immagini, 940 articoli su 1.405. Rilanciare il file le aggiunge ai prodotti già creati.
 
 Preset creati all'installazione: Pure Fishing EMEA, Trabucco, Tubertini, Lineaeffe, C4 / H.Dessault (file
 in `docs/Fornitori`).

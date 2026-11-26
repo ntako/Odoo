@@ -205,3 +205,16 @@ class TestSupplierCatalog(TransactionCase):
         self._run()
         self.assertEqual(self._specs(self.reel, 'it_IT')['color'], 'Lemon Back')
         self.assertEqual(self._specs(self.reel, 'de_DE')['color'], 'Lemon Back')
+
+
+@tagged('post_install', '-at_install')
+class TestSpecZero(TransactionCase):
+    """File Pure Fishing di novembre 2026 (2026-11-24): "0" vuol dire "nessun dato"."""
+
+    def test_zero_is_no_value(self):
+        from odoo.addons.ke_product_catalog.spec_rules import parse_spec
+        for code in ('bearings', 'guides', 'hooks', 'gear_ratio', 'length'):
+            for zero in ('0', '0.0', '0,00', ' 0 '):
+                self.assertIsNone(parse_spec(code, [zero]), f'{code} {zero!r}')
+        self.assertEqual(parse_spec('bearings', ['0', '8']), ('text_all', '8'), 'vale la colonna successiva')
+        self.assertEqual(parse_spec('bearings', ['10']), ('text_all', '10'))

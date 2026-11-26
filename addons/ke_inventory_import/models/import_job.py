@@ -1531,6 +1531,15 @@ class InventoryImportJob(models.Model):
         'Famiglie dal nome',
         help='Per i file senza codice famiglia: articoli con lo stesso nome a meno delle misure finali '
              '("Marginal Carp X 1,50 Mt.", "… 1,80 Mt.") sono la stessa famiglia.')
+    sheet_images = fields.Boolean(
+        'Immagini incollate nel foglio',
+        help='File Excel con le immagini dentro il foglio (fotolistino C4): l\'immagine sulla riga di un modello '
+             'diventa l\'immagine principale dei suoi prodotti, solo se non ne hanno già una.')
+    create_skip_values = fields.Text(
+        'Non creare né riattivare se',
+        help='Uno per riga: se una cella della riga è uguale (es. "Dropped" nella colonna "Drop vs New" di Pure '
+             'Fishing) l\'articolo non viene creato e, se archiviato, resta archiviato. Se è già attivo in Odoo '
+             'viene comunque aggiornato con i dati del file.')
     # Giacenze e costi dal file del magazzino (2026-11-24, ke_inventory_import/models/stock_cost.py).
     stock_mode = fields.Boolean(
         'Giacenze e costi dal magazzino',
@@ -1603,6 +1612,7 @@ class InventoryImportJob(models.Model):
                 'match_ean': self.match_ean, 'spec_text_lang': self.spec_text_lang,
                 'create_missing': self.create_missing, 'code_suffix': self.code_suffix,
                 'brand_name': self.brand_name, 'family_from_name': self.family_from_name,
+                'create_skip_values': self.create_skip_values, 'sheet_images': self.sheet_images,
                 'stock_mode': self.stock_mode, 'qty_skip_values': self.qty_skip_values,
                 'sublocations': self.sublocations, 'stock_location_id': self.location_id.id}
 
@@ -1630,6 +1640,8 @@ class InventoryImportJob(models.Model):
         self.code_suffix = preset.code_suffix
         self.brand_name = preset.brand_name
         self.family_from_name = preset.family_from_name
+        self.create_skip_values = preset.create_skip_values
+        self.sheet_images = preset.sheet_images
         self.stock_mode = preset.stock_mode
         self.qty_skip_values = preset.qty_skip_values
         self.sublocations = preset.sublocations
@@ -1817,6 +1829,8 @@ class InventoryImportJob(models.Model):
             code_suffix=(self.code_suffix or '').strip(),
             brand_name=(self.brand_name or '').strip(),
             family_from_name=self.family_from_name,
+            create_skip_values=self.create_skip_values or '',
+            sheet_images=self._sheet_images(),
             supplier_tag=(self.code_prefix or '').strip() or (self.preset_id.name or ''),
             enrich_mapping=[{
                 'column': l.csv_column or '', 'target': l.target, 'default': l.default_value or '',
@@ -1837,6 +1851,13 @@ class InventoryImportJob(models.Model):
         ).start()
         return {'type': 'ir.actions.act_window', 'res_model': self._name, 'res_id': self.id,
                 'view_mode': 'form', 'target': 'current'}
+
+    def _sheet_images(self):
+        """Immagini incollate nel foglio Excel, se l'opzione è attiva (csv_file.sheet_images)."""
+        if not self.sheet_images:
+            return {}
+        from .csv_file import sheet_images
+        return sheet_images(base64.b64decode(self._get_file_data() or b''))
 
     def _run_stock(self, file_string):
         """Giacenze e costi dal file del magazzino (stock_cost.py), nel thread di sempre."""

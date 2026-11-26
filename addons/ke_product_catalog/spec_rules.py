@@ -288,6 +288,9 @@ def _number_spec(code, text):
     return None
 
 
+_ZERO = re.compile(r'0+(?:[.,]0+)?')
+
+
 def parse_spec(code, values, text_lang='en_GB'):
     """
     Valore di una specifica da uno o più testi (es. colonne di un catalogo
@@ -295,7 +298,9 @@ def parse_spec(code, values, text_lang='en_GB'):
     testi (es. categoria e sottocategoria per la tecnica); altrimenti vale il
     primo testo che dà un valore valido. None se niente di utile.
     """
-    texts = [clean(v) for v in values if clean(v)]
+    # Uno zero da solo non è un valore (2026-11-24): il file Pure Fishing di novembre 2026 scrive "0" per
+    # "nessun dato" (Bearing Count 18.896 righe, Number of guides 18.065, Number of Hooks 15.548).
+    texts = [t for t in (clean(v) for v in values) if t and not _ZERO.fullmatch(t)]
     if not texts:
         return None
     if code in VOCAB_SPECS:

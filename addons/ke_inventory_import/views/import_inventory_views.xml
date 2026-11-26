@@ -46,6 +46,9 @@
                             <field name="code_suffix" invisible="not enrich_only"/>
                             <field name="brand_name" invisible="not enrich_only"/>
                             <field name="family_from_name" invisible="not enrich_only"/>
+                            <field name="create_skip_values" invisible="not enrich_only or not create_missing"
+                                   placeholder="Dropped"/>
+                            <field name="sheet_images" invisible="not enrich_only"/>
                             <field name="stock_mode" invisible="enrich_only"/>
                             <field name="stock_location_id" invisible="not stock_mode"/>
                             <field name="sublocations" invisible="not stock_mode"/>
@@ -215,6 +218,9 @@
                             <field name="code_suffix" invisible="not enrich_only"/>
                             <field name="brand_name" invisible="not enrich_only"/>
                             <field name="family_from_name" invisible="not enrich_only"/>
+                            <field name="create_skip_values" invisible="not enrich_only or not create_missing"
+                                   placeholder="Dropped"/>
+                            <field name="sheet_images" invisible="not enrich_only"/>
                             <field name="dry_run" invisible="not enrich_only"/>
                         </group>
                         <group string="Opzioni" invisible="enrich_only or stock_mode">
@@ -305,7 +311,7 @@
                     </group>
 
                     <group string="Log Errori" invisible="not error_log">
-                        <field name="error_log" widget="text" nolabel="1" readonly="1"/>
+                        <field name="error_log" widget="text" nolabel="1" readonly="1" colspan="2"/>
                     </group>
                     <field name="report_attachment_id" invisible="1"/>
                 </sheet>

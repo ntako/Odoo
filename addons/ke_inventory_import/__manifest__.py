@@ -1,6 +1,6 @@
 {
     'name': 'KE Inventory Import',
-    'version': '19.0.1.4',
+    'version': '19.0.1.7',
     'installable': True,
     'application': True,
     'summary': 'Import inventory products from CSV',

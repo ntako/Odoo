@@ -56,6 +56,35 @@ def file_text(content, delimiter=';'):
         return content.decode('latin-1')
 
 
+def sheet_images(content):
+    """
+    Immagini incollate nel primo foglio di un .xlsx (2026-11-24, fotolistino C4: una per modello, sulla riga del
+    modello). {numero della riga come nel testo di file_text (1 = prima riga dopo l'intestazione): byte}.
+    Le immagini sopra l'intestazione (logo) e su righe vuote non contano.
+    """
+    if content[:4] != b'PK\x03\x04':
+        return {}
+    import openpyxl
+    sheet = openpyxl.load_workbook(io.BytesIO(content)).worksheets[0]   # non read_only: serve per le immagini
+    by_row = {}
+    for image in getattr(sheet, '_images', []):
+        try:
+            by_row.setdefault(image.anchor._from.row, image._data())
+        except Exception:   # immagine illeggibile: si salta
+            continue
+    if not by_row:
+        return {}
+    rows = list(sheet.iter_rows(values_only=True))
+    start = _header_index(rows)
+    out, n = {}, -1
+    for i, row in enumerate(rows[start:], start):
+        if any(_cell(v) for v in row):   # stesse righe di file_text
+            n += 1
+            if n and i in by_row:
+                out[n] = by_row[i]
+    return out
+
+
 class InventoryCsvFile(models.Model):
     _name = 'inventory.csv.file'
     _description = 'CSV File Library'
